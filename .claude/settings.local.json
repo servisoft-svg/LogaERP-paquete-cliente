@@ -62,7 +62,8 @@
       "Bash(lsof -i:5173 -sTCP:LISTEN)",
       "Bash(gh auth:*)",
       "Bash(git --version)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
