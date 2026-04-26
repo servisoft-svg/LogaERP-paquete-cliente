@@ -92,7 +92,7 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
   const envaseSel = productos.find(p => p.id === envaseId);
 
   // Multiplier detection
-  const multMatch = envaseSel?.nombre.match(/(?:caja|pal[eé]|palet)\s*(\d+)/i);
+  const multMatch = envaseSel?.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
   const mult = multMatch ? parseInt(multMatch[1], 10) : 1;
   const cantNum = parseInt(cantidad) || 0;
   const totalUds = cantNum * mult;
@@ -225,10 +225,17 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1.5">4. Cantidad</label>
+                    <label className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1.5">
+                      4. Cantidad {mult > 1 ? `(${envaseSel?.nombre?.match(/caja|pal[eé]|palet/i)?.[0] ?? 'cajas'})` : '(unidades)'}
+                    </label>
                     <input type="number" min="1" step="1" value={cantidad} onChange={e => setCantidad(e.target.value)}
-                      placeholder="Ej: 50"
+                      placeholder={mult > 1 ? `Ej: 10 (= ${10 * mult} ud)` : 'Ej: 50'}
                       className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-lg font-bold text-center font-mono focus:border-emerald-400 outline-none" />
+                    {mult > 1 && cantNum > 0 && (
+                      <p className="text-[10px] text-emerald-600 font-bold mt-1 text-center">
+                        {cantNum} {envaseSel?.nombre?.match(/caja|pal[eé]|palet/i)?.[0] ?? 'envases'} × {mult} ud = {totalUds.toLocaleString('es-ES')} unidades totales
+                      </p>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -271,13 +278,21 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
                   <div className="flex justify-between"><span className="text-gray-500">Cola:</span><span className="font-bold text-gray-800">{colaSel.nombre}</span></div>
                   <div className="flex justify-between"><span className="text-gray-500">Envase:</span><span className="font-bold text-gray-800">{envaseSel.nombre}</span></div>
                   <div className="border-t border-emerald-100 pt-2 mt-1 space-y-1">
-                    {mult > 1 && <div className="flex justify-between"><span className="text-gray-500">{cantNum} × {mult} ud/envase =</span><span className="font-bold">{totalUds.toLocaleString('es-ES')} ud</span></div>}
+                    {mult > 1 && (
+                      <>
+                        <div className="flex justify-between"><span className="text-gray-500">Envases:</span><span className="font-bold">{cantNum} {envaseSel.nombre}</span></div>
+                        <div className="flex justify-between"><span className="text-gray-500">{cantNum} × {mult} ud/envase =</span><span className="font-bold">{totalUds.toLocaleString('es-ES')} ud</span></div>
+                      </>
+                    )}
                     <div className="flex justify-between">
-                      <span className="text-gray-500">Cola necesaria:</span>
+                      <span className="text-gray-500">Cola necesaria{pesoUd > 0 ? ` (${totalUds} ud × ${pesoUd} kg)` : ''}:</span>
                       <span className={clsx('font-bold', colaNecesaria <= parseFloat(colaSel.stock_actual) ? 'text-emerald-600' : 'text-loga-red')}>
                         {colaNecesaria.toLocaleString('es-ES', { maximumFractionDigits: 2 })} kg
                       </span>
                     </div>
+                    {mult > 1 && (
+                      <div className="flex justify-between"><span className="text-gray-500">Envases a consumir:</span><span className="font-bold">{cantNum}</span></div>
+                    )}
                     <div className="flex justify-between"><span className="text-gray-500">Produccion:</span><span className="font-black text-emerald-600 text-lg">{totalUds.toLocaleString('es-ES')} ud</span></div>
                   </div>
                 </motion.div>

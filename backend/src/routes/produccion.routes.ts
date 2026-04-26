@@ -4,6 +4,8 @@ import path from 'path';
 import { produccionController } from '../controllers/produccion.controller';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { isAllowedExtension } from '../lib/fileValidation';
+import { alertaService } from '../services/alerta.service';
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, path.join(process.cwd(), 'uploads')),
@@ -22,7 +24,7 @@ const uploadImages = multer({
   },
 });
 
-// Archivos generales (PDF, docs, imagenes)
+// Archivos generales (PDF, docs, imagenes) — with extension whitelist
 const uploadFiles = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, path.join(process.cwd(), 'uploads')),
@@ -32,6 +34,10 @@ const uploadFiles = multer({
     },
   }),
   limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (isAllowedExtension(file.originalname)) cb(null, true);
+    else cb(new Error('Tipo de archivo no permitido'));
+  },
 });
 
 const router = Router();
@@ -102,17 +108,25 @@ router.post('/envasado-rapido', async (req, res) => {
       return res.status(400).json({ error: 'Cola y cantidad son obligatorios.' });
     }
 
-    // Obtener datos de cola y envase
-    const { rows: [cola] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [cola_id]);
-    const { rows: [envase] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [envase_id]);
+    // Obtener datos de cola y envase (ALL queries use client for SERIALIZABLE)
+    const { rows: [cola] } = await client.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1 FOR UPDATE`, [cola_id]);
+    const { rows: [envase] } = envase_id ? await client.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1 FOR UPDATE`, [envase_id]) : { rows: [null as any] };
 
-    if (!cola || !envase) return res.status(404).json({ error: 'Producto no encontrado.' });
+    if (!cola) return res.status(404).json({ error: 'Cola no encontrada.' });
 
-    // Calcular peso por envase desde nombre o peso_unitario_kg
-    const { rows: [envInfo] } = await pool.query(`SELECT peso_unitario_kg FROM productos WHERE id = $1`, [envase_id]);
+    // ── Box/Pallet multiplier: detect "Caja 18" or "Palé 60" in envase name ──
+    let multiplicador = 1;
+    if (envase) {
+      const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
+      if (multMatch) multiplicador = parseInt(multMatch[1], 10);
+    }
+    const totalUnidades = cantidad_unidades * multiplicador; // actual units to produce
+    const cantidadEnvases = cantidad_unidades; // boxes/pallets consumed
+
+    // Calcular peso por envase desde peso_unitario_kg del producto envasado o del envase
+    const { rows: [envInfo] } = await client.query(`SELECT peso_unitario_kg FROM productos WHERE id = $1`, [envase_id || cola_id]);
     let pesoEnvase = parseFloat(envInfo?.peso_unitario_kg ?? '0');
-    if (!pesoEnvase) {
-      // Intentar parsear del nombre: "250g" → 0.25, "5kg" → 5, "25L" → 25
+    if (!pesoEnvase && envase) {
       const match = envase.nombre.match(/(\d+(?:\.\d+)?)\s*(g|kg|L)/i);
       if (match) {
         pesoEnvase = parseFloat(match[1]);
@@ -121,37 +135,36 @@ router.post('/envasado-rapido', async (req, res) => {
     }
     if (!pesoEnvase) return res.status(400).json({ error: 'No se puede determinar el peso del envase. Define peso_unitario_kg en el producto.' });
 
-    const pesoTotal = pesoEnvase * cantidad_unidades;
+    const pesoTotal = pesoEnvase * totalUnidades;
 
     // Verificar stock
     const stockCola = parseFloat(cola.stock_actual);
     if (stockCola < pesoTotal) return res.status(422).json({ error: `Stock insuficiente de ${cola.nombre}: necesitas ${pesoTotal.toFixed(1)} kg, tienes ${stockCola.toFixed(1)} kg.` });
-    if (envase_id) {
+    if (envase_id && envase) {
       const stockEnvase = parseFloat(envase.stock_actual);
-      if (stockEnvase < cantidad_unidades) return res.status(422).json({ error: `Stock insuficiente de ${envase.nombre}: necesitas ${cantidad_unidades}, tienes ${Math.floor(stockEnvase)}.` });
+      if (stockEnvase < cantidadEnvases) return res.status(422).json({ error: `Stock insuficiente de ${envase.nombre}: necesitas ${cantidadEnvases}, tienes ${Math.floor(stockEnvase)}.` });
     }
 
     // Buscar o crear producto envasado (PE)
     const fmtLabel = formato_label || envase?.nombre || `${pesoEnvase}kg`;
     const peNombre = `${cola.nombre} ${fmtLabel}`;
-    let { rows: [pe] } = await pool.query(
+    let { rows: [pe] } = await client.query(
       `SELECT id, nombre FROM productos WHERE nombre ILIKE $1 AND tipo = 'producto_envasado' LIMIT 1`,
       [`%${cola.nombre}%${fmtLabel.split(' ')[0]}%`]
     );
     if (!pe) {
-      // Buscar con match más amplio
-      ({ rows: [pe] } = await pool.query(
+      ({ rows: [pe] } = await client.query(
         `SELECT id, nombre FROM productos WHERE nombre ILIKE $1 AND tipo = 'producto_envasado' LIMIT 1`,
         [`%${peNombre}%`]
       ));
     }
     if (!pe) {
-      const { rows: [maxCode] } = await pool.query(`SELECT codigo FROM productos WHERE codigo LIKE 'PE-%' ORDER BY codigo DESC LIMIT 1`);
+      const { rows: [maxCode] } = await client.query(`SELECT codigo FROM productos WHERE codigo LIKE 'PE-%' ORDER BY codigo DESC LIMIT 1`);
       let nextNum = 1;
       if (maxCode) { const m = maxCode.codigo.match(/PE-(\d+)/); if (m) nextNum = parseInt(m[1], 10) + 1; }
       const codigo = `PE-${String(nextNum).padStart(3, '0')}`;
       const costePE = (parseFloat(cola.coste_medio_actual || cola.precio_unitario) * pesoEnvase) + parseFloat(envase?.coste_medio_actual || envase?.precio_unitario || '0');
-      const { rows: [nuevo] } = await pool.query(
+      const { rows: [nuevo] } = await client.query(
         `INSERT INTO productos (codigo, nombre, tipo, unidad_medida, peso_unitario_kg, granel_id, precio_unitario)
          VALUES ($1, $2, 'producto_envasado', 'ud', $3, $4, $5) RETURNING id, nombre`,
         [codigo, peNombre, pesoEnvase, cola_id, costePE.toFixed(6)]
@@ -160,17 +173,20 @@ router.post('/envasado-rapido', async (req, res) => {
     }
 
     // ── CREAR ORDEN DE PRODUCCIÓN para trazabilidad ──
-    const { rows: [orden] } = await pool.query(
+    const notaOrden = multiplicador > 1
+      ? `Envasado rápido: ${cantidadEnvases} ${envase?.nombre ?? 'cajas'} × ${multiplicador} = ${totalUnidades} ud de ${cola.nombre}`
+      : `Envasado rápido: ${totalUnidades} × ${fmtLabel} de ${cola.nombre}`;
+    const { rows: [orden] } = await client.query(
       `INSERT INTO ordenes_produccion (receta_id, cantidad_planificada, cantidad_real_producida, estado, cliente, fecha_planificada, fecha_inicio, fecha_fin, notas, tipo_orden, cola_id, envase_id, formato_label)
        VALUES (
          (SELECT id FROM recetas WHERE activa = true LIMIT 1),
          $1, $1, 'completada', $2, CURRENT_DATE, NOW(), NOW(), $3, 'envasado', $4, $5, $6
        ) RETURNING id, numero_orden`,
-      [cantidad_unidades, cliente ?? null, `Envasado rápido: ${cantidad_unidades} × ${fmtLabel} de ${cola.nombre}`, cola_id, envase_id || null, fmtLabel]
+      [totalUnidades, cliente ?? null, notaOrden, cola_id, envase_id || null, fmtLabel]
     );
 
     // ── Descontar cola granel FIFO + stock_moves ──
-    const { rows: lotesCola } = await pool.query(
+    const { rows: lotesCola } = await client.query(
       `SELECT id, cantidad_actual FROM lotes WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
        ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`, [cola_id]
     );
@@ -179,94 +195,105 @@ router.post('/envasado-rapido', async (req, res) => {
       if (restaCola <= 0) break;
       const disp = parseFloat(l.cantidad_actual);
       const usar = Math.min(disp, restaCola);
-      await pool.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
-      // Stock move de consumo (trazabilidad)
-      await pool.query(
+      await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
+      await client.query(
         `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
          VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
         [cola_id, l.id, (-usar).toFixed(6), disp.toFixed(6), (disp - usar).toFixed(6), orden.id, userId, `Envasado ${orden.numero_orden}`]
       );
       restaCola -= usar;
     }
-    await pool.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [pesoTotal.toFixed(6), cola_id]);
+    if (restaCola > 0.001) throw new Error(`STOCK_INSUFICIENTE:${cola.nombre}:falta=${restaCola.toFixed(6)} kg en lotes`);
+    await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [pesoTotal.toFixed(6), cola_id]);
 
-    // ── Descontar envases FIFO + stock_moves ──
+    // ── Descontar envases FIFO (cantidadEnvases = boxes/pallets, not individual units) ──
     if (envase_id) {
-      const { rows: lotesEnvase } = await pool.query(
+      const { rows: lotesEnvase } = await client.query(
         `SELECT id, cantidad_actual FROM lotes WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-         ORDER BY fecha_entrada ASC FOR UPDATE`, [envase_id]
+         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`, [envase_id]
       );
-      let restaEnv = cantidad_unidades;
+      let restaEnv = cantidadEnvases;
       for (const l of lotesEnvase) {
         if (restaEnv <= 0) break;
         const disp = parseFloat(l.cantidad_actual);
         const usar = Math.min(disp, restaEnv);
-        await pool.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
-        await pool.query(
+        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
            VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
           [envase_id, l.id, (-usar).toFixed(6), disp.toFixed(6), (disp - usar).toFixed(6), orden.id, userId, `Envase ${orden.numero_orden}`]
         );
         restaEnv -= usar;
       }
-      await pool.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [cantidad_unidades, envase_id]);
+      if (restaEnv > 0.001) throw new Error(`STOCK_INSUFICIENTE:${envase.nombre}:falta=${restaEnv.toFixed(0)} en lotes`);
+      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [cantidadEnvases, envase_id]);
     }
 
-    // ── Descontar etiquetas FIFO ──
+    // ── Descontar etiquetas FIFO (totalUnidades = individual units, one label per unit) ──
     if (etiqueta_id) {
-      const { rows: lotesEtiq } = await pool.query(
+      const { rows: lotesEtiq } = await client.query(
         `SELECT id, cantidad_actual FROM lotes WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-         ORDER BY fecha_entrada ASC FOR UPDATE`, [etiqueta_id]
+         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`, [etiqueta_id]
       );
-      let restaEtiq = cantidad_unidades;
+      let restaEtiq = totalUnidades;
       for (const l of lotesEtiq) {
         if (restaEtiq <= 0) break;
         const disp = parseFloat(l.cantidad_actual);
         const usar = Math.min(disp, restaEtiq);
-        await pool.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
-        await pool.query(
+        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
            VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
           [etiqueta_id, l.id, (-usar).toFixed(6), disp.toFixed(6), (disp - usar).toFixed(6), orden.id, userId, `Etiqueta ${orden.numero_orden}`]
         );
         restaEtiq -= usar;
       }
-      await pool.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [cantidad_unidades, etiqueta_id]);
+      if (restaEtiq > 0.001) throw new Error(`STOCK_INSUFICIENTE:etiqueta:falta=${restaEtiq.toFixed(0)} en lotes`);
+      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [totalUnidades, etiqueta_id]);
     }
 
     // ── Crear lote de producto envasado + stock_move de salida ──
     const loteInterno = `PE-${orden.numero_orden}-${Date.now()}`;
-    let costePE = (parseFloat(cola.coste_medio_actual || cola.precio_unitario) * pesoEnvase) + parseFloat(envase?.coste_medio_actual || envase?.precio_unitario || '0');
-    // Add etiqueta cost if present
+    // Cost per unit: (cola CMP * weight) + (envase CMP / multiplicador) + etiqueta CMP
+    const colaCMP = parseFloat(cola.coste_medio_actual || cola.precio_unitario);
+    const envaseCMP = parseFloat(envase?.coste_medio_actual || envase?.precio_unitario || '0');
+    let costePE = (colaCMP * pesoEnvase) + (multiplicador > 1 ? envaseCMP / multiplicador : envaseCMP);
     if (etiqueta_id) {
-      const { rows: [etiq] } = await pool.query(`SELECT coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [etiqueta_id]);
+      const { rows: [etiq] } = await client.query(`SELECT coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [etiqueta_id]);
       if (etiq) costePE += parseFloat(etiq.coste_medio_actual || etiq.precio_unitario || '0');
     }
-    const { rows: [lotePE] } = await pool.query(
+    // Read current stock for accurate stock_move antes/despues
+    const { rows: [peStock] } = await client.query(`SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [pe.id]);
+    const peStockAntes = parseFloat(peStock?.stock_actual ?? '0');
+    const { rows: [lotePE] } = await client.query(
       `INSERT INTO lotes (producto_id, lote_interno, cantidad_inicial, cantidad_actual, estado, precio_compra)
        VALUES ($1, $2, $3, $3, 'aprobado', $4) RETURNING id`,
-      [pe.id, loteInterno, cantidad_unidades, costePE.toFixed(6)]
+      [pe.id, loteInterno, totalUnidades, costePE.toFixed(6)]
     );
-    await pool.query(`UPDATE productos SET stock_actual = stock_actual + $1, version = version + 1 WHERE id = $2`, [cantidad_unidades, pe.id]);
-    // Stock move de producción salida
-    await pool.query(
+    await client.query(`UPDATE productos SET stock_actual = stock_actual + $1, version = version + 1 WHERE id = $2`, [totalUnidades, pe.id]);
+    await client.query(
       `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
-       VALUES ($1, $2, 'produccion_salida', $3, 0, $3, $4, $5, $6)`,
-      [pe.id, lotePE.id, cantidad_unidades, orden.id, userId, `Envasado ${orden.numero_orden}: ${cantidad_unidades} × ${fmtLabel}`]
+       VALUES ($1, $2, 'produccion_salida', $3, $4, $5, $6, $7, $8)`,
+      [pe.id, lotePE.id, totalUnidades, peStockAntes.toFixed(6), (peStockAntes + totalUnidades).toFixed(6), orden.id, userId, `Envasado ${orden.numero_orden}: ${totalUnidades} ud${multiplicador > 1 ? ` (${cantidadEnvases} × ${multiplicador})` : ''}`]
     );
 
-    // Actualizar orden con lote producido
-    await pool.query(`UPDATE ordenes_produccion SET lote_producido_id = $1 WHERE id = $2`, [lotePE.id, orden.id]);
+    await client.query(`UPDATE ordenes_produccion SET lote_producido_id = $1 WHERE id = $2`, [lotePE.id, orden.id]);
 
     await client.query('COMMIT');
     invalidarCacheFinanzas();
 
+    // Push-based stock alerts for consumed materials
+    const alertIds = [cola_id, envase_id, etiqueta_id].filter(Boolean) as string[];
+    alertaService.checkStockMinimo(alertIds).catch(() => {});
+
     return res.json({
       ok: true,
       producto_envasado: pe.nombre,
-      cantidad: cantidad_unidades,
+      cantidad: totalUnidades,
+      multiplicador,
+      cajas_consumidas: multiplicador > 1 ? cantidadEnvases : undefined,
       peso_cola_consumido: pesoTotal,
-      envases_consumidos: envase_id ? cantidad_unidades : 0,
+      envases_consumidos: envase_id ? cantidadEnvases : 0,
       lote: loteInterno,
       orden_id: orden.id,
       numero_orden: orden.numero_orden,
@@ -353,7 +380,7 @@ async function calcularConsumoEnvasado(orden: any) {
 
   // Detect multiplier from envase name: "Caja 18", "Palé 60", etc.
   let multiplicador = 1;
-  const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(\d+)/i);
+  const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
   if (multMatch) multiplicador = parseInt(multMatch[1], 10);
 
   const totalUnidades = cantidadInput * multiplicador;

@@ -5,15 +5,15 @@ services:
     image: postgres:16-alpine
     restart: always
     environment:
-      POSTGRES_DB: loga_erp
-      POSTGRES_USER: loga
-      POSTGRES_PASSWORD: loga2026seguro
+      POSTGRES_DB: ${POSTGRES_DB:-loga_erp}
+      POSTGRES_USER: ${POSTGRES_USER:-loga}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/database/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
       - ./backend/database/migrations/002_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U loga -d loga_erp"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loga} -d ${POSTGRES_DB:-loga_erp}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -23,12 +23,12 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     restart: always
+    env_file:
+      - .env.production
     environment:
-      DATABASE_URL: postgresql://loga:loga2026seguro@db:5432/loga_erp
+      DATABASE_URL: postgresql://${POSTGRES_USER:-loga}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-loga_erp}
       PORT: 3001
       NODE_ENV: production
-      JWT_SECRET: cambia-este-secreto-en-produccion-abc123
-      BACKUP_PASSWORD: Loga2026
     volumes:
       - uploads:/app/uploads
       - backups:/backups

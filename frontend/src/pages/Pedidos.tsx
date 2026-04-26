@@ -109,8 +109,9 @@ export default function Pedidos() {
       setProductos(prodRes.data as Producto[]);
       setClientes(cliRes.data as Cliente[]);
       setRecetasEnv((recRes.data as Receta[]).filter(r => r.tipo_receta === 'envasado'));
-    } catch { /* */ }
-    finally { setLoading(false); }
+    } catch {
+      // Non-critical: pedidos list will show empty
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
@@ -601,9 +602,9 @@ export default function Pedidos() {
                     <span className="text-[10px] bg-gray-100 text-gray-400 rounded-md px-2 py-1 font-medium">—</span>
                   ) : (() => {
                     const accion = getAccionPedido(p);
-                    if (accion === 'consumir') return <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-100 text-emerald-700 rounded-md px-2 py-1 font-bold"><Check size={10} /> Preparar envío</span>;
-                    if (accion === 'envasar') return <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-700 rounded-md px-2 py-1 font-bold"><ClipboardList size={10} /> Envasar</span>;
-                    return <span className="inline-flex items-center gap-1 text-[10px] bg-red-100 text-loga-red rounded-md px-2 py-1 font-bold"><Factory size={10} /> Fabricar</span>;
+                    if (accion === 'consumir') return <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-100 text-emerald-700 rounded-md px-2 py-1 font-bold whitespace-nowrap"><Check size={10} /> Preparar envío</span>;
+                    if (accion === 'envasar') return <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-700 rounded-md px-2 py-1 font-bold whitespace-nowrap"><ClipboardList size={10} /> Envasar</span>;
+                    return <span className="inline-flex items-center gap-1 text-[10px] bg-red-100 text-loga-red rounded-md px-2 py-1 font-bold whitespace-nowrap"><Factory size={10} /> Fabricar</span>;
                   })()}
                 </td>
                 <td className="px-4 py-3"><EstadoBadge estado={p.estado} /></td>

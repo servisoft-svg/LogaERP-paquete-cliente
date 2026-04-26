@@ -23,6 +23,10 @@ interface Rentabilidad {
   stock_actual: number;
   unidad_medida: string;
   margen_pct: number;
+  margen_ref?: number;
+  diff_margen?: number;
+  salud?: string;
+  pvp_anterior?: number;
   beneficio_ud: number;
   desglose?: DesgloseItem[];
 }
@@ -103,12 +107,15 @@ interface ImpactoReceta {
   producto_codigo: string;
   unidad_medida: string;
   precio_venta: number;
+  pvp_anterior?: number;
+  pvp_actual?: number;
   coste_anterior: number;
   coste_actual: number;
   margen_anterior: number;
   margen_actual: number;
   diff_coste: number;
   diff_margen: number;
+  salud?: string;
   detalle_mp: { nombre: string; cantidad: number; precio_anterior: number | null; precio_actual: number; diff: number }[];
 }
 
@@ -383,7 +390,7 @@ export default function Finanzas() {
           <table className="min-w-full divide-y divide-gray-100 text-sm">
             <thead className="bg-gray-50">
               <tr>
-                {['Producto', 'Tipo', 'Precio venta', 'Precio coste', 'Margen %', 'Beneficio/ud'].map(h => (
+                {['Producto', 'Tipo', 'Precio venta', 'Precio coste', 'Margen %', 'Variacion', 'Beneficio/ud'].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr>
@@ -420,13 +427,32 @@ export default function Finanzas() {
                         {margen.toFixed(1)}%
                       </span>
                     </td>
+                    <td className="px-4 py-3">
+                      {r.diff_margen != null && r.diff_margen !== 0 ? (
+                        <div className="relative group">
+                          <span className={clsx('inline-block rounded-md px-2 py-0.5 text-[11px] font-bold tabular-nums',
+                            r.diff_margen > 0 ? 'text-emerald-600 bg-emerald-50' : 'text-loga-red bg-red-50'
+                          )}>
+                            {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
+                          </span>
+                          {r.salud && (
+                            <div className="absolute left-0 bottom-full mb-1 hidden group-hover:block z-20 w-56 px-3 py-2 rounded-lg shadow-lg border border-gray-200 bg-white text-[10px] text-gray-600 font-normal whitespace-normal">
+                              <span className={clsx('inline-block w-2 h-2 rounded-full mr-1.5', r.diff_margen > 0 ? 'bg-emerald-500' : 'bg-red-500')} />
+                              {r.salud}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-gray-300">---</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-xs tabular-nums font-semibold text-gray-800">
                       {fmt(r.beneficio_ud)} EUR
                     </td>
                   </tr>
                   {isOpen && r.desglose && r.desglose.length > 0 && (
                     <tr>
-                      <td colSpan={6} className="px-4 py-2 bg-gray-50/80">
+                      <td colSpan={7} className="px-4 py-2 bg-gray-50/80">
                         <p className="text-[10px] font-bold text-gray-500 uppercase mb-1">Desglose de coste</p>
                         <table className="w-full text-[11px]">
                           <thead>
@@ -467,7 +493,7 @@ export default function Finanzas() {
                 );
               })}
               {data.rentabilidad.filter(r => rentaTab === 'todos' || r.tipo === rentaTab).length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400 text-xs">Sin productos con precios</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400 text-xs">Sin productos con precios</td></tr>
               )}
             </tbody>
           </table>
@@ -609,23 +635,28 @@ export default function Finanzas() {
         </section>
       )}
 
-      {/* Impacto en rentabilidad por receta */}
+      {/* Impacto en rentabilidad por receta — Margen Dinámico con Semáforo de Salud */}
       {impactoRecetas.length > 0 && (
         <section className="rounded-xl border border-gray-100 bg-white shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
             <h2 className="text-sm font-semibold text-gray-800">Impacto de Precios en Rentabilidad</h2>
-            <p className="text-xs text-gray-400">Como afectan las variaciones de precio de MP al margen de cada receta</p>
+            <p className="text-xs text-gray-400">Variacion de margen real: compara PVP anterior + coste anterior vs PVP actual + coste actual</p>
           </div>
           <div className="divide-y divide-gray-100">
             {impactoRecetas.map((r) => {
               const expanded = expandedReceta === r.receta_nombre;
-              const margenBajo = r.diff_margen < 0;
+              const diffPositivo = r.diff_margen > 0;
+              const diffNegativo = r.diff_margen < 0;
+              const pvpCambio = r.pvp_anterior && r.pvp_actual && Math.abs(r.pvp_actual - r.pvp_anterior) > 0.01;
               return (
                 <div key={r.receta_nombre}>
                   <button onClick={() => setExpandedReceta(expanded ? null : r.receta_nombre)} className="w-full px-5 py-3 flex items-center justify-between hover:bg-gray-50 transition-colors text-left">
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-gray-900">{r.producto_nombre}</p>
-                      <p className="text-[11px] text-gray-400">{r.receta_nombre} · PVP: {r.precio_venta.toFixed(2)} EUR/{r.unidad_medida}</p>
+                      <p className="text-[11px] text-gray-400">
+                        {r.receta_nombre} · PVP: {r.pvp_actual?.toFixed(2) ?? r.precio_venta.toFixed(2)} EUR/{r.unidad_medida}
+                        {pvpCambio && <span className="ml-1 text-blue-500">(ant: {r.pvp_anterior?.toFixed(2)})</span>}
+                      </p>
                     </div>
                     <div className="flex items-center gap-4 shrink-0 text-xs">
                       <div className="text-right">
@@ -643,15 +674,32 @@ export default function Finanzas() {
                           {r.margen_actual.toFixed(1)}%
                         </p>
                         {r.diff_margen !== 0 && (
-                          <p className={clsx('text-[10px] font-bold', margenBajo ? 'text-loga-red' : 'text-emerald-600')}>
-                            {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
-                          </p>
+                          <div className="relative group">
+                            <p className={clsx('text-[10px] font-bold', diffNegativo ? 'text-loga-red' : 'text-emerald-600')}>
+                              {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
+                            </p>
+                            {/* Tooltip semáforo de salud */}
+                            {r.salud && (
+                              <div className="absolute right-0 bottom-full mb-1 hidden group-hover:block z-20 w-56 px-3 py-2 rounded-lg shadow-lg border border-gray-200 bg-white text-[10px] text-gray-600 font-normal whitespace-normal">
+                                <span className={clsx('inline-block w-2 h-2 rounded-full mr-1.5', diffNegativo ? 'bg-red-500' : 'bg-emerald-500')} />
+                                {r.salud}
+                              </div>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
                   </button>
                   {expanded && r.detalle_mp.length > 0 && (
                     <div className="px-5 pb-3 overflow-x-auto">
+                      {/* Resumen de salud */}
+                      {r.salud && (
+                        <div className={clsx('mb-2 px-3 py-1.5 rounded-lg text-[11px] font-medium', diffNegativo ? 'bg-red-50 text-loga-red' : diffPositivo ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-50 text-gray-500')}>
+                          <span className={clsx('inline-block w-2 h-2 rounded-full mr-1.5 align-middle', diffNegativo ? 'bg-red-500' : diffPositivo ? 'bg-emerald-500' : 'bg-gray-400')} />
+                          {r.salud}
+                          {pvpCambio && <span className="ml-2 text-blue-500 font-normal">PVP: {r.pvp_anterior?.toFixed(2)} → {r.pvp_actual?.toFixed(2)}</span>}
+                        </div>
+                      )}
                       <table className="w-full text-[11px]">
                         <thead>
                           <tr className="text-gray-400">

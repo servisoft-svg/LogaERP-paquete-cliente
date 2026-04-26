@@ -223,10 +223,18 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       });
       clearInterval(fillInterval);
       setFillPct(100);
-      setLoteProd((data as { lote_producido?: string }).lote_producido ?? '');
+      const res = data as { lote_producido?: string; qc_fuera_de_rango?: boolean; qc_desviaciones?: string[]; lote_estado?: string };
+      setLoteProd(res.lote_producido ?? '');
       if (lsKey) localStorage.removeItem(lsKey);
       if (orden) localStorage.removeItem(`fab_paso_${orden.id}`);
-      setTimeout(() => { setFase('completado'); onDone(); }, 1000);
+      // If QC out of range, show warning before completing
+      if (res.qc_fuera_de_rango) {
+        setErrorMsg(`⚠ Control de calidad fuera de rango:\n${(res.qc_desviaciones ?? []).join('\n')}\n\nEl lote se ha creado en CUARENTENA. Requiere aprobación manual en Lotes.`);
+        setFase('error');
+        onDone();
+      } else {
+        setTimeout(() => { setFase('completado'); onDone(); }, 1000);
+      }
     } catch (err: unknown) {
       clearInterval(fillInterval);
       setFillPct(0);

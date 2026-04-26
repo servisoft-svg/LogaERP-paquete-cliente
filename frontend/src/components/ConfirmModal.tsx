@@ -32,10 +32,12 @@ export default function ConfirmModal({
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
+        role="dialog"
+        aria-label={title}
         className="relative z-10 w-full max-w-sm rounded-2xl bg-white shadow-2xl p-6 space-y-4"
       >
         <div className="flex items-start gap-3">
-          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${danger ? 'bg-red-50' : 'bg-blue-50'}`}>
+          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${danger ? 'bg-red-50' : 'bg-blue-50'}`} aria-hidden="true">
             <AlertTriangle size={18} className={danger ? 'text-loga-red' : 'text-blue-600'} />
           </div>
           <div>

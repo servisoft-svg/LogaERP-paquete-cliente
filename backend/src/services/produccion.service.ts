@@ -53,7 +53,7 @@ class ProduccionService {
   async confirmarOrden(
     ordenId: string,
     usuarioId?: string,
-    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number }
+    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string }
   ): Promise<ResultadoConfirmacion> {
     return withSerializableTransaction(async (client) => {
       // ── 1. Cargar orden ────────────────────────────────────────────────
@@ -103,17 +103,24 @@ class ProduccionService {
 
       if (ingredientes.length === 0) throw new Error('RECETA_SIN_INGREDIENTES');
 
-      // ── 3 & 4. FIFO: descontar cada ingrediente ───────────────────────
+      // ── 3 & 4. FIFO: descontar cada ingrediente ────��──────────────────
       const consumosLog: ResultadoConfirmacion['consumos'] = [];
-      let costeConsumos = 0; // Accumulate total cost of consumed ingredients
+      let costeConsumos = 0;
+
+      // Pre-fetch: lock all ingredient products for stock update (avoids N+1 per lote)
+      const ingProductIds = ingredientes.map(i => i.materia_prima_id);
+      const { rows: stockRows } = await client.query<{ id: string; stock_actual: string }>(
+        `SELECT id, stock_actual FROM productos WHERE id = ANY($1) FOR UPDATE`,
+        [ingProductIds]
+      );
+      const stockMap = new Map(stockRows.map(r => [r.id, toNum(r.stock_actual)]));
 
       for (const ing of ingredientes) {
-        // Cantidad real considerando merma
         const cantidadNeta = ing.cantidad_base * multiplicador;
         const cantidadReal = cantidadNeta * (1 + ing.porcentaje_merma / 100);
 
         // Lotes disponibles FIFO (excluir cantidades reservadas)
-        const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string }>(
+        const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(
           `SELECT l.id, l.cantidad_actual, l.precio_compra,
              l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS cantidad_disponible,
              l.fecha_caducidad, l.fecha_entrada
@@ -128,68 +135,69 @@ class ProduccionService {
           [ing.materia_prima_id]
         );
 
-        // Verificar suficiencia total (sobre disponible, no reservado)
-        const totalDisponible = lotes.reduce((s, l) => s + Math.max(0, toNum((l as any).cantidad_disponible ?? l.cantidad_actual)), 0);
+        const totalDisponible = lotes.reduce((s, l) => s + Math.max(0, toNum(l.cantidad_disponible ?? l.cantidad_actual)), 0);
         if (totalDisponible < cantidadReal) {
           throw new Error(
             `STOCK_INSUFICIENTE:${ing.nombre_mp}:necesario=${cantidadReal.toFixed(6)}:disponible=${totalDisponible.toFixed(6)}`
           );
         }
 
-        // Descontar FIFO lote a lote
+        // Descontar FIFO lote a lote — batch lote updates + stock_moves
         let restante = cantidadReal;
         const lotesUsados: string[] = [];
+        const moveValues: string[] = [];
+        const moveParams: unknown[] = [];
+        let paramIdx = 1;
 
         for (const lote of lotes) {
           if (restante <= 0) break;
 
-          const disponible = Math.max(0, toNum((lote as any).cantidad_disponible ?? lote.cantidad_actual));
+          const disponible = Math.max(0, toNum(lote.cantidad_disponible ?? lote.cantidad_actual));
           if (disponible <= 0) continue;
-          const consumir   = Math.min(disponible, restante);
-          const nuevoQty   = disponible - consumir;
+          const consumir = Math.min(disponible, restante);
+          const nuevoQty = toNum(lote.cantidad_actual) - consumir;
 
-          // Actualizar lote
           await client.query(
             `UPDATE lotes SET cantidad_actual = $1::NUMERIC WHERE id = $2`,
             [nuevoQty.toFixed(6), lote.id]
           );
 
-          // Stock move de consumo
-          const { rows: [stockAntes] } = await client.query<{ stock_actual: string }>(
-            `SELECT stock_actual FROM productos WHERE id = $1`,
-            [ing.materia_prima_id]
-          );
-          const antes   = toNum(stockAntes.stock_actual);
+          // Use pre-fetched stock (track running total)
+          const antes = stockMap.get(ing.materia_prima_id) ?? 0;
           const despues = antes - consumir;
+          stockMap.set(ing.materia_prima_id, despues);
 
-          await client.query(
-            `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
-            [despues.toFixed(6), ing.materia_prima_id]
+          // Collect stock_move for batch insert
+          moveValues.push(`($${paramIdx}, $${paramIdx+1}, 'produccion_consumo', $${paramIdx+2}::NUMERIC, $${paramIdx+3}::NUMERIC, $${paramIdx+4}::NUMERIC, $${paramIdx+5}, $${paramIdx+6}, $${paramIdx+7})`);
+          moveParams.push(
+            ing.materia_prima_id, lote.id,
+            (-consumir).toFixed(6), antes.toFixed(6), despues.toFixed(6),
+            ordenId, usuarioId ?? null, `Consumo en orden ${orden.numero_orden}`
           );
+          paramIdx += 8;
 
-          await client.query(
-            `INSERT INTO stock_moves
-               (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
-             VALUES ($1, $2, 'produccion_consumo', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7, $8)`,
-            [
-              ing.materia_prima_id,
-              lote.id,
-              (-consumir).toFixed(6),
-              antes.toFixed(6),
-              despues.toFixed(6),
-              ordenId,
-              usuarioId ?? null,
-              `Consumo en orden ${orden.numero_orden}`,
-            ]
-          );
-
-          // Accumulate cost
-          const precioLote = parseFloat((lote as any).precio_compra ?? '0');
+          const precioLote = toNum((lote as any).precio_compra ?? '0');
           costeConsumos += consumir * precioLote;
 
           restante -= consumir;
           lotesUsados.push(lote.id);
         }
+
+        // Batch insert stock_moves for this ingredient
+        if (moveValues.length > 0) {
+          await client.query(
+            `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
+             VALUES ${moveValues.join(', ')}`,
+            moveParams
+          );
+        }
+
+        // Single stock update per ingredient (instead of per-lote)
+        const finalStock = stockMap.get(ing.materia_prima_id) ?? 0;
+        await client.query(
+          `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
+          [finalStock.toFixed(6), ing.materia_prima_id]
+        );
 
         consumosLog.push({
           producto: ing.nombre_mp,
@@ -208,12 +216,15 @@ class ProduccionService {
       // Calculate cost from consumed ingredients
       const costePorUd = cantidadReal > 0 ? costeConsumos / cantidadReal : 0;
 
+      // If QC is out of range, lot goes to cuarentena instead of aprobado
+      const loteEstado = extra?.qc_fuera_de_rango ? 'cuarentena' : 'aprobado';
+
       const { rows: [lotePT] } = await client.query<{ id: string }>(
         `INSERT INTO lotes
            (producto_id, lote_interno, cantidad_inicial, cantidad_actual, estado, fecha_entrada, precio_compra)
-         VALUES ($1, $2, $3::NUMERIC, $3::NUMERIC, 'aprobado', CURRENT_DATE, $4::NUMERIC)
+         VALUES ($1, $2, $3::NUMERIC, $3::NUMERIC, $5::estado_lote, CURRENT_DATE, $4::NUMERIC)
          RETURNING id`,
-        [receta.producto_id, loteInterno, cantidadReal.toFixed(6), costePorUd.toFixed(6)]
+        [receta.producto_id, loteInterno, cantidadReal.toFixed(6), costePorUd.toFixed(6), loteEstado]
       );
 
       // Actualizar stock producto terminado (con version para optimistic locking)
@@ -280,7 +291,33 @@ class ProduccionService {
         ]
       );
 
-      // ── 7. Auditoría ─────────────────────────────────────────────────
+      // ── 7. QC annotation (inside transaction) ────────────────────────
+      if (extra?.nota_qc) {
+        await client.query(
+          `UPDATE ordenes_produccion SET notas = COALESCE(notas, '') || E'\n' || $1 WHERE id = $2`,
+          [extra.nota_qc, ordenId]
+        );
+      }
+
+      // ── 8. Registro limpieza (inside transaction) ─────────────────────
+      if (extra?.registro_limpieza) {
+        await client.query(
+          `UPDATE ordenes_produccion SET registro_limpieza = $1 WHERE id = $2`,
+          [extra.registro_limpieza, ordenId]
+        );
+        await client.query(
+          `UPDATE lotes SET registro_limpieza = $1 WHERE lote_interno = $2`,
+          [extra.registro_limpieza, loteInterno]
+        );
+      }
+
+      // ── 9. Mark linked pedido as fabricado (inside transaction) ────────
+      await client.query(
+        `UPDATE pedidos SET estado = 'fabricado' WHERE orden_produccion_id = $1 AND estado IN ('confirmado', 'en_produccion')`,
+        [ordenId]
+      );
+
+      // ── 10. Auditoría ────────────────────────────────────────────────
       await client.query(
         `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
          VALUES ($1, 'CONFIRMAR_PRODUCCION', 'ordenes_produccion', $2, $3)`,
@@ -324,21 +361,37 @@ class ProduccionService {
     return orden;
   }
 
-  async listarOrdenes(filtro?: { estado?: string }): Promise<unknown[]> {
-    let sql = `
+  async listarOrdenes(filtro?: { estado?: string; limit?: number; offset?: number }): Promise<{ rows: unknown[]; total: number }> {
+    const limit  = Math.min(filtro?.limit  ?? 100, 500);
+    const offset = filtro?.offset ?? 0;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let paramIdx = 1;
+
+    if (filtro?.estado) {
+      conditions.push(`op.estado = $${paramIdx++}`);
+      params.push(filtro.estado);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const countSql = `SELECT COUNT(*) FROM ordenes_produccion op ${where}`;
+    const dataSql = `
       SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre
       FROM ordenes_produccion op
       JOIN recetas r ON r.id = op.receta_id
       JOIN productos p ON p.id = r.producto_id
+      ${where}
+      ORDER BY op.created_at DESC
+      LIMIT $${paramIdx++} OFFSET $${paramIdx++}
     `;
-    const params: string[] = [];
-    if (filtro?.estado) {
-      sql += ` WHERE op.estado = $1`;
-      params.push(filtro.estado);
-    }
-    sql += ` ORDER BY op.created_at DESC LIMIT 500`;
-    const { rows } = await pool.query(sql, params);
-    return rows;
+
+    const [countRes, dataRes] = await Promise.all([
+      pool.query(countSql, params),
+      pool.query(dataSql, [...params, limit, offset]),
+    ]);
+
+    return { rows: dataRes.rows, total: parseInt(countRes.rows[0].count, 10) };
   }
 }
 

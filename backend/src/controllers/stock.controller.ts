@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { stockService }  from '../services/stock.service';
 import { alertaService } from '../services/alerta.service';
 import { emailService }  from '../services/email.service';
+import { pool }          from '../db/pool';
 
 export const stockController = {
   async listarProductos(req: Request, res: Response) {
@@ -78,7 +79,19 @@ export const stockController = {
         notas_adicionales,
         cuerpo_personalizado,
       });
-      return res.json({ ok: true, mensaje: 'Email enviado correctamente' });
+
+      // Register supplier order request for traceability
+      const userId = (req as any).user?.id ?? null;
+      const { rows: [prod] } = await pool.query(`SELECT proveedor_id FROM productos WHERE id = $1`, [producto_id]);
+      const { rows: [registro] } = await pool.query(
+        `INSERT INTO pedidos_proveedor
+           (producto_id, proveedor_id, cantidad_solicitada, destinatario_email, notas, usuario_solicitud_id)
+         VALUES ($1, $2, $3::NUMERIC, $4, $5, $6)
+         RETURNING id`,
+        [producto_id, prod?.proveedor_id ?? null, Number(cantidad_sugerida || 0).toFixed(6), destinatario, notas_adicionales ?? null, userId]
+      );
+
+      return res.json({ ok: true, mensaje: 'Email enviado correctamente', pedido_proveedor_id: registro.id });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error interno';
       return res.status(500).json({ error: msg });

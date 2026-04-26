@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import { ReactNode, useId } from 'react';
 
 interface FormFieldProps {
   label: string;
@@ -9,14 +9,16 @@ interface FormFieldProps {
 }
 
 export function FormField({ label, required, children, hint, error }: FormFieldProps) {
+  const id = useId();
   return (
     <div className="space-y-1">
-      <label className="block text-xs font-medium text-gray-700">
-        {label}{required && <span className="text-loga-red ml-0.5">*</span>}
+      <label htmlFor={id} className="block text-xs font-medium text-gray-700">
+        {label}{required && <span className="text-loga-red ml-0.5" aria-hidden="true">*</span>}
+        {required && <span className="sr-only"> (obligatorio)</span>}
       </label>
       {children}
       {hint  && <p className="text-[11px] text-gray-400">{hint}</p>}
-      {error && <p className="text-[11px] text-loga-red">{error}</p>}
+      {error && <p className="text-[11px] text-loga-red" role="alert">{error}</p>}
     </div>
   );
 }

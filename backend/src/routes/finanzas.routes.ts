@@ -106,24 +106,102 @@ router.get('/resumen', async (_req, res) => {
         AND p.activo = TRUE AND p.precio_venta > 0
     `);
 
+    // Pre-fetch historical prices (PVP + cost basis) for margin variation
+    const { rows: histPvpRows } = await pool.query(`
+      SELECT DISTINCT ON (producto_id) producto_id, precio_anterior
+      FROM historial_precios
+      WHERE tipo = 'venta' AND created_at >= NOW() - INTERVAL '90 days'
+      ORDER BY producto_id, created_at ASC
+    `);
+    const pvpAnteriorMap: Record<string, number> = {};
+    for (const r of histPvpRows) pvpAnteriorMap[r.producto_id] = parseFloat(r.precio_anterior);
+
+    const { rows: histCostRows } = await pool.query(`
+      SELECT DISTINCT ON (producto_id) producto_id, precio_anterior
+      FROM historial_precios
+      WHERE tipo = 'compra' AND created_at >= NOW() - INTERVAL '90 days'
+      ORDER BY producto_id, created_at ASC
+    `);
+    const costAnteriorMap: Record<string, number> = {};
+    for (const r of histCostRows) costAnteriorMap[r.producto_id] = parseFloat(r.precio_anterior);
+
     const rentabilidad = [];
     for (const pt of ptProducts) {
       const resultado = await calcularCosteProducto(pt.id);
       const precioVenta = parseFloat(pt.precio_venta ?? '0');
       const margen = precioVenta > 0 ? ((precioVenta - resultado.coste_ud) / precioVenta * 100) : 0;
       const esFabricado = pt.tipo === 'producto_fabricado';
+
+      // Dynamic margin variation: Margen_Act vs Margen_Ref (historical PVP + historical costs)
+      const pvpAnt = pvpAnteriorMap[pt.id] ?? precioVenta;
+      // Approximate anterior cost: use cost from ingredient price history if available
+      // For simplicity, use the same recursive cost but substitute CMP with historical prices
+      // A pragmatic approach: compute coste_anterior from the recipe's ingredient price history
+      let costeAnterior = resultado.coste_ud; // default: same as current
+      if (resultado.desglose.length > 0) {
+        let costeBatchAnt = 0;
+        for (const d of resultado.desglose) {
+          // Look up if this ingredient had a historical price
+          const histPrecio = costAnteriorMap[
+            // Find the ingredient product ID by name match (we don't have ID in desglose)
+            // Fallback: use current price
+            Object.keys(costAnteriorMap).find(id => {
+              // We'll do a second approach below
+              return false;
+            }) ?? ''
+          ];
+          costeBatchAnt += d.coste_linea; // default to current
+        }
+        // Better approach: query ingredient-level history for this product's recipe
+        const { rows: [receta] } = await pool.query(
+          `SELECT id, rendimiento FROM recetas WHERE producto_id = $1 AND activa = TRUE ORDER BY version DESC LIMIT 1`,
+          [pt.id]
+        );
+        if (receta) {
+          const { rows: ings } = await pool.query(`
+            SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id
+            FROM ingredientes_receta ir WHERE ir.receta_id = $1
+          `, [receta.id]);
+          let batchAnt = 0;
+          for (const ing of ings) {
+            const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
+            const precioAnt = costAnteriorMap[ing.materia_prima_id] ?? getCMP(ing.materia_prima_id);
+            batchAnt += cantReal * precioAnt;
+          }
+          const rend = parseFloat(receta.rendimiento);
+          costeAnterior = rend > 0 ? Math.round(batchAnt / rend * 10000) / 10000 : batchAnt;
+        }
+      }
+
+      const margenRef = pvpAnt > 0 ? ((pvpAnt - costeAnterior) / pvpAnt * 100) : 0;
+      const diffMargen = Math.round((margen - margenRef) * 10) / 10;
+
+      // Health semaphore
+      const costeSubio = resultado.coste_ud > costeAnterior + 0.0001;
+      const pvpSubio = precioVenta > pvpAnt + 0.0001;
+      const pvpBajo = precioVenta < pvpAnt - 0.0001;
+      let salud = '';
+      if (diffMargen === 0)                     salud = '';
+      else if (costeSubio && diffMargen >= 0)   salud = 'Subida de costes compensada con actualizacion de PVP.';
+      else if (costeSubio && diffMargen < 0)    salud = 'Tus costes han subido. Margen en peligro.';
+      else if (pvpBajo && diffMargen < 0)       salud = 'Has bajado el PVP sin reducir costes. Rentabilidad menor.';
+      else if (!costeSubio && diffMargen > 0)   salud = 'Costes estables o reducidos. Margen mejorado.';
+
       rentabilidad.push({
         id: pt.id, codigo: pt.codigo, nombre: pt.nombre, tipo: pt.tipo,
         precio_venta: precioVenta,
         precio_coste: resultado.coste_ud,
         coste_batch: resultado.coste_batch,
         rendimiento: resultado.rendimiento,
-        // Granel: precio por kg y por 1000kg
         precio_kg: esFabricado ? resultado.coste_ud : undefined,
         precio_1000kg: esFabricado ? Math.round(resultado.coste_ud * 1000 * 100) / 100 : undefined,
         stock_actual: parseFloat(pt.stock_actual),
         unidad_medida: pt.unidad_medida,
         margen_pct: Math.round(margen * 10) / 10,
+        margen_ref: Math.round(margenRef * 10) / 10,
+        diff_margen: diffMargen,
+        salud: salud || undefined,
+        pvp_anterior: Math.round(pvpAnt * 100) / 100,
         beneficio_ud: Math.round((precioVenta - resultado.coste_ud) * 10000) / 10000,
         desglose: resultado.desglose,
       });
@@ -311,13 +389,13 @@ router.get('/historial-precios', async (req, res) => {
   }
 });
 
-// GET /api/finanzas/impacto-costes — impacto de subidas de precio en recetas y materias primas
+// GET /api/finanzas/impacto-costes — dynamic margin variation: compares historical PVP+cost vs current PVP+cost
 router.get('/impacto-costes', async (_req, res) => {
   try {
-    // 1. Impacto por receta: coste anterior vs coste actual para cada receta activa
+    // 1. Impacto por receta: margen anterior (PVP_ant + coste_ant) vs margen actual (PVP_act + coste_act)
     const { rows: recetas } = await pool.query(`
       SELECT r.id, r.nombre AS receta_nombre, r.rendimiento,
-             pt.nombre AS producto_nombre, pt.codigo AS producto_codigo,
+             pt.id AS producto_id, pt.nombre AS producto_nombre, pt.codigo AS producto_codigo,
              pt.precio_venta, pt.unidad_medida
       FROM recetas r
       JOIN productos pt ON pt.id = r.producto_id
@@ -326,6 +404,7 @@ router.get('/impacto-costes', async (_req, res) => {
 
     const impactoRecetas = [];
     for (const receta of recetas) {
+      // Get ingredient costs: current price + oldest price from last 90 days (= "anterior")
       const { rows: ingredientes } = await pool.query(`
         SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id,
                mp.nombre AS mp_nombre, mp.precio_unitario AS precio_actual,
@@ -337,6 +416,15 @@ router.get('/impacto-costes', async (_req, res) => {
         JOIN productos mp ON mp.id = ir.materia_prima_id
         WHERE ir.receta_id = $1
       `, [receta.id]);
+
+      // Get historical PVP: the oldest venta price change in last 90 days = PVP before changes
+      const { rows: [pvpHist] } = await pool.query(`
+        SELECT hp.precio_anterior
+        FROM historial_precios hp
+        WHERE hp.producto_id = $1 AND hp.tipo = 'venta'
+          AND hp.created_at >= NOW() - INTERVAL '90 days'
+        ORDER BY hp.created_at ASC LIMIT 1
+      `, [receta.producto_id]);
 
       let costeActual = 0;
       let costeAnterior = 0;
@@ -361,22 +449,40 @@ router.get('/impacto-costes', async (_req, res) => {
       const rendimiento = parseFloat(receta.rendimiento);
       const costePorKgActual = rendimiento > 0 ? costeActual / rendimiento : 0;
       const costePorKgAnterior = rendimiento > 0 ? costeAnterior / rendimiento : 0;
-      const precioVenta = parseFloat(receta.precio_venta ?? '0');
-      const margenActual = precioVenta > 0 ? ((precioVenta - costePorKgActual) / precioVenta * 100) : 0;
-      const margenAnterior = precioVenta > 0 ? ((precioVenta - costePorKgAnterior) / precioVenta * 100) : 0;
+
+      // Dynamic margin: use historical PVP for anterior, current PVP for actual
+      const pvpActual = parseFloat(receta.precio_venta ?? '0');
+      const pvpAnterior = pvpHist ? parseFloat(pvpHist.precio_anterior) : pvpActual;
+      const margenActual = pvpActual > 0 ? ((pvpActual - costePorKgActual) / pvpActual * 100) : 0;
+      const margenAnterior = pvpAnterior > 0 ? ((pvpAnterior - costePorKgAnterior) / pvpAnterior * 100) : 0;
+      const diffMargen = margenActual - margenAnterior;
+
+      // Determine health semaphore tooltip
+      const costeSubio = costePorKgActual > costePorKgAnterior + 0.0001;
+      const pvpSubio = pvpActual > pvpAnterior + 0.0001;
+      const pvpBajo = pvpActual < pvpAnterior - 0.0001;
+      let salud: string;
+      if (costeSubio && diffMargen >= 0)      salud = 'Subida de costes compensada con actualizacion de PVP.';
+      else if (costeSubio && diffMargen < 0)  salud = 'Tus costes han subido. Margen en peligro.';
+      else if (pvpBajo && diffMargen < 0)     salud = 'Has bajado el PVP sin reducir costes. Rentabilidad menor.';
+      else if (!costeSubio && diffMargen > 0) salud = 'Costes estables o reducidos. Margen mejorado.';
+      else                                    salud = 'Sin variacion significativa.';
 
       impactoRecetas.push({
         receta_nombre: receta.receta_nombre,
         producto_nombre: receta.producto_nombre,
         producto_codigo: receta.producto_codigo,
         unidad_medida: receta.unidad_medida,
-        precio_venta: precioVenta,
+        pvp_anterior: Math.round(pvpAnterior * 100) / 100,
+        pvp_actual: Math.round(pvpActual * 100) / 100,
+        precio_venta: pvpActual,
         coste_anterior: Math.round(costePorKgAnterior * 10000) / 10000,
         coste_actual: Math.round(costePorKgActual * 10000) / 10000,
         margen_anterior: Math.round(margenAnterior * 10) / 10,
         margen_actual: Math.round(margenActual * 10) / 10,
         diff_coste: Math.round((costePorKgActual - costePorKgAnterior) * 10000) / 10000,
-        diff_margen: Math.round((margenActual - margenAnterior) * 10) / 10,
+        diff_margen: Math.round(diffMargen * 10) / 10,
+        salud,
         detalle_mp: detalleMP.filter(d => d.precio_anterior !== null),
       });
     }
@@ -584,8 +690,8 @@ router.get('/predicciones', async (_req, res) => {
   }
 });
 
-// ── INFORME MATERIALES DE EMBALAJE ───────────────────────────
-// CSV simple: cuantas unidades de cada material se han usado
+// ── INFORME PLÁSTICO (Ley 7/2022) ──────────────────────────
+// Includes weight calculation and 0.45 EUR/kg plastic tax
 router.get('/informe-plastico', async (req, res) => {
   try {
     const desde = req.query.desde as string || new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
@@ -595,35 +701,53 @@ router.get('/informe-plastico', async (req, res) => {
       SELECT
         p.codigo,
         p.nombre,
-        SUM(ABS(sm.cantidad::NUMERIC)) AS unidades_consumidas
+        COALESCE(p.peso_plastico_kg, 0) AS peso_plastico_ud,
+        COALESCE(p.precio_unitario, 0) AS precio_ud,
+        SUM(ABS(sm.cantidad::NUMERIC)) AS unidades_consumidas,
+        COUNT(DISTINCT sm.orden_id) AS num_ordenes,
+        MIN(sm.created_at)::DATE AS primera_fecha,
+        MAX(sm.created_at)::DATE AS ultima_fecha
       FROM stock_moves sm
       JOIN productos p ON p.id = sm.producto_id
       WHERE p.tipo = 'material_embalaje'
         AND sm.tipo = 'produccion_consumo'
         AND sm.created_at >= $1::DATE
         AND sm.created_at <= ($2::DATE + INTERVAL '1 day')
-      GROUP BY p.id, p.codigo, p.nombre
+      GROUP BY p.id, p.codigo, p.nombre, p.peso_plastico_kg, p.precio_unitario
       ORDER BY unidades_consumidas DESC
     `, [desde, hasta]);
 
+    const TASA_PLASTICO = 0.45; // EUR/kg (tasa vigente Ley 7/2022)
     const totalUds = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas), 0);
+    const totalKgPlastico = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas) * parseFloat(r.peso_plastico_ud), 0);
+    const totalCoste = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas) * parseFloat(r.precio_ud), 0);
+    const impuestoPlastico = totalKgPlastico * TASA_PLASTICO;
 
     const BOM = '\uFEFF';
     const sep = ';';
-    const headers = ['Codigo', 'Material', 'Unidades consumidas'];
-    const lines = rows.map(r => [
-      r.codigo,
-      r.nombre,
-      parseFloat(r.unidades_consumidas).toFixed(0),
-    ].map(v => '"' + String(v).replace(/"/g, '""') + '"').join(sep));
+    const headers = ['Codigo', 'Material', 'Peso plastico/ud (kg)', 'Unidades consumidas', 'Kg plastico total', 'Coste material (EUR)', 'Num ordenes', 'Primera fecha', 'Ultima fecha'];
+    const lines = rows.map(r => {
+      const uds = parseFloat(r.unidades_consumidas);
+      const pesoUd = parseFloat(r.peso_plastico_ud);
+      return [
+        r.codigo, r.nombre,
+        pesoUd.toFixed(4),
+        uds.toFixed(0),
+        (uds * pesoUd).toFixed(4),
+        (uds * parseFloat(r.precio_ud)).toFixed(2),
+        r.num_ordenes,
+        r.primera_fecha, r.ultima_fecha,
+      ].map(v => '"' + String(v).replace(/"/g, '""') + '"').join(sep);
+    });
 
     lines.push('');
-    lines.push(['', 'TOTAL', totalUds.toFixed(0)].map(v => '"' + v + '"').join(sep));
-    lines.push(['', `Periodo: ${desde} a ${hasta}`, ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', 'TOTALES', '', totalUds.toFixed(0), totalKgPlastico.toFixed(4), totalCoste.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', `IMPUESTO PLASTICO (${totalKgPlastico.toFixed(2)} kg x ${TASA_PLASTICO} EUR/kg)`, '', '', '', impuestoPlastico.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', `Periodo: ${desde} a ${hasta}`, '', '', '', '', '', '', ''].map(v => '"' + v + '"').join(sep));
 
     const csv = BOM + headers.join(sep) + '\n' + lines.join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="materiales-embalaje-${desde.slice(0,4)}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="informe-plastico-${desde.slice(0,4)}.csv"`);
     res.send(csv);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });

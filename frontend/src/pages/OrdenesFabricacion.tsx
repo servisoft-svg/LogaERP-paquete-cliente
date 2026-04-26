@@ -921,7 +921,7 @@ export default function OrdenesFabricacion() {
                 {/* Resumen con calculo real */}
                 {parseInt(envForm.cantidad) > 0 && envaseSelEnv && colaSelEnv && prodFinalSel && (() => {
                   // Detect multiplier from envase name
-                  const multMatch = envaseSelEnv.nombre.match(/(?:caja|pal[eé]|palet)\s*(\d+)/i);
+                  const multMatch = envaseSelEnv.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
                   const mult = multMatch ? parseInt(multMatch[1], 10) : 1;
                   const cantInput = parseInt(envForm.cantidad);
                   const totalUds = cantInput * mult;

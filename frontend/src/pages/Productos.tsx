@@ -1160,5 +1160,5 @@ function TipoBadge({ tipo }: { tipo: TipoProducto }) {
     material_embalaje:  { label: 'Embalaje',          cls: 'bg-gray-100 text-gray-600'   },
   };
   const { label, cls } = cfg[tipo] ?? { label: tipo, cls: 'bg-gray-100 text-gray-600' };
-  return <span className={clsx('rounded-md px-2 py-0.5 text-[11px] font-medium', cls)}>{label}</span>;
+  return <span className={clsx('rounded-md px-2 py-0.5 text-[11px] font-medium whitespace-nowrap', cls)}>{label}</span>;
 }

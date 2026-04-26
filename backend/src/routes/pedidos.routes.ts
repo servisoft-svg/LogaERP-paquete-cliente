@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { alertaService } from '../services/alerta.service';
 
 const router = Router();
 
@@ -92,7 +93,7 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Auto-reserve stock FIFO — use lineas if available, else main product (avoid double)
+    // Auto-reserve stock FIFO — wrapped in SERIALIZABLE to prevent double-booking
     const itemsToReserve: { producto_id: string; cantidad: number }[] = [];
     if (Array.isArray(lineas) && lineas.length > 0) {
       for (const l of lineas) {
@@ -102,24 +103,37 @@ router.post('/', async (req, res) => {
       itemsToReserve.push({ producto_id, cantidad: parseFloat(String(cantidad)) });
     }
 
-    for (const item of itemsToReserve) {
-      const { rows: lotes } = await pool.query(
-        `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
-         FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-         ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC`,
-        [item.producto_id]
-      );
-      let falta = item.cantidad;
-      for (const l of lotes) {
-        if (falta <= 0) break;
-        const disp = parseFloat(l.disponible);
-        if (disp <= 0) continue;
-        const reservar = Math.min(disp, falta);
-        await pool.query(
-          `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
-          [pedido.id, item.producto_id, l.id, reservar.toFixed(6)]
-        );
-        falta -= reservar;
+    if (itemsToReserve.length > 0) {
+      const resClient = await pool.connect();
+      try {
+        await resClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+        for (const item of itemsToReserve) {
+          const { rows: lotes } = await resClient.query(
+            `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
+             FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+             ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
+             FOR UPDATE`,
+            [item.producto_id]
+          );
+          let falta = item.cantidad;
+          for (const l of lotes) {
+            if (falta <= 0) break;
+            const disp = parseFloat(l.disponible);
+            if (disp <= 0) continue;
+            const reservar = Math.min(disp, falta);
+            await resClient.query(
+              `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
+              [pedido.id, item.producto_id, l.id, reservar.toFixed(6)]
+            );
+            falta -= reservar;
+          }
+        }
+        await resClient.query('COMMIT');
+      } catch (resErr) {
+        await resClient.query('ROLLBACK').catch(() => {});
+        // Reservation failed but order created — non-fatal, can be re-reserved later
+      } finally {
+        resClient.release();
       }
     }
 
@@ -156,24 +170,33 @@ router.put('/:id', async (req, res) => {
 
         // RESERVAS: al confirmar pedido (o re-confirmar tras cancelar), reservar stock
         if (estado === 'confirmado' && (actual.estado === 'nuevo' || actual.estado === 'cancelado') && actual.producto_id && actual.cantidad) {
-          // Buscar lotes FIFO y reservar
-          const { rows: lotes } = await pool.query(
-            `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
-             FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-             ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC`,
-            [actual.producto_id]
-          );
-          let falta = parseFloat(actual.cantidad);
-          for (const l of lotes) {
-            if (falta <= 0) break;
-            const disp = parseFloat(l.disponible);
-            if (disp <= 0) continue;
-            const reservar = Math.min(disp, falta);
-            await pool.query(
-              `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
-              [req.params.id, actual.producto_id, l.id, reservar.toFixed(6)]
+          const resClient = await pool.connect();
+          try {
+            await resClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+            const { rows: lotes } = await resClient.query(
+              `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
+               FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+               ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
+               FOR UPDATE`,
+              [actual.producto_id]
             );
-            falta -= reservar;
+            let falta = parseFloat(actual.cantidad);
+            for (const l of lotes) {
+              if (falta <= 0) break;
+              const disp = parseFloat(l.disponible);
+              if (disp <= 0) continue;
+              const reservar = Math.min(disp, falta);
+              await resClient.query(
+                `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
+                [req.params.id, actual.producto_id, l.id, reservar.toFixed(6)]
+              );
+              falta -= reservar;
+            }
+            await resClient.query('COMMIT');
+          } catch {
+            await resClient.query('ROLLBACK').catch(() => {});
+          } finally {
+            resClient.release();
           }
         }
 
@@ -183,6 +206,40 @@ router.put('/:id', async (req, res) => {
         }
       }
     }
+
+    // Reemplazar lineas si vienen (before totals recalculation)
+    if (Array.isArray(lineas)) {
+      await pool.query(`DELETE FROM lineas_pedido WHERE pedido_id = $1`, [req.params.id]);
+      for (const l of lineas) {
+        if (!l.producto_id && !l.producto_nombre) continue;
+        await pool.query(
+          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal)
+           VALUES ($1, $2, $3, $4::NUMERIC, $5, $6::NUMERIC, $7::NUMERIC)`,
+          [req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, (parseFloat(l.cantidad ?? 0) * parseFloat(l.precio_unitario ?? 0)).toFixed(2)]
+        );
+      }
+    }
+
+    // Server-side total recalculation — always recompute from lines
+    const portesNum = parseFloat(portes ?? 0);
+    const ivaPctNum = parseFloat(iva_porcentaje ?? 21);
+    let subtotalCalc = parseFloat(subtotal ?? 0);
+
+    // If lineas were sent, recalculate from them. Otherwise recalculate from DB.
+    if (Array.isArray(lineas) && lineas.length > 0) {
+      subtotalCalc = lineas.reduce((s: number, l: any) => s + (parseFloat(l.cantidad ?? 0) * parseFloat(l.precio_unitario ?? 0)), 0);
+    } else {
+      const { rows: existingLineas } = await pool.query(
+        `SELECT cantidad, precio_unitario FROM lineas_pedido WHERE pedido_id = $1`,
+        [req.params.id]
+      );
+      if (existingLineas.length > 0) {
+        subtotalCalc = existingLineas.reduce((s: number, l: { cantidad: string; precio_unitario: string }) =>
+          s + (parseFloat(l.cantidad) * parseFloat(l.precio_unitario)), 0);
+      }
+    }
+    const ivaCalc = (subtotalCalc + portesNum) * ivaPctNum / 100;
+    const totalCalc = subtotalCalc + portesNum + ivaCalc;
 
     const { rows: [pedido] } = await pool.query(
       `UPDATE pedidos SET
@@ -195,31 +252,18 @@ router.put('/:id', async (req, res) => {
         orden_produccion_id = COALESCE($7, orden_produccion_id),
         cliente_id = COALESCE($8, cliente_id),
         cliente_nombre = COALESCE($9, cliente_nombre),
-        subtotal = COALESCE($10::NUMERIC, subtotal),
-        portes = COALESCE($11::NUMERIC, portes),
-        iva_porcentaje = COALESCE($12::NUMERIC, iva_porcentaje),
-        total = COALESCE($13::NUMERIC, total)
+        subtotal = $10::NUMERIC,
+        portes = $11::NUMERIC,
+        iva_porcentaje = $12::NUMERIC,
+        total = $13::NUMERIC
        WHERE id = $14 RETURNING *`,
       [estado ?? null, producto_id ?? null, cantidad ?? null, unidad_medida ?? null,
        fecha_entrega ?? null, notas ?? null, orden_produccion_id ?? null,
        cliente_id ?? null, cliente_nombre ?? null,
-       subtotal ?? null, portes ?? null, iva_porcentaje ?? null, total ?? null,
+       subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2),
        req.params.id]
     );
     if (!pedido) return res.status(404).json({ error: 'Pedido no encontrado' });
-
-    // Reemplazar lineas si vienen
-    if (Array.isArray(lineas)) {
-      await pool.query(`DELETE FROM lineas_pedido WHERE pedido_id = $1`, [req.params.id]);
-      for (const l of lineas) {
-        if (!l.producto_id && !l.producto_nombre) continue;
-        await pool.query(
-          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal)
-           VALUES ($1, $2, $3, $4::NUMERIC, $5, $6::NUMERIC, $7::NUMERIC)`,
-          [req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, l.subtotal ?? null]
-        );
-      }
-    }
 
     res.json(pedido);
   } catch (err: unknown) {
@@ -272,8 +316,15 @@ router.post('/:id/consumir', async (req, res) => {
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
     const { id } = req.params;
     const lotesOverride: Record<string, string[]> = req.body.lotes_override ?? {};
-    const { rows: [pedido] } = await client.query(`SELECT * FROM pedidos WHERE id = $1`, [id]);
+    const { rows: [pedido] } = await client.query(`SELECT * FROM pedidos WHERE id = $1 FOR UPDATE`, [id]);
     if (!pedido) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Pedido no encontrado' }); }
+
+    // Validate state — only allow consumir from valid states
+    const consumirPermitido = ['confirmado', 'en_produccion', 'fabricado', 'envasado'];
+    if (!consumirPermitido.includes(pedido.estado)) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: `No se puede consumir un pedido en estado "${pedido.estado}"` });
+    }
 
     // Cargar lineas del pedido (o usar producto principal si no hay lineas)
     const { rows: lineas } = await client.query(
@@ -364,6 +415,15 @@ router.post('/:id/consumir', async (req, res) => {
         restante -= consumir;
       }
 
+      // Verify all quantity was consumed from approved lots
+      if (restante > 0.001) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: 'STOCK_INSUFICIENTE',
+          mensaje: `${item.nombre}: solo hay ${(item.cantidad - restante).toFixed(3)} ${item.unidad} en lotes aprobados, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
+        });
+      }
+
       await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`, [item.cantidad.toFixed(6), item.producto_id]);
       consumidos.push(`${item.nombre}: ${item.cantidad} ${item.unidad}`);
     }
@@ -373,6 +433,10 @@ router.post('/:id/consumir', async (req, res) => {
     await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [id]);
     await client.query('COMMIT');
     invalidarCacheFinanzas();
+
+    // Push-based: check stock alerts for consumed products
+    const consumedIds = items.map(i => i.producto_id);
+    alertaService.checkStockMinimo(consumedIds).catch(() => {});
 
     return res.json({ ok: true, consumidos });
   } catch (err: unknown) {
@@ -765,10 +829,8 @@ export async function webhookHandler(req: Request, res: Response) {
       ]
     );
 
-    console.log(`[Webhook] Pedido ${pedido.numero_pedido} creado desde email de ${cliente_email}`);
     return res.status(201).json({ ok: true, numero_pedido: pedido.numero_pedido, id: pedido.id });
   } catch (err: unknown) {
-    console.error('[Webhook]', err);
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 }

@@ -46,10 +46,11 @@
 
 ### Campos opcionales utiles
 
-- **Stock minimo**: cuando el stock baja de este valor, aparece alerta naranja
+- **Stock minimo**: cuando el stock baja de este valor, aparece alerta naranja. Las alertas se disparan automaticamente tras cada fabricacion, envasado o consumo de pedido
 - **Stock maximo**: para calcular cuanto pedir al proveedor
 - **Caducidad (meses)**: vida util desde la fecha de fabricacion
 - **Proveedor**: enlaza con la ficha del proveedor para pedidos automaticos
+- **Peso plastico (kg)**: gramos de plastico por unidad del envase, necesario para el Informe de Plasticos (Ley 7/2022)
 
 ### Subir Ficha de Seguridad (SDS)
 
@@ -107,12 +108,14 @@ Se pueden definir los pasos del reactor paso a paso:
 
 Estos pasos se muestran al operario durante la fabricacion.
 
-**Control de calidad (opcional):**
+**Control de calidad:**
 
 Definir rangos aceptables de:
 - pH (ej: 6.5 - 7.5)
 - Solidos % (ej: 48 - 55)
 - Viscosidad mPa·s (ej: 3000 - 5000)
+
+> **Importante**: Estos rangos se validan automaticamente al confirmar la fabricacion. Si algun valor medido esta fuera del rango definido, el lote se crea automaticamente en estado **Cuarentena** en lugar de Aprobado, y se anade una nota a la orden indicando que parametros estan desviados. El operario recibe un aviso visual antes de que se complete el proceso. Ver seccion 4 para mas detalle.
 
 ### 2.2 Recetas de envasado
 
@@ -189,19 +192,34 @@ Si sospechas que hay discrepancias entre el stock mostrado y los lotes reales:
 2. Muestra productos con diferencia entre stock_actual y suma de lotes
 3. Puedes corregir automaticamente pulsando **Reconciliar**
 
-### Consumo FIFO
+> **Trazabilidad garantizada**: Cada correccion de reconciliacion genera automaticamente un registro en stock_moves de tipo **ajuste** con el motivo "Ajuste automatico via Reconciliacion", el usuario que lo ejecuto y las cantidades antes/despues. La cadena de auditoria nunca se rompe.
 
-Todo consumo de stock (fabricacion, envasado, pedidos) sigue orden FIFO:
-1. **Primero**: lotes que caducan antes
-2. **Segundo**: a igualdad de caducidad, el mas antiguo
-3. Se puede ver que lotes se van a usar antes de confirmar cualquier operacion
+### Consumo FEFO (First Expiry, First Out)
+
+Todo consumo de stock (fabricacion, envasado, pedidos) sigue orden FEFO:
+1. **Primero**: lotes que caducan antes (los mas urgentes)
+2. **Segundo**: a igualdad de caducidad (o sin caducidad), el mas antiguo por fecha de entrada
+3. Los lotes sin fecha de caducidad se consumen en ultimo lugar
+4. Se puede ver que lotes se van a usar antes de confirmar cualquier operacion
+
+> **Nota**: FEFO es una variante de FIFO optimizada para productos quimicos con fecha de caducidad. Garantiza que el material mas proximo a caducar se usa primero, cumpliendo con buenas practicas de almacenamiento industrial y regulacion REACH.
 
 ### Reservas de stock
 
-Al crear un pedido, el sistema reserva lotes FIFO para ese pedido:
+Al crear un pedido, el sistema reserva lotes FEFO para ese pedido dentro de una transaccion SERIALIZABLE con bloqueo de filas:
 - La reserva **no resta** stock fisico
 - Pero **impide** que otro pedido use esos mismos lotes
 - Las reservas se liberan automaticamente al completar o cancelar el pedido
+- **Proteccion contra doble reserva**: Si dos usuarios crean pedidos simultaneamente, la transaccion serializable garantiza que no se reserven los mismos lotes
+
+### Alertas automaticas de stock
+
+Las alertas se generan **automaticamente** cada vez que se completa una fabricacion, un envasado o un consumo de pedido:
+- **Stock bajo**: cuando el stock cae por debajo del minimo configurado en el producto
+- **Sin stock**: cuando el stock llega a cero
+- **Caducidad**: alerta 30 dias antes de que un lote caduque
+
+Las notificaciones aparecen al instante en el Dashboard sin necesidad de pulsar ningun boton. Tambien se pueden forzar manualmente desde Configuracion > Recheck alertas.
 
 ---
 
@@ -226,10 +244,10 @@ Al crear un pedido, el sistema reserva lotes FIFO para ese pedido:
    - **Vista del reactor**: animacion del tanque rojo que se va llenando
    - **Ingredientes**: lista de materias primas necesarias con:
      - Cantidad exacta de cada una
-     - Lotes FIFO que se van a usar (con lote_interno y cantidad de cada uno)
+     - Lotes FEFO que se van a usar (con lote_interno y cantidad de cada uno)
      - Indicador verde si hay stock suficiente, rojo si falta
    - **Pasos del proceso**: si la receta tiene pasos definidos, se muestran uno a uno
-3. Rellenar datos de calidad (opcional):
+3. Rellenar datos de calidad:
    - **pH**: valor medido
    - **Solidos %**: porcentaje de solidos
    - **Viscosidad**: viscosidad medida
@@ -241,14 +259,18 @@ Al crear un pedido, el sistema reserva lotes FIFO para ese pedido:
 
 Todo ocurre en una unica transaccion atomica (si algo falla, no se hace nada):
 1. Se verifican stocks de TODOS los ingredientes
-2. Se descuentan materias primas de lotes FIFO
+2. Se descuentan materias primas de lotes FEFO
 3. Se crean stock_moves para cada consumo (trazabilidad)
-4. Se crea un nuevo lote de cola granel con:
+4. **Validacion de Control de Calidad**: se comparan pH, solidos y viscosidad contra los rangos definidos en la receta:
+   - **Dentro de rango**: se crea un nuevo lote de cola granel en estado **Aprobado**
+   - **Fuera de rango**: se crea el lote en estado **Cuarentena** y se anade nota automatica a la orden indicando que parametros estan desviados. El operario ve un aviso en pantalla explicando la desviacion
+5. El lote se crea con:
    - Cantidad = lo realmente producido
    - Precio = coste total ingredientes / cantidad producida
-5. Se actualiza stock del producto fabricado
-6. Se calcula merma si la cantidad real difiere de la planificada
-7. Si habia un pedido vinculado, pasa a estado "fabricado"
+6. Se actualiza stock del producto fabricado
+7. Se calcula merma si la cantidad real difiere de la planificada
+8. Si habia un pedido vinculado, pasa a estado "fabricado"
+9. **Alertas automaticas**: el sistema comprueba si algun ingrediente ha bajado del stock minimo y genera notificacion instantanea
 
 **Registro de Limpieza (Medioambiente):**
 
@@ -273,6 +295,15 @@ Si planificas 1000 kg pero produces 980 kg:
 - Se registra en la orden
 - Aparece en Finanzas valorada en EUR (20 kg x coste/kg)
 - El coste por kg del producto SUBE porque gastaste las mismas materias primas para menos producto
+
+**Control de calidad fuera de rango:**
+
+Si los valores de pH, solidos o viscosidad estan fuera de los rangos definidos en la receta:
+- La fabricacion se completa normalmente (materias primas descontadas, stock_moves creados)
+- Pero el lote resultante queda en estado **Cuarentena** en lugar de Aprobado
+- El operario recibe un aviso en pantalla indicando que parametros estan desviados
+- Se anade una nota automatica a la orden: "Lote desviado de parametros de calidad: pH 4.0 fuera de rango [6.5-7.5]"
+- Un responsable de calidad debe ir a **Lotes** y aprobar o rechazar el lote manualmente tras revision
 
 ---
 
@@ -303,11 +334,12 @@ Para cuando quieres planificar el envasado con antelacion.
 1. En la lista, pulsar el boton verde **Envasar**
 2. Se muestra **pantalla de confirmacion con lotes**:
    - Lista de TODO lo que se va a consumir
-   - Para cada material: nombre, cantidad necesaria, lotes FIFO que se usaran
+   - Para cada material: nombre, cantidad necesaria, lotes FEFO que se usaran
    - Indicador verde/rojo si hay stock suficiente
 3. Si todo esta OK, pulsar **Envasar X ud**
 4. Animacion del tanque llenando el bote
 5. Resultado: producto creado, lote asignado, cantidad
+6. **Alertas automaticas**: el sistema comprueba stock de cola, envases y etiquetas tras completar
 
 #### B) Envasado rapido
 
@@ -322,22 +354,27 @@ Para cuando necesitas envasar ya, sin planificar antes.
 
 ### Multiplicador de cajas/pales
 
-Si seleccionas como envase una **Caja 18 uds (75g)**:
-- La cantidad que pones es en **cajas**, no en frascos
+El multiplicador funciona tanto en envasado planificado como en envasado rapido. Si seleccionas como envase una **Caja 18 uds (75g)** o un **Pale 60**:
+
+- La cantidad que pones es en **cajas** (o pales), no en frascos
+- El sistema detecta automaticamente el multiplicador del nombre del envase (ej: "Caja 18" → multiplicador 18, "Pale 60" → multiplicador 60)
 - El sistema calcula automaticamente:
-  - 10 cajas x 18 = **180 frascos**
+  - 10 cajas x 18 = **180 frascos** (unidades reales producidas)
   - 180 x 0.075 kg = **13.5 kg de cola** necesarios
 - Se consume:
-  - 13.5 kg de cola granel (FIFO)
-  - 180 frascos de 75g (auto-detectados del nombre del producto)
-  - 10 cajas de 18 uds
-  - Materiales extra que hayas anadido (etiquetas, etc.)
+  - 13.5 kg de cola granel (FEFO)
+  - **10 cajas** de 18 uds (el envase caja/pale)
+  - **180 etiquetas** (una por frasco)
+  - Materiales extra que hayas anadido
+- El lote producido contiene **180 unidades**, no 10
+
+> **Ejemplo de coste con multiplicador**: Si una Caja 18 uds cuesta 2 EUR, el coste por unidad de la caja es 2/18 = 0.11 EUR. El sistema divide automaticamente el CMP del envase entre el multiplicador.
 
 ### Coste del producto envasado
 
 El coste por unidad envasada se calcula automaticamente:
 - Coste cola = CMP de la cola x peso por unidad
-- Coste envase = CMP del envase
+- Coste envase = CMP del envase / multiplicador (si aplica)
 - Coste materiales = CMP de cada material extra (prorrateado por unidad)
 - **Coste total = cola + envase + materiales**
 
@@ -378,8 +415,10 @@ Crear pedido ──→ Confirmado ──→ segun stock:
 
 Al guardar:
 - El pedido se crea directamente como **Confirmado**
-- Se reservan lotes FIFO automaticamente
+- Se reservan lotes FEFO automaticamente (transaccion SERIALIZABLE)
 - Los totales se recalculan en el servidor (subtotal + portes + IVA = total)
+
+> **Integridad de totales**: Tanto al crear como al editar un pedido, el servidor recalcula de forma independiente el subtotal sumando las lineas, aplica portes e IVA%, y genera el total. No es posible que un error de red o de navegador genere totales incoherentes.
 
 ### El boton inteligente
 
@@ -397,11 +436,14 @@ La columna **Accion** muestra el estado con color para ver de un vistazo que ped
 
 1. Pulsar **Consumir** en el pedido
 2. Se abre modal con los lotes que se van a usar:
-   - Pre-seleccionados por FIFO
+   - Pre-seleccionados por FEFO
    - Se puede ajustar la cantidad de cada lote manualmente
    - Barra de progreso muestra si esta cubierto al 100%
 3. Pulsar **Consumir** cuando todo este al 100%
 4. El stock se descuenta, las reservas se liberan, el pedido pasa a **Completado**
+5. **Alertas automaticas**: el sistema comprueba si los productos consumidos han bajado del stock minimo
+
+> **Proteccion de estado**: Solo se puede consumir un pedido en estado confirmado, en produccion, fabricado o envasado. Un pedido completado o cancelado no permite consumo.
 
 ### Envasar (boton naranja)
 
@@ -425,7 +467,7 @@ La columna **Accion** muestra el estado con color para ver de un vistazo que ped
 
 1. Pulsar el **lapiz** en el pedido (solo admin, solo si no esta completado)
 2. Modificar productos, cantidades, precios, fecha, cliente
-3. Guardar
+3. Guardar — los totales se recalculan automaticamente en el servidor
 
 ### Cancelar un pedido
 
@@ -632,15 +674,22 @@ Configurar los umbrales de consumo para Oro/Plata/Bronce.
 
 ### Alertas
 
-- **Stock minimo**: genera notificacion cuando un producto baja del minimo
-- **Caducidad**: alerta 30 dias antes de que un lote caduque
-- **Merma**: alerta cuando la merma de una orden supera el % configurado
+Las alertas se generan de dos formas:
+
+1. **Automatica (push)**: tras cada fabricacion, envasado o consumo de pedido, el sistema comprueba automaticamente si los productos afectados han bajado del stock minimo y genera notificacion instantanea
+2. **Manual (pull)**: pulsando **Recheck alertas** en Configuracion para forzar una revision global
+
+Tipos de alerta:
+- **Stock bajo**: cuando el stock de un producto cae por debajo del minimo configurado
+- **Sin stock**: cuando el stock llega a cero
+- **Caducidad**: 30 dias antes de que un lote caduque
+- **Control de calidad**: lote creado en cuarentena por valores fuera de rango (ver seccion 4)
 
 ### Backups
 
 - **Backup manual**: pulsar para generar backup cifrado (AES-256)
 - **Restaurar**: seleccionar un backup para restaurar toda la base de datos
-- Los backups incluyen la base de datos completa + archivos subidos
+- Los backups incluyen la base de datos completa + archivos subidos (fichas SDS, fotos)
 
 ### Auditoria
 
@@ -650,6 +699,7 @@ Registro de TODAS las acciones del sistema:
 - Cambios de estado de lotes y pedidos
 - Fabricaciones y envasados completados
 - Ajustes manuales de stock
+- **Reconciliaciones de stock** (con detalle de cantidades corregidas por producto)
 
 ### Reconciliacion de stock
 
@@ -657,6 +707,7 @@ Si crees que hay discrepancias:
 1. **Configuracion** > **Reconciliar stock**
 2. Muestra productos donde stock_actual != suma de lotes aprobados
 3. Pulsar **Reconciliar** para corregir automaticamente
+4. Cada correccion queda registrada en stock_moves con el motivo, usuario y cantidades antes/despues
 
 ---
 
@@ -672,7 +723,10 @@ Si crees que hay discrepancias:
 **2. Fabricar cola:**
 - Produccion > Fabricacion > Nueva > Receta "Cola D2" > 1000 kg
 - Fabricar > confirmar ingredientes > datos calidad > Confirmar
+- Si pH/solidos/viscosidad estan dentro del rango → lote Aprobado automatico
+- Si algun valor esta fuera de rango → lote en Cuarentena, aviso al operario
 - Resultado: 1000 kg de Cola D2 granel en stock
+- Las alertas de stock de materias primas se generan automaticamente
 
 **3. Crear receta de envasado (solo la primera vez):**
 - Recetas > Envasado > Nueva receta
@@ -687,17 +741,20 @@ Si crees que hay discrepancias:
 - Cantidad: 500
 - Planificar > Envasar > Ver lotes > Confirmar
 - Resultado: 500 botes de Cola D2 1kg en stock
+- Alertas de stock de envases/etiquetas se generan automaticamente
 
 **5. Crear pedido:**
 - Pedidos > Nuevo Pedido
 - Cliente: "Ferreteria Garcia"
 - Producto: Cola D2 Bote 1kg > 500 ud > 5.50 EUR/ud
-- Guardar → Pedido confirmado con stock reservado
+- Guardar → Pedido confirmado con stock reservado (FEFO + SERIALIZABLE)
+- Totales recalculados en servidor: 2750 EUR + IVA
 
 **6. Preparar envio:**
 - Boton verde **Consumir** en el pedido
 - Ver lotes > Confirmar
 - Pedido completado, stock descontado
+- Alerta automatica si stock cae bajo minimo
 
 **7. Generar albaran:**
 - Icono descarga (PDF) o sobre (email) en el pedido completado
@@ -708,13 +765,15 @@ Si crees que hay discrepancias:
 
 | Termino | Significado |
 |---------|------------|
-| **FIFO** | First In, First Out — primero que caduca, primero que se usa |
+| **FEFO** | First Expiry, First Out — primero que caduca, primero que se usa (variante de FIFO optimizada para productos con caducidad) |
 | **CMP** | Coste Medio Ponderado — media ponderada del precio de compra de todos los lotes en stock |
 | **Merma** | Diferencia entre cantidad planificada y real producida (perdida en el proceso) |
 | **Granel** | Cola sin envasar, directamente del reactor |
 | **Trazabilidad** | Rastreo completo de un lote: de que materias primas viene, en que pedido acabo |
 | **Albaran** | Documento de entrega que acompana al pedido |
 | **Reserva** | Stock comprometido para un pedido confirmado (no descontado hasta el envio) |
-| **stock_moves** | Registro inmutable de cada movimiento de stock (entrada, salida, ajuste, consumo, produccion) |
+| **stock_moves** | Registro inmutable de cada movimiento de stock (entrada, salida, ajuste, consumo, produccion, reconciliacion) |
 | **Transaccion SERIALIZABLE** | Garantia de que si dos personas hacen lo mismo a la vez, una espera a la otra sin corrupcion |
-| **Reconciliacion** | Verificar y corregir que el stock mostrado coincide con los lotes reales |
+| **Reconciliacion** | Verificar y corregir que el stock mostrado coincide con los lotes reales. Cada correccion queda registrada en stock_moves |
+| **Multiplicador** | Factor que convierte cajas/pales en unidades individuales (ej: Caja 18 → multiplicador 18) |
+| **Cuarentena QC** | Estado de un lote que no ha pasado control de calidad. Puede ser aprobado o rechazado por un responsable |

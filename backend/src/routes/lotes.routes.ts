@@ -99,6 +99,29 @@ router.post('/', async (req, res) => {
       ) WHERE id = $1
     `, [producto_id]);
 
+    // Auto-link to pending supplier order if exists
+    const { rows: [ppPendiente] } = await pool.query(
+      `SELECT id FROM pedidos_proveedor
+       WHERE producto_id = $1 AND estado = 'pendiente'
+       ORDER BY fecha_solicitud DESC LIMIT 1`,
+      [producto_id]
+    );
+    if (ppPendiente) {
+      const cantRecibida = parseFloat(String(qty));
+      const { rows: [pp] } = await pool.query(
+        `SELECT cantidad_solicitada FROM pedidos_proveedor WHERE id = $1`,
+        [ppPendiente.id]
+      );
+      const solicitada = parseFloat(pp.cantidad_solicitada);
+      const nuevoEstado = cantRecibida >= solicitada * 0.95 ? 'recibido' : 'parcial';
+      await pool.query(
+        `UPDATE pedidos_proveedor SET
+           lote_id = $1, cantidad_recibida = $2::NUMERIC, fecha_recepcion = NOW(), estado = $3
+         WHERE id = $4`,
+        [lote.id, cantRecibida.toFixed(6), nuevoEstado, ppPendiente.id]
+      );
+    }
+
     // Stock move for traceability
     if (lote.estado === 'aprobado' && parseFloat(lote.cantidad_actual) > 0) {
       await pool.query(

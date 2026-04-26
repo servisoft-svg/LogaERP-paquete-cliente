@@ -95,8 +95,8 @@ export default function Dashboard() {
         const predRes = await finanzasApi.predicciones();
         setPredicciones(predRes.data as typeof predicciones);
       } catch { /* no admin */ }
-    } catch (err) {
-      console.error(err);
+    } catch {
+      // Error loading dashboard data — show empty state rather than crash
     } finally {
       setLoading(false);
     }

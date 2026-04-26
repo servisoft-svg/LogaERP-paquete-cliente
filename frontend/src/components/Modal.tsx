@@ -40,6 +40,7 @@ export default function Modal({
               </div>
               <button
                 onClick={onClose}
+                aria-label="Cerrar"
                 className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
               >
                 <X size={16} />

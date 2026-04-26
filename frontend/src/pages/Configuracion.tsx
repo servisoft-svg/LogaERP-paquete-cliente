@@ -45,7 +45,7 @@ export default function Configuracion() {
   const [backupsList, setBackupsList]     = useState<{ filename: string; size: string; date: string }[]>([]);
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [restoreResult, setRestoreResult] = useState<string | null>(null);
-  const [auditoria, setAuditoria]         = useState<any[]>([]);
+  const [auditoria, setAuditoria]         = useState<{ id: string; accion: string; tabla_afectada: string; registro_id: string; motivo: string; created_at: string; usuario_nombre?: string }[]>([]);
 
   // Audit log
   // auditLog removed — using auditoria state below
@@ -60,9 +60,10 @@ export default function Configuracion() {
       ]);
       const cfg = cfgRes.data as Config;
       setConfig(cfg);
-      setAuditoria(auditRes.data as any[]);
-    } catch { /* silencioso */ }
-    finally { setLoading(false); }
+      setAuditoria(auditRes.data as typeof auditoria);
+    } catch {
+      setErrorConfig('Error al cargar la configuración');
+    } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);

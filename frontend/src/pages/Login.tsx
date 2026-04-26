@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { LogIn, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
@@ -12,6 +13,7 @@ interface UserData {
 
 export default function Login() {
   const { login, completeLogin } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState(() => localStorage.getItem('loga_remember_email') ?? '');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(() => localStorage.getItem('loga_remember_email') !== null);
@@ -54,7 +56,7 @@ export default function Login() {
   // Despues de la animacion, completar login
   useEffect(() => {
     if (animating && pendingUser) {
-      const t = setTimeout(() => completeLogin(pendingUser), 1800);
+      const t = setTimeout(() => { completeLogin(pendingUser); navigate('/', { replace: true }); }, 1800);
       return () => clearTimeout(t);
     }
   }, [animating, pendingUser, completeLogin]);

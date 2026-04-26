@@ -6,6 +6,7 @@ import nodemailer            from 'nodemailer';
 import fs                    from 'fs';
 import path                  from 'path';
 import { invalidarCacheFinanzas } from '../routes/finanzas.routes';
+import { alertaService }          from '../services/alerta.service';
 
 export const produccionController = {
   async crear(req: Request, res: Response) {
@@ -76,50 +77,104 @@ export const produccionController = {
   async confirmar(req: Request, res: Response) {
     try {
       const { id } = req.params;
-      const usuario_id: string | undefined = (req as Request & { usuario_id?: string }).usuario_id;
-      const ph = req.body.ph ? parseFloat(req.body.ph) : undefined;
-      const solidos = req.body.solidos ? parseFloat(req.body.solidos) : undefined;
-      const viscosidad = req.body.viscosidad ? parseFloat(req.body.viscosidad) : undefined;
-      const fecha_fabricacion = req.body.fecha_fabricacion || undefined;
-      const cantidad_real_producida = req.body.cantidad_real_producida ? parseFloat(req.body.cantidad_real_producida) : undefined;
+      const usuario_id: string | undefined = (req as any).user?.id;
 
-      // Multiple photos
+      // Parse QC values — use explicit null check to allow pH=0, solidos=0, viscosidad=0
+      const ph = req.body.ph != null && req.body.ph !== '' ? parseFloat(req.body.ph) : undefined;
+      const solidos = req.body.solidos != null && req.body.solidos !== '' ? parseFloat(req.body.solidos) : undefined;
+      const viscosidad = req.body.viscosidad != null && req.body.viscosidad !== '' ? parseFloat(req.body.viscosidad) : undefined;
+      const fecha_fabricacion = req.body.fecha_fabricacion || undefined;
+      const cantidad_real_producida = req.body.cantidad_real_producida != null && req.body.cantidad_real_producida !== '' ? parseFloat(req.body.cantidad_real_producida) : undefined;
+
       const files = (req as Request & { files?: Express.Multer.File[] }).files ?? [];
       const foto_urls = files.map(f => `/uploads/${f.filename}`);
       const foto_url = foto_urls[0] ?? undefined;
 
-      const registro_limpieza = req.body.registro_limpieza || undefined;
+      const registro_limpieza = typeof req.body.registro_limpieza === 'string' && req.body.registro_limpieza.trim() ? req.body.registro_limpieza.trim() : undefined;
 
-      const resultado = await produccionService.confirmarOrden(id, usuario_id, {
-        ph, foto_url, foto_urls, solidos, viscosidad, fecha_fabricacion, cantidad_real_producida,
-      });
-
-      // Save registro_limpieza on order + lote
-      if (registro_limpieza) {
-        await pool.query(`UPDATE ordenes_produccion SET registro_limpieza = $1 WHERE id = $2`, [registro_limpieza, id]);
-        if ((resultado as any).lote_producido) {
-          await pool.query(
-            `UPDATE lotes SET registro_limpieza = $1 WHERE lote_interno = $2`,
-            [registro_limpieza, (resultado as any).lote_producido]
-          );
-        }
-      }
-
-      // Audit trail
-      await pool.query(
-        `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
-         VALUES ($1, 'FABRICACION', 'ordenes_produccion', $2, $3)`,
-        [(req as any).user?.id ?? usuario_id ?? null, id, `Fabricacion completada: ${(resultado as any).numero_orden ?? id}`]
-      );
-
-      // Mark linked pedido as fabricado (not completado — may still need envasado)
-      await pool.query(
-        `UPDATE pedidos SET estado = 'fabricado' WHERE orden_produccion_id = $1 AND estado IN ('confirmado', 'en_produccion')`,
+      // ── Load recipe config for QC enforcement ──
+      const { rows: [ordenCheck] } = await pool.query(
+        `SELECT r.ph_min, r.ph_max, r.solidos_min, r.solidos_max, r.viscosidad_min, r.viscosidad_max, r.pasos
+         FROM ordenes_produccion op
+         JOIN recetas r ON r.id = op.receta_id
+         WHERE op.id = $1`,
         [id]
       );
 
+      // ── MANDATORY QC: if recipe defines ranges, values are required ──
+      if (ordenCheck) {
+        const qcRequired = ordenCheck.ph_min != null || ordenCheck.solidos_min != null || ordenCheck.viscosidad_min != null;
+        if (qcRequired) {
+          const missing: string[] = [];
+          if (ordenCheck.ph_min != null && ph == null) missing.push('pH');
+          if (ordenCheck.solidos_min != null && solidos == null) missing.push('Sólidos %');
+          if (ordenCheck.viscosidad_min != null && viscosidad == null) missing.push('Viscosidad');
+          if (missing.length > 0) {
+            return res.status(400).json({
+              error: 'QC_OBLIGATORIO',
+              mensaje: `Control de calidad obligatorio. Faltan: ${missing.join(', ')}`,
+              campos_faltantes: missing,
+            });
+          }
+        }
+
+        // ── MANDATORY LIMPIEZA: if recipe has a Limpieza step, registro is required ──
+        const pasos: { fase?: string }[] = Array.isArray(ordenCheck.pasos) ? ordenCheck.pasos : [];
+        const requiereLimpieza = pasos.some(p => p.fase?.toLowerCase() === 'limpieza');
+        if (requiereLimpieza && !registro_limpieza) {
+          return res.status(400).json({
+            error: 'LIMPIEZA_OBLIGATORIA',
+            mensaje: 'El registro de limpieza es obligatorio para esta receta. Indica el agente, volumen y destino del residuo.',
+          });
+        }
+      }
+
+      // ── QC Validation: compare values against recipe ranges ──
+      let qc_fuera_de_rango = false;
+      const qc_desviaciones: string[] = [];
+
+      if (ordenCheck) {
+        if (ph != null && ordenCheck.ph_min != null && ordenCheck.ph_max != null) {
+          if (ph < parseFloat(ordenCheck.ph_min) || ph > parseFloat(ordenCheck.ph_max)) {
+            qc_fuera_de_rango = true;
+            qc_desviaciones.push(`pH ${ph} fuera de rango [${ordenCheck.ph_min}-${ordenCheck.ph_max}]`);
+          }
+        }
+        if (solidos != null && ordenCheck.solidos_min != null && ordenCheck.solidos_max != null) {
+          if (solidos < parseFloat(ordenCheck.solidos_min) || solidos > parseFloat(ordenCheck.solidos_max)) {
+            qc_fuera_de_rango = true;
+            qc_desviaciones.push(`Sólidos ${solidos}% fuera de rango [${ordenCheck.solidos_min}-${ordenCheck.solidos_max}]%`);
+          }
+        }
+        if (viscosidad != null && ordenCheck.viscosidad_min != null && ordenCheck.viscosidad_max != null) {
+          if (viscosidad < parseFloat(ordenCheck.viscosidad_min) || viscosidad > parseFloat(ordenCheck.viscosidad_max)) {
+            qc_fuera_de_rango = true;
+            qc_desviaciones.push(`Viscosidad ${viscosidad} fuera de rango [${ordenCheck.viscosidad_min}-${ordenCheck.viscosidad_max}]`);
+          }
+        }
+      }
+
+      // Build QC annotation note (passed to service, saved inside transaction)
+      const nota_qc = qc_fuera_de_rango
+        ? `Lote desviado de parámetros de calidad: ${qc_desviaciones.join('; ')}. Lote creado en CUARENTENA.`
+        : undefined;
+
+      // ── Everything passed to service runs inside a single SERIALIZABLE transaction ──
+      const resultado = await produccionService.confirmarOrden(id, usuario_id, {
+        ph, foto_url, foto_urls, solidos, viscosidad, fecha_fabricacion, cantidad_real_producida,
+        qc_fuera_de_rango, registro_limpieza, nota_qc,
+      });
+
+      // Post-transaction: only non-critical operations (cache + async alerts)
       invalidarCacheFinanzas();
-      return res.status(200).json(resultado);
+      alertaService.checkStockMinimo().catch(() => {});
+
+      return res.status(200).json({
+        ...resultado,
+        qc_fuera_de_rango,
+        qc_desviaciones,
+        lote_estado: qc_fuera_de_rango ? 'cuarentena' : 'aprobado',
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error interno';
 
@@ -147,11 +202,13 @@ export const produccionController = {
 
   async listar(req: Request, res: Response) {
     try {
-      const { estado } = req.query;
-      const ordenes = await produccionService.listarOrdenes(
-        estado ? { estado: String(estado) } : undefined
-      );
-      return res.json(ordenes);
+      const { estado, limit, offset } = req.query;
+      const result = await produccionService.listarOrdenes({
+        estado: estado ? String(estado) : undefined,
+        limit:  limit  ? parseInt(String(limit), 10)  : undefined,
+        offset: offset ? parseInt(String(offset), 10) : undefined,
+      });
+      return res.json(result.rows);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error interno';
       return res.status(500).json({ error: msg });

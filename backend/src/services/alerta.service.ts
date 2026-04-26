@@ -49,21 +49,76 @@ class AlertaService {
       ORDER BY l.fecha_caducidad ASC
     `);
 
-    for (const lote of lotesCaducando) {
-      const dias = Math.ceil((new Date(lote.fecha_caducidad).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    if (lotesCaducando.length > 0) {
+      const values: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
+      for (const lote of lotesCaducando) {
+        const dias = Math.ceil((new Date(lote.fecha_caducidad).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+        values.push(`('caducidad', $${idx}, $${idx+1}, $${idx+2})`);
+        params.push(
+          'Caducidad proxima: ' + lote.producto_nombre,
+          'Lote ' + lote.lote_interno + ' de ' + lote.producto_nombre + ' caduca en ' + dias + ' dias (' + new Date(lote.fecha_caducidad).toLocaleDateString('es-ES') + ')',
+          lote.producto_id,
+        );
+        idx += 3;
+      }
       await pool.query(`
         INSERT INTO notificaciones (tipo, titulo, mensaje, producto_id)
-        VALUES ('caducidad', $1, $2, $3)
-        ON CONFLICT (producto_id, tipo) WHERE leida = FALSE DO UPDATE SET
-          created_at = NOW(), mensaje = EXCLUDED.mensaje
-      `, [
-        'Caducidad proxima: ' + lote.producto_nombre,
-        'Lote ' + lote.lote_interno + ' de ' + lote.producto_nombre + ' caduca en ' + dias + ' dias (' + new Date(lote.fecha_caducidad).toLocaleDateString('es-ES') + ')',
-        lote.producto_id,
-      ]);
+        VALUES ${values.join(', ')}
+        ON CONFLICT DO NOTHING
+      `, params);
     }
     } catch (err) {
       console.error('[alertaService] checkCaducidades failed:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Push-based: check stock mínimo for specific product IDs.
+   * Called automatically after fabricación/envasado/consumo.
+   */
+  async checkStockMinimo(productoIds?: string[]): Promise<void> {
+    try {
+      const where = productoIds && productoIds.length > 0
+        ? `AND p.id = ANY($1)`
+        : '';
+      const params = productoIds && productoIds.length > 0 ? [productoIds] : [];
+
+      const { rows } = await pool.query(`
+        SELECT p.id, p.nombre, p.codigo, p.stock_actual, p.stock_minimo, p.stock_maximo
+        FROM productos p
+        WHERE p.activo = true
+          AND p.stock_minimo > 0
+          AND p.stock_actual <= p.stock_minimo
+          ${where}
+      `, params);
+
+      if (rows.length === 0) return;
+
+      const values: string[] = [];
+      const insertParams: unknown[] = [];
+      let idx = 1;
+      for (const p of rows) {
+        const tipo = parseFloat(p.stock_actual) <= 0 ? 'sin_stock' : 'stock_bajo';
+        values.push(`($${idx}, $${idx+1}, $${idx+2}, $${idx+3})`);
+        insertParams.push(
+          tipo,
+          `Stock bajo: ${p.nombre}`,
+          `${p.nombre} (${p.codigo}): stock actual ${parseFloat(p.stock_actual).toFixed(1)} por debajo del mínimo ${parseFloat(p.stock_minimo).toFixed(1)}`,
+          p.id,
+        );
+        idx += 4;
+      }
+
+      await pool.query(`
+        INSERT INTO notificaciones (tipo, titulo, mensaje, producto_id)
+        VALUES ${values.join(', ')}
+        ON CONFLICT DO NOTHING
+      `, insertParams);
+    } catch (err) {
+      // Non-blocking: don't let alert failures break the main operation
+      console.error('[alertaService] checkStockMinimo failed:', err instanceof Error ? err.message : err);
     }
   }
 

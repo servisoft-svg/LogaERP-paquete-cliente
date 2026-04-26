@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import compression from 'compression';
 import dotenv  from 'dotenv';
 import path    from 'path';
+import http    from 'http';
 
 import produccionRoutes      from './routes/produccion.routes';
 import stockRoutes            from './routes/stock.routes';
@@ -22,13 +23,40 @@ import { traceIdMiddleware } from './middleware/traceId';
 import { auditoriaMiddleware } from './middleware/auditoria';
 import { pool }          from './db/pool';
 import { queuesHealthy } from './queues/index';
+import { logger }        from './lib/logger';
 
 dotenv.config();
+
+// ── Validate required env vars ──────────────────────────────
+const requiredEnv = ['DATABASE_URL', 'JWT_SECRET'] as const;
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`Missing required env var: ${key}`);
+    process.exit(1);
+  }
+}
 
 const app  = express();
 const PORT = process.env.PORT ?? 3001;
 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+}));
 app.use(compression());
 
 // Trace ID: UUID por request → propagado a logs, headers, SQL
@@ -46,12 +74,17 @@ app.use('/api/', globalLimiter);
 // Request logging con trace ID
 app.use((req, _res, next) => {
   if (req.method !== 'GET') {
-    console.log(`[${req.traceId}] ${new Date().toISOString()} ${req.method} ${req.path} ${(req as any).user?.id ?? 'anon'}`);
+    logger.info(`${req.method} ${req.path}`, { traceId: req.traceId, user: (req as any).user?.id ?? 'anon' });
   }
   next();
 });
+const corsOrigin = process.env.CORS_ORIGIN;
+if (!corsOrigin && process.env.NODE_ENV === 'production') {
+  console.error('CORS_ORIGIN must be set in production');
+  process.exit(1);
+}
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: corsOrigin || 'http://localhost:5173',
   credentials: true,
 }));
 app.use(express.json({ limit: '1mb' }));
@@ -89,8 +122,9 @@ app.get('/api/health', async (_req, res) => {
 // Public routes (no auth)
 app.use('/api/auth', authRoutes);
 
-// Public webhook (before auth middleware)
-app.post('/api/pedidos/webhook', webhookHandler);
+// Public webhook (before auth middleware) — with dedicated rate limit
+const webhookLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: 'Too many webhook requests' } });
+app.post('/api/pedidos/webhook', webhookLimiter, webhookHandler);
 
 // Protected routes (need token)
 app.use('/api/productos',     authMiddleware, productosRoutes);
@@ -105,7 +139,7 @@ app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(`[${req.traceId}] [Global Error]`, err.message);
+  logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });
   res.status(500).json({ error: 'Error interno del servidor', traceId: req.traceId });
 });
 
@@ -114,10 +148,28 @@ queuesHealthy().then((ok) => {
   if (ok) {
     import('./queues/workers').then(w => w.startWorkers());
   } else {
-    console.log('⚠ Redis no disponible — colas desactivadas (PDFs/emails inline)');
+    logger.warn('Redis no disponible — colas desactivadas (PDFs/emails inline)');
   }
 }).catch(() => {});
 
-app.listen(PORT, () => {
-  console.log(`✅ Loga ERP Backend corriendo en http://localhost:${PORT}`);
+const server = http.createServer(app);
+
+server.listen(PORT, () => {
+  logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
 });
+
+// ── Graceful shutdown ───────────────────────────────────────
+function shutdown(signal: string) {
+  logger.info(`${signal} recibido — cerrando servidor...`);
+  server.close(async () => {
+    logger.info('HTTP server cerrado');
+    try { await pool.end(); } catch { /* already closed */ }
+    logger.info('Pool DB cerrado');
+    process.exit(0);
+  });
+  // Force exit after 10s
+  setTimeout(() => { logger.error('Shutdown timeout — forzando salida'); process.exit(1); }, 10_000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));

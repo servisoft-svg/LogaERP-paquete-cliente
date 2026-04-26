@@ -1,9 +1,10 @@
 import { useState, useEffect, Suspense, lazy } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import Navbar from './components/Navbar';
 import Login from './pages/Login';
-import { LoadingScreen } from './components/SpinnerColaBlanca';
+import SpinnerColaBlanca, { LoadingScreen } from './components/SpinnerColaBlanca';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
@@ -33,19 +34,19 @@ function AppContent() {
     <div>
       <Navbar />
       <main className="mx-auto max-w-screen-xl px-4 py-6 sm:px-6 pb-20 md:pb-8">
-        <Suspense fallback={null}>
+        <Suspense fallback={<div className="flex items-center justify-center min-h-[60vh]"><SpinnerColaBlanca size="sm" /></div>}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/productos" element={<Productos />} />
             <Route path="/recetas" element={<Recetas />} />
             <Route path="/produccion" element={<OrdenesFabricacion />} />
             <Route path="/lotes" element={<Lotes />} />
-            {isAdmin && <Route path="/proveedores" element={<Proveedores />} />}
-            {isAdmin && <Route path="/clientes" element={<Clientes />} />}
+            <Route path="/proveedores" element={isAdmin ? <Proveedores /> : <Navigate to="/" replace />} />
+            <Route path="/clientes" element={isAdmin ? <Clientes /> : <Navigate to="/" replace />} />
             <Route path="/pedidos" element={<Pedidos />} />
-            {isAdmin && <Route path="/finanzas" element={<Finanzas />} />}
-            {isAdmin && <Route path="/configuracion" element={<Configuracion />} />}
-            {isAdmin && <Route path="/recuento" element={<Recuento />} />}
+            <Route path="/finanzas" element={isAdmin ? <Finanzas /> : <Navigate to="/" replace />} />
+            <Route path="/configuracion" element={isAdmin ? <Configuracion /> : <Navigate to="/" replace />} />
+            <Route path="/recuento" element={isAdmin ? <Recuento /> : <Navigate to="/" replace />} />
           </Routes>
         </Suspense>
       </main>
@@ -55,10 +56,12 @@ function AppContent() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

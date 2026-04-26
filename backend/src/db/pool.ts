@@ -11,7 +11,8 @@ export const pool = new Pool({
 });
 
 pool.on('error', (err) => {
-  console.error('[DB] Unexpected client error:', err.message);
+  // Use console.error here since logger may not be initialized yet at module load time
+  console.error('[DB] Unexpected pool error:', err.message);
 });
 
 /** Ejecuta fn dentro de una transacción SERIALIZABLE. Hace ROLLBACK si lanza. */

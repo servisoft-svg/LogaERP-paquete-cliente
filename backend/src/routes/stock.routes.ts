@@ -34,23 +34,62 @@ router.get('/reconciliar', async (_req, res) => {
   }
 });
 
-// POST /api/stock/reconciliar — fix all discrepancies
-router.post('/reconciliar', async (_req, res) => {
+// POST /api/stock/reconciliar — fix all discrepancies WITH audit trail in stock_moves
+router.post('/reconciliar', async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { rowCount } = await pool.query(`
-      UPDATE productos p SET stock_actual = COALESCE((
-        SELECT SUM(l.cantidad_actual) FROM lotes l
+    await client.query('BEGIN');
+    const userId = (req as any).user?.id ?? null;
+
+    // Find all discrepancies
+    const { rows: discrepancias } = await client.query(`
+      SELECT p.id, p.codigo, p.nombre, p.stock_actual,
+        COALESCE(s.suma, 0) AS stock_lotes,
+        (COALESCE(s.suma, 0) - p.stock_actual) AS diferencia
+      FROM productos p
+      LEFT JOIN LATERAL (
+        SELECT SUM(l.cantidad_actual) AS suma FROM lotes l
         WHERE l.producto_id = p.id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-      ), 0)
+      ) s ON true
       WHERE p.activo = true
-        AND ABS(p.stock_actual - COALESCE((
-          SELECT SUM(l.cantidad_actual) FROM lotes l
-          WHERE l.producto_id = p.id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-        ), 0)) > 0.001
+        AND ABS(p.stock_actual - COALESCE(s.suma, 0)) > 0.001
+      FOR UPDATE OF p
     `);
-    return res.json({ ok: true, corregidos: rowCount });
+
+    for (const d of discrepancias) {
+      const antes = parseFloat(d.stock_actual);
+      const despues = parseFloat(d.stock_lotes);
+      const diferencia = despues - antes;
+
+      // Update stock_actual
+      await client.query(
+        `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
+        [despues.toFixed(6), d.id]
+      );
+
+      // Create stock_move for audit trail
+      await client.query(
+        `INSERT INTO stock_moves
+           (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
+         VALUES ($1, 'ajuste', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC, $5, $6)`,
+        [
+          d.id,
+          diferencia.toFixed(6),
+          antes.toFixed(6),
+          despues.toFixed(6),
+          userId,
+          `Ajuste automático vía Reconciliación (${d.codigo}: ${antes.toFixed(3)} → ${despues.toFixed(3)})`,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, corregidos: discrepancias.length });
   } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } finally {
+    client.release();
   }
 });
 
