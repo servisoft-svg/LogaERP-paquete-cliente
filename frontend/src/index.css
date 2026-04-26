@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #FF0000; }
+  .dark ::-webkit-scrollbar-thumb { background: #555; }
+}
+
+@layer utilities {
+  .text-loga-red   { color: #FF0000; }
+  .bg-loga-red     { background-color: #FF0000; }
+  .border-loga-red { border-color: #FF0000; }
+}
+
+/* ═══════════════════════════════════
+   DARK MODE — gris neutro
+   Fondo: #171717  Cards: #262626
+   ═══════════════════════════════════ */
+
+/* Fondos */
+.dark .bg-white { background-color: #262626 !important; }
+.dark .bg-gray-50 { background-color: #2a2a2a !important; }
+.dark .bg-gray-100 { background-color: #333 !important; }
+.dark .bg-gray-200 { background-color: #404040 !important; }
+
+/* Bordes */
+.dark .border-gray-50 { border-color: #333 !important; }
+.dark .border-gray-100 { border-color: #3a3a3a !important; }
+.dark .border-gray-200 { border-color: #444 !important; }
+.dark .border-gray-300 { border-color: #555 !important; }
+
+/* Textos — TODOS claros para buen contraste */
+.dark .text-gray-900 { color: #ffffff !important; }
+.dark .text-gray-800 { color: #f0f0f0 !important; }
+.dark .text-gray-700 { color: #e0e0e0 !important; }
+.dark .text-gray-600 { color: #ccc !important; }
+.dark .text-gray-500 { color: #bbb !important; }
+.dark .text-gray-400 { color: #999 !important; }
+.dark .text-gray-300 { color: #888 !important; }
+
+/* Sombras */
+.dark .shadow-sm { box-shadow: 0 1px 3px rgba(0,0,0,0.5) !important; }
+.dark .shadow-md { box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important; }
+.dark .shadow-lg { box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; }
+.dark .shadow-2xl { box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important; }
+
+/* Inputs */
+.dark input, .dark select, .dark textarea {
+  background-color: #1a1a1a !important;
+  color: #f0f0f0 !important;
+  border-color: #444 !important;
+}
+.dark input::placeholder, .dark textarea::placeholder { color: #777 !important; }
+.dark input:focus, .dark select:focus, .dark textarea:focus { border-color: #FF0000 !important; }
+
+/* Tablas */
+.dark table thead { background-color: #2a2a2a !important; }
+.dark table thead th { color: #bbb !important; }
+.dark table tbody tr { border-color: #333 !important; }
+.dark table tbody tr:hover { background-color: #333 !important; }
+.dark .divide-gray-50 > :not([hidden]) ~ :not([hidden]) { border-color: #333 !important; }
+.dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #333 !important; }
+
+/* Modal backdrop */
+.dark .bg-black\/30 { background-color: rgba(0,0,0,0.65) !important; }
+.dark .bg-black\/50 { background-color: rgba(0,0,0,0.7) !important; }
+
+/* Badges — fondo sutil coloreado */
+.dark .bg-red-50 { background-color: rgba(239,68,68,0.15) !important; }
+.dark .bg-red-100 { background-color: rgba(239,68,68,0.2) !important; }
+.dark .bg-emerald-50 { background-color: rgba(16,185,129,0.15) !important; }
+.dark .bg-emerald-100 { background-color: rgba(16,185,129,0.2) !important; }
+.dark .bg-amber-50 { background-color: rgba(245,158,11,0.15) !important; }
+.dark .bg-amber-100 { background-color: rgba(245,158,11,0.2) !important; }
+.dark .bg-blue-50 { background-color: rgba(59,130,246,0.15) !important; }
+.dark .bg-blue-100 { background-color: rgba(59,130,246,0.2) !important; }
+.dark .bg-purple-50 { background-color: rgba(168,85,247,0.15) !important; }
+.dark .bg-purple-100 { background-color: rgba(168,85,247,0.2) !important; }
+.dark .bg-indigo-50 { background-color: rgba(99,102,241,0.15) !important; }
+
+/* Font mono en dark */
+.dark .font-mono { color: #ddd !important; }
+
+/* Lotes expandidos en productos */
+.dark .opacity-30 { opacity: 0.4 !important; }
