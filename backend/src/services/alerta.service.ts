@@ -2,15 +2,22 @@ import { pool } from '../db/pool';
 
 class AlertaService {
   async listarNotificaciones(soloNoLeidas = true): Promise<unknown[]> {
+    // DISTINCT ON producto_id: una sola notif por producto (la más reciente).
+    // Solo notifica productos que SIGUEN bajo mínimo (stock_actual < stock_minimo).
+    // Filtra notifs obsoletas (producto repuesto pero notif aún sin leer).
     const { rows } = await pool.query(
-      `SELECT n.*, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
-              p.unidad_medida, p.stock_actual, p.stock_maximo,
+      `SELECT DISTINCT ON (n.producto_id)
+              n.*, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
+              p.unidad_medida, p.stock_actual, p.stock_maximo, p.stock_minimo,
               pv.email AS proveedor_email, pv.nombre AS proveedor_nombre
        FROM notificaciones n
-       JOIN productos p ON p.id = n.producto_id
+       JOIN productos p ON p.id = n.producto_id AND p.activo = TRUE
        LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
-       ${soloNoLeidas ? 'WHERE n.leida = FALSE' : ''}
-       ORDER BY n.created_at DESC
+       WHERE 1=1
+         ${soloNoLeidas ? 'AND n.leida = FALSE' : ''}
+         AND p.stock_minimo > 0
+         AND p.stock_actual < p.stock_minimo
+       ORDER BY n.producto_id, n.created_at DESC
        LIMIT 100`
     );
     return rows;
@@ -25,6 +32,21 @@ class AlertaService {
 
   async marcarTodasLeidas(): Promise<void> {
     await pool.query(`UPDATE notificaciones SET leida = TRUE WHERE leida = FALSE`);
+  }
+
+  /**
+   * Marca leídas las notifs de stock bajo cuyo producto YA está repuesto.
+   * Limpia ruido sin perder histórico. Llamar tras mutaciones de stock.
+   */
+  async limpiarObsoletas(): Promise<void> {
+    await pool.query(`
+      UPDATE notificaciones n SET leida = TRUE
+      FROM productos p
+      WHERE n.producto_id = p.id
+        AND n.leida = FALSE
+        AND n.tipo IN ('stock_bajo', 'sin_stock')
+        AND (p.stock_minimo = 0 OR p.stock_actual >= p.stock_minimo)
+    `);
   }
 
   async cantidadNoLeidas(): Promise<number> {
@@ -94,7 +116,11 @@ class AlertaService {
           ${where}
       `, params);
 
-      if (rows.length === 0) return;
+      // Aunque no haya productos bajo mínimo ahora, limpia notifs obsoletas
+      if (rows.length === 0) {
+        await this.limpiarObsoletas();
+        return;
+      }
 
       const values: string[] = [];
       const insertParams: unknown[] = [];
@@ -116,6 +142,9 @@ class AlertaService {
         VALUES ${values.join(', ')}
         ON CONFLICT DO NOTHING
       `, insertParams);
+
+      // Limpia notifs obsoletas (productos ya repuestos) en el mismo paso
+      await this.limpiarObsoletas();
     } catch (err) {
       // Non-blocking: don't let alert failures break the main operation
       console.error('[alertaService] checkStockMinimo failed:', err instanceof Error ? err.message : err);

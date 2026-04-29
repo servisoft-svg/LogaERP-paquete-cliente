@@ -8,6 +8,8 @@ import { produccionApi, productosApi, recetasApi } from '../api/client';
 import type { Producto, Receta } from '../types';
 import TanqueEnvasado from './TanqueEnvasado';
 import SearchSelect from './SearchSelect';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from './ToastFields';
 import clsx from 'clsx';
 
 interface Props {
@@ -123,7 +125,9 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
       setPreviewData(prev.data);
     } catch (err: unknown) {
       const apiErr = err as { response?: { data?: { error?: string } } };
-      setErrorMsg(apiErr?.response?.data?.error ?? 'Error');
+      const msg = apiErr?.response?.data?.error ?? 'Error';
+      setErrorMsg(msg);
+      notify.error('No se pudo planificar el envasado', { description: msg });
       setFase('error');
     }
   };
@@ -137,11 +141,25 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
       try { audioRef.current = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH2JkYuDe3J1eH+GjIuGgXx4eHyBhomLiYV/enh5fIGFiIqIhYB8eXl8gIWIioiGgX15eXyAhYiKiIaBfXl5fICEh4mIhoF9eXl8gISHiYiGgX15'); audioRef.current.volume = 0.15; audioRef.current.play().catch(() => {}); } catch {}
       const { data } = await produccionApi.confirmarEnvasado(ordenCreada);
       clearInterval(interval); setFillPct(100); setResultado(data);
+      const r = data as { producto_envasado?: string; cantidad?: number; lote?: string; peso_cola_consumido?: number };
+      notify.success('Envasado completado', {
+        description: (
+          <ToastBlock title={r.producto_envasado}>
+            <ToastField label="Unidades" value={r.cantidad !== undefined ? `${r.cantidad.toLocaleString('es-ES')} ud` : ''} />
+            <ToastField label="Envase" value={envaseSel?.nombre} />
+            <ToastField label="Cola consumida" value={r.peso_cola_consumido !== undefined ? `${r.peso_cola_consumido.toLocaleString('es-ES', { maximumFractionDigits: 2 })} kg` : ''} />
+            <ToastField label="Lote" value={r.lote} />
+          </ToastBlock>
+        ),
+      });
       setTimeout(() => setFase('completado'), 800);
     } catch (err: unknown) {
       clearInterval(interval); setFillPct(0);
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      setErrorMsg(msg ?? 'Error al envasar'); setFase('error');
+      const errMsg = msg ?? 'Error al envasar';
+      setErrorMsg(errMsg);
+      notify.error('Envasado fallido', { description: errMsg });
+      setFase('error');
     }
   };
 

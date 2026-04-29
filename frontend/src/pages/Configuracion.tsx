@@ -3,6 +3,8 @@ import { Settings, Save, Percent, Mail, Bell, Eye, EyeOff, SendHorizontal, HardD
 import { configuracionApi } from '../api/client';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import { FormField, Input, Textarea } from '../components/FormField';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 const EJEMPLO = {
   producto:  'Acetato de Vinilo (VAM)',
@@ -87,23 +89,36 @@ export default function Configuracion() {
     setSavingConfig(true);
     setErrorConfig('');
     setSavedConfig(false);
+    const payload = {
+      porcentaje_alerta: Number(config.porcentaje_alerta),
+      plantilla_email:   config.plantilla_email,
+      email_remitente:   config.email_remitente,
+      smtp_user:         config.smtp_user || undefined,
+      smtp_pass_enc:     smtpPass || undefined,
+      empresa_nombre:    config.empresa_nombre,
+      empresa_cif:       config.empresa_cif,
+      empresa_direccion: config.empresa_direccion,
+      empresa_telefono:  config.empresa_telefono,
+      empresa_web:       config.empresa_web,
+      nivel_bronce:      config.nivel_bronce ? Number(config.nivel_bronce) : undefined,
+      nivel_plata:       config.nivel_plata ? Number(config.nivel_plata) : undefined,
+      nivel_oro:         config.nivel_oro ? Number(config.nivel_oro) : undefined,
+    };
     try {
-      const { data } = await configuracionApi.editar({
-        porcentaje_alerta: Number(config.porcentaje_alerta),
-        plantilla_email:   config.plantilla_email,
-        email_remitente:   config.email_remitente,
-        smtp_user:         config.smtp_user || undefined,
-        smtp_pass_enc:     smtpPass || undefined,
-        empresa_nombre:    config.empresa_nombre,
-        empresa_cif:       config.empresa_cif,
-        empresa_direccion: config.empresa_direccion,
-        empresa_telefono:  config.empresa_telefono,
-        empresa_web:       config.empresa_web,
-        nivel_bronce:      config.nivel_bronce ? Number(config.nivel_bronce) : undefined,
-        nivel_plata:       config.nivel_plata ? Number(config.nivel_plata) : undefined,
-        nivel_oro:         config.nivel_oro ? Number(config.nivel_oro) : undefined,
+      const res = await notify.promise(configuracionApi.editar(payload), {
+        loading: 'Guardando configuración…',
+        success: 'Configuración guardada',
+        successDesc: (
+          <ToastBlock title={config.empresa_nombre}>
+            <ToastField label="CIF" value={config.empresa_cif} />
+            <ToastField label="Email remitente" value={config.email_remitente} span={2} />
+            <ToastField label="Alerta stock" value={`${config.porcentaje_alerta}%`} />
+            <ToastField label="SMTP" value={smtpPass ? 'contraseña actualizada' : ''} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
       });
-      setConfig(data as Config);
+      setConfig(res.data as Config);
       setSmtpPass('');
       setSavedConfig(true);
       setTimeout(() => setSavedConfig(false), 3000);
@@ -270,7 +285,21 @@ export default function Configuracion() {
                 setTestSmtpLoading(true);
                 setTestSmtpResult(null);
                 try {
-                  const { data } = await configuracionApi.testSmtp();
+                  const { data } = await notify.promise(configuracionApi.testSmtp(), {
+                    loading: 'Enviando email de prueba…',
+                    success: (r) => {
+                      const d = (r as { data: { ok?: boolean; error?: string } }).data;
+                      return d.ok ? 'Email de prueba enviado' : `Error SMTP`;
+                    },
+                    successDesc: (
+                      <ToastBlock>
+                        <ToastField label="Usuario" value={config?.smtp_user} span={2} />
+                        <ToastField label="Remitente" value={config?.email_remitente} span={2} />
+                        <ToastField label="Host" value="smtp.gmail.com:587" span={2} />
+                      </ToastBlock>
+                    ),
+                    error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al probar SMTP',
+                  });
                   const d = data as { ok?: boolean; error?: string };
                   setTestSmtpResult(d.ok ? 'Email de prueba enviado correctamente.' : `Error: ${d.error}`);
                 } catch (err: unknown) {
@@ -398,7 +427,7 @@ export default function Configuracion() {
           <p className="text-xs text-gray-500">
             Umbrales de consumo total en EUR para asignar nivel al cliente. Se recalcula automáticamente al guardar.
           </p>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <FormField label="Bronce (EUR)" hint="Mínimo para bronce">
               <Input
                 type="number" min="0" step="1000"
@@ -461,7 +490,20 @@ export default function Configuracion() {
                 setBackupLoading(true);
                 setBackupResult(null);
                 try {
-                  const { data } = await configuracionApi.backup();
+                  const { data } = await notify.promise(configuracionApi.backup(), {
+                    loading: 'Creando backup…',
+                    success: 'Backup completado',
+                    successDesc: (r) => {
+                      const d = (r as { data: { filename?: string; size?: string; local?: boolean; drive?: boolean } }).data;
+                      return (
+                        <ToastBlock title={d.filename}>
+                          <ToastField label="Tamaño" value={d.size} />
+                          <ToastField label="Destinos" value={[d.local && 'local', d.drive && 'Drive'].filter(Boolean).join(' · ') || ''} />
+                        </ToastBlock>
+                      );
+                    },
+                    error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al crear backup',
+                  });
                   const d = data as { ok?: boolean; mensaje?: string; error?: string };
                   setBackupResult(d.ok ? d.mensaje ?? 'Backup completado.' : `Error: ${d.error}`);
                 } catch (err: unknown) {
@@ -518,7 +560,12 @@ export default function Configuracion() {
                         setRestoreLoading(true);
                         setRestoreResult(null);
                         try {
-                          const { data } = await configuracionApi.restaurarBackup(b.filename);
+                          const { data } = await notify.promise(configuracionApi.restaurarBackup(b.filename), {
+                            loading: 'Restaurando backup…',
+                            success: 'Backup restaurado',
+                            successDesc: 'Recarga la página',
+                            error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al restaurar',
+                          });
                           const d = data as { ok?: boolean; message?: string };
                           setRestoreResult(d.ok ? 'Backup restaurado correctamente. Recarga la página.' : `Error: ${d.message}`);
                         } catch (err: unknown) {

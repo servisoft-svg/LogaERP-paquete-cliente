@@ -12,6 +12,9 @@ import ConfirmModal from '../components/ConfirmModal';
 import { FormField, Input, Select } from '../components/FormField';
 import { useAuth } from '../contexts/AuthContext';
 import Paginacion from '../components/Paginacion';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField, ToastList } from '../components/ToastFields';
+import { checkStockBajo } from '../lib/stockAlerts';
 import clsx from 'clsx';
 
 export default function Pedidos() {
@@ -196,24 +199,59 @@ export default function Pedidos() {
         }}),
       };
 
-      if (editando) {
-        await pedidosApi.editar(editando.id, payload);
-      } else {
-        await pedidosApi.crear(payload);
-      }
+      const accion = editando ? pedidosApi.editar(editando.id, payload) : pedidosApi.crear(payload);
+      await notify.promise(accion, {
+        loading: editando ? 'Guardando cambios…' : 'Creando pedido…',
+        success: editando ? 'Pedido actualizado' : 'Pedido creado',
+        successDesc: (
+          <ToastBlock title={payload.cliente_nombre}>
+            <ToastField label="Líneas" value={lineasValidas.length} />
+            <ToastField label="Total" value={`${totalCalc.toLocaleString('es-ES', { minimumFractionDigits: 2 })} €`} span={2} />
+          </ToastBlock>
+        ),
+        error: editando ? 'No se pudo guardar' : 'No se pudo crear el pedido',
+      });
 
       setModalOpen(false);
       setEditando(null);
       cargar();
-    } catch { /* */ }
+    } catch { /* notificado */ }
     finally { setSaving(false); }
   };
 
   const cambiarEstado = async (pedido: Pedido, estado: string) => {
+    const labels: Record<string, string> = {
+      confirmado: 'Pedido confirmado',
+      en_produccion: 'Pedido enviado a producción',
+      fabricado: 'Pedido marcado como fabricado',
+      completado: 'Pedido completado',
+      borrador: 'Pedido vuelto a borrador',
+    };
+    const lineas = pedido.lineas ?? [];
     try {
-      await pedidosApi.editar(pedido.id, { estado });
+      await notify.promise(
+        pedidosApi.editar(pedido.id, { estado }),
+        {
+          loading: `Actualizando ${pedido.numero_pedido ?? 'pedido'}…`,
+          success: labels[estado] ?? 'Estado actualizado',
+          successDesc: lineas.length > 0 ? (
+            <ToastList
+              title={pedido.cliente_nombre ?? 'Cliente'}
+              rows={lineas.slice(0, 5).map(l => ({
+                left: l.producto_nombre,
+                right: `${parseFloat(String(l.cantidad)).toLocaleString('es-ES')} ${l.unidad_medida ?? ''}`,
+              }))}
+              emptyMore={lineas.length > 5 ? lineas.length - 5 : 0}
+              footer={pedido.total ? (
+                <><span>Total</span><span>{parseFloat(String(pedido.total)).toLocaleString('es-ES', { minimumFractionDigits: 2 })} €</span></>
+              ) : undefined}
+            />
+          ) : undefined,
+          error: 'No se pudo actualizar el estado',
+        }
+      );
       cargar();
-    } catch { /* error silencioso — transición no permitida */ }
+    } catch { /* notificado por notify.promise */ }
   };
 
   const cancelar = async () => {
@@ -299,12 +337,25 @@ export default function Pedidos() {
       for (const [prodId, lotes] of Object.entries(lotesSeleccion)) {
         override[prodId] = Object.entries(lotes).filter(([, v]) => v > 0).map(([id]) => id);
       }
-      await pedidosApi.consumir(consumirPedido.id, override);
+      await notify.promise(
+        pedidosApi.consumir(consumirPedido.id, override),
+        {
+          loading: 'Consumiendo stock FEFO…',
+          success: 'Stock consumido',
+          successDesc: (
+            <ToastBlock title={consumirPedido.numero_pedido ?? ''}>
+              <ToastField label="Estado" value="Completado" span={2} />
+            </ToastBlock>
+          ),
+          error: 'Error al consumir stock',
+        }
+      );
       setConsumirPedido(null);
       cargar();
+      setTimeout(() => checkStockBajo(), 1500);
     } catch (err: unknown) {
       const apiErr = err as { response?: { data?: { mensaje?: string; error?: string } } };
-      alert(apiErr?.response?.data?.mensaje ?? apiErr?.response?.data?.error ?? 'Error al consumir stock');
+      notify.error(apiErr?.response?.data?.mensaje ?? apiErr?.response?.data?.error ?? 'Error al consumir stock');
     } finally { setConsumiendo(false); }
   };
 
@@ -312,13 +363,19 @@ export default function Pedidos() {
     if (!emailPedido || !emailDest) return;
     setEnviandoEmail(true);
     try {
-      await pedidosApi.enviarAlbaran(emailPedido.id, emailDest);
+      await notify.promise(
+        pedidosApi.enviarAlbaran(emailPedido.id, emailDest),
+        {
+          loading: 'Enviando albaran…',
+          success: 'Albaran enviado',
+          successDesc: emailDest,
+          error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al enviar',
+        }
+      );
       setEmailExito(true);
       setTimeout(() => { setEmailPedido(null); setEmailDest(''); setEmailExito(false); }, 2000);
-    } catch (err: unknown) {
-      const apiErr = err as { response?: { data?: { error?: string } } };
-      alert(apiErr?.response?.data?.error ?? 'Error al enviar');
-    } finally {
+    } catch { /* notificado */ }
+    finally {
       setEnviandoEmail(false);
     }
   };
@@ -504,11 +561,11 @@ export default function Pedidos() {
                 return esEnvasado ? (
                   <button onClick={() => fabricar(p)} className="flex-1 rounded-lg bg-amber-500 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><ClipboardList size={12} /> Envasar</button>
                 ) : (
-                  <button onClick={() => cambiarEstado(p, 'completado')} className="flex-1 rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Check size={12} /> Completar</button>
+                  <button onClick={() => abrirConsumir(p)} className="flex-1 rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Check size={12} /> Consumir y completar</button>
                 );
               })()}
               {isAdmin && p.estado === 'envasado' && (
-                <button onClick={() => cambiarEstado(p, 'completado')} className="flex-1 rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Check size={12} /> Completar</button>
+                <button onClick={() => abrirConsumir(p)} className="flex-1 rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Check size={12} /> Consumir y completar</button>
               )}
               {isAdmin && p.estado !== 'completado' && p.estado !== 'cancelado' && (
                 <button onClick={() => abrirEditar(p)} className="rounded-lg border border-gray-200 p-2 text-gray-400 hover:text-blue-600"><Pencil size={14} /></button>
@@ -644,14 +701,14 @@ export default function Pedidos() {
                           <ClipboardList size={11} /> Envasar
                         </button>
                       ) : (
-                        <button onClick={() => cambiarEstado(p, 'completado')} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors flex items-center gap-1">
-                          <Check size={11} /> Completar
+                        <button onClick={() => abrirConsumir(p)} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors flex items-center gap-1">
+                          <Check size={11} /> Consumir
                         </button>
                       );
                     })()}
                     {isAdmin && p.estado === 'envasado' && (
-                      <button onClick={() => cambiarEstado(p, 'completado')} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors flex items-center gap-1">
-                        <Check size={11} /> Completar
+                      <button onClick={() => abrirConsumir(p)} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors flex items-center gap-1">
+                        <Check size={11} /> Consumir
                       </button>
                     )}
                     {isAdmin && p.estado !== 'completado' && p.estado !== 'cancelado' && (
@@ -957,7 +1014,7 @@ export default function Pedidos() {
       <Modal open={!!detalle} onClose={() => setDetalle(null)} title={detalle?.numero_pedido ?? ''} subtitle={detalle?.cliente_nombre_rel ?? detalle?.cliente_nombre ?? ''}>
         {detalle && (
           <div className="space-y-3 text-sm">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-2 gap-3">
               <div><p className="text-xs text-gray-400">Estado</p><EstadoBadge estado={detalle.estado} /></div>
               <div><p className="text-xs text-gray-400">Origen</p><p className="font-medium">{detalle.origen === 'email' ? 'Email' : 'Manual'}</p></div>
               <div><p className="text-xs text-gray-400">Producto</p><p className="font-medium">{detalle.producto_nombre_rel ?? detalle.producto_nombre ?? '—'}</p></div>
@@ -1016,6 +1073,11 @@ export default function Pedidos() {
               <Check size={32} />
               <p className="text-sm font-semibold">Enviado correctamente</p>
             </div>
+          ) : enviandoEmail ? (
+            <div className="flex flex-col items-center py-6 gap-3">
+              <SpinnerColaBlanca size="md" />
+              <p className="text-sm text-gray-500">Enviando albaran…</p>
+            </div>
           ) : (
             <div className="space-y-4">
               <p className="text-xs text-gray-500">Se enviara el albaran PDF + trazabilidad + fotos adjuntas al email indicado.</p>
@@ -1024,8 +1086,8 @@ export default function Pedidos() {
               </FormField>
               <div className="flex gap-3">
                 <button onClick={() => setEmailPedido(null)} className="flex-1 rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancelar</button>
-                <button onClick={handleEnviarAlbaran} disabled={!emailDest || enviandoEmail} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300">
-                  {enviandoEmail ? 'Enviando...' : <><Send size={14} /> Enviar</>}
+                <button onClick={handleEnviarAlbaran} disabled={!emailDest} className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300">
+                  <Send size={14} /> Enviar
                 </button>
               </div>
             </div>

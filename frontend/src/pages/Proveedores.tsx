@@ -6,6 +6,8 @@ import type { Proveedor } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
 import { FormField, Input, Textarea } from '../components/FormField';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 export default function Proveedores() {
   const [proveedores, setProveedores] = useState<Proveedor[]>([]);
@@ -53,12 +55,27 @@ export default function Proveedores() {
     }
     setSaving(true);
     setError('');
-    try {
+    const ejecutar = async () => {
       if (editando) {
         await proveedoresApi.editar(editando.id, form);
       } else {
         await proveedoresApi.crear(form);
       }
+      return form;
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: editando ? 'Guardando proveedor…' : 'Creando proveedor…',
+        success: editando ? 'Proveedor guardado' : 'Proveedor creado',
+        successDesc: (d) => (
+          <ToastBlock title={d.nombre}>
+            <ToastField label="Email" value={d.email} span={2} />
+            <ToastField label="Teléfono" value={d.telefono} />
+            <ToastField label="Dirección" value={d.direccion} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
+      });
       setModalOpen(false);
       cargar();
     } catch (err: unknown) {
@@ -71,8 +88,19 @@ export default function Proveedores() {
 
   const handleEliminar = async (p: Proveedor) => {
     if (!confirm(`¿Desactivar proveedor "${p.nombre}"?`)) return;
-    await proveedoresApi.eliminar(p.id);
-    cargar();
+    try {
+      await notify.promise(proveedoresApi.eliminar(p.id), {
+        loading: 'Desactivando…',
+        success: 'Proveedor desactivado',
+        successDesc: (
+          <ToastBlock title={p.nombre}>
+            <ToastField label="Email" value={p.email} span={2} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo desactivar',
+      });
+      cargar();
+    } catch { /* notificado */ }
   };
 
   if (loading) {

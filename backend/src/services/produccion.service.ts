@@ -53,7 +53,7 @@ class ProduccionService {
   async confirmarOrden(
     ordenId: string,
     usuarioId?: string,
-    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string }
+    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string }
   ): Promise<ResultadoConfirmacion> {
     return withSerializableTransaction(async (client) => {
       // ── 1. Cargar orden ────────────────────────────────────────────────
@@ -266,7 +266,7 @@ class ProduccionService {
              merma_proceso     = $11::NUMERIC,
              merma_pct         = $12::NUMERIC,
              lote_producido_id  = $2,
-             fecha_inicio       = COALESCE(fecha_inicio, NOW()),
+             fecha_inicio       = COALESCE(fecha_inicio, $13::TIMESTAMPTZ, NOW()),
              fecha_fin          = NOW(),
              ph                 = COALESCE($4, ph),
              foto_url           = COALESCE($5, foto_url),
@@ -288,6 +288,7 @@ class ProduccionService {
           cantidadReal.toFixed(6),
           merma.toFixed(6),
           mermaPct.toFixed(2),
+          extra?.fecha_inicio_cliente ?? null,
         ]
       );
 

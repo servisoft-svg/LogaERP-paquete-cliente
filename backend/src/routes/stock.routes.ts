@@ -93,4 +93,60 @@ router.post('/reconciliar', async (req, res) => {
   }
 });
 
+// GET /api/stock/pedidos-proveedor — historial de solicitudes a proveedor con lead time
+router.get('/pedidos-proveedor', async (req, res) => {
+  try {
+    const estado = req.query.estado as string || undefined;
+    const productoId = req.query.producto_id as string || undefined;
+
+    let sql = `
+      SELECT pp.*,
+        p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida,
+        pv.nombre AS proveedor_nombre,
+        l.lote_interno
+      FROM pedidos_proveedor pp
+      JOIN productos p ON p.id = pp.producto_id
+      LEFT JOIN proveedores pv ON pv.id = pp.proveedor_id
+      LEFT JOIN lotes l ON l.id = pp.lote_id
+      WHERE 1=1
+    `;
+    const params: unknown[] = [];
+    let idx = 1;
+    if (estado) { sql += ` AND pp.estado = $${idx++}`; params.push(estado); }
+    if (productoId) { sql += ` AND pp.producto_id = $${idx++}`; params.push(productoId); }
+    sql += ` ORDER BY pp.fecha_solicitud DESC LIMIT 200`;
+
+    const { rows } = await pool.query(sql, params);
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// GET /api/stock/lead-time-proveedores — lead time medio por proveedor
+router.get('/lead-time-proveedores', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        pv.id AS proveedor_id,
+        pv.nombre AS proveedor_nombre,
+        COUNT(*) AS total_pedidos,
+        COUNT(*) FILTER (WHERE pp.estado = 'completado') AS completados,
+        COUNT(*) FILTER (WHERE pp.estado = 'pendiente') AS pendientes,
+        ROUND(AVG(pp.lead_time_horas) FILTER (WHERE pp.estado = 'completado'), 1) AS lead_time_medio_horas,
+        ROUND(AVG(pp.lead_time_horas / 24) FILTER (WHERE pp.estado = 'completado'), 1) AS lead_time_medio_dias,
+        ROUND(MIN(pp.lead_time_horas) FILTER (WHERE pp.estado = 'completado'), 1) AS lead_time_min_horas,
+        ROUND(MAX(pp.lead_time_horas) FILTER (WHERE pp.estado = 'completado'), 1) AS lead_time_max_horas,
+        ROUND(AVG(pp.cantidad_recibida / NULLIF(pp.cantidad_solicitada, 0) * 100) FILTER (WHERE pp.estado = 'completado'), 1) AS fiabilidad_pct
+      FROM pedidos_proveedor pp
+      JOIN proveedores pv ON pv.id = pp.proveedor_id
+      GROUP BY pv.id, pv.nombre
+      ORDER BY total_pedidos DESC
+    `);
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 export default router;

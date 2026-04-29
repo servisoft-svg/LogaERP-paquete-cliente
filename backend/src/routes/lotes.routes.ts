@@ -99,27 +99,36 @@ router.post('/', async (req, res) => {
       ) WHERE id = $1
     `, [producto_id]);
 
-    // Auto-link to pending supplier order if exists
-    const { rows: [ppPendiente] } = await pool.query(
-      `SELECT id FROM pedidos_proveedor
-       WHERE producto_id = $1 AND estado = 'pendiente'
-       ORDER BY fecha_solicitud DESC LIMIT 1`,
-      [producto_id]
-    );
-    if (ppPendiente) {
-      const cantRecibida = parseFloat(String(qty));
-      const { rows: [pp] } = await pool.query(
-        `SELECT cantidad_solicitada FROM pedidos_proveedor WHERE id = $1`,
-        [ppPendiente.id]
+    // Auto-complete pending supplier order: match by product, mark as completado, calculate lead time
+    // Side-effect — un fallo aquí (ej. tabla no migrada) NO debe romper la creación del lote.
+    try {
+      const { rows: pendientes } = await pool.query(
+        `SELECT id, fecha_solicitud, cantidad_solicitada
+         FROM pedidos_proveedor
+         WHERE producto_id = $1 AND estado = 'pendiente'
+         ORDER BY fecha_solicitud ASC`,
+        [producto_id]
       );
-      const solicitada = parseFloat(pp.cantidad_solicitada);
-      const nuevoEstado = cantRecibida >= solicitada * 0.95 ? 'recibido' : 'parcial';
-      await pool.query(
-        `UPDATE pedidos_proveedor SET
-           lote_id = $1, cantidad_recibida = $2::NUMERIC, fecha_recepcion = NOW(), estado = $3
-         WHERE id = $4`,
-        [lote.id, cantRecibida.toFixed(6), nuevoEstado, ppPendiente.id]
-      );
+      if (pendientes.length > 0) {
+        const pp = pendientes[0];
+        const cantRecibida = parseFloat(String(qty));
+        const ahora = new Date();
+        const solicitud = new Date(pp.fecha_solicitud);
+        const leadTimeHoras = Math.round(((ahora.getTime() - solicitud.getTime()) / (1000 * 60 * 60)) * 10) / 10;
+
+        await pool.query(
+          `UPDATE pedidos_proveedor SET
+             lote_id = $1,
+             cantidad_recibida = $2::NUMERIC,
+             fecha_recepcion = NOW(),
+             lead_time_horas = $3,
+             estado = 'completado'
+           WHERE id = $4`,
+          [lote.id, cantRecibida.toFixed(6), leadTimeHoras, pp.id]
+        );
+      }
+    } catch (e) {
+      console.warn('[POST /lotes] Auto-complete pedidos_proveedor falló (no crítico):', e);
     }
 
     // Stock move for traceability
@@ -141,13 +150,14 @@ router.post('/', async (req, res) => {
     return res.status(201).json(lote);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';
+    console.error('[POST /lotes] Error:', msg, err);
     if (msg.includes('unique') || msg.includes('duplicate')) {
       return res.status(409).json({ error: 'Ya existe un lote con ese código. Cambia el código de lote.' });
     }
-    if (msg.includes('constraint')) {
-      return res.status(400).json({ error: 'Los datos no son válidos. Revisa las cantidades.' });
+    if (msg.includes('constraint') || msg.includes('violates')) {
+      return res.status(400).json({ error: `Datos inválidos: ${msg}` });
     }
-    return res.status(500).json({ error: 'Error al crear el lote. Inténtalo de nuevo.' });
+    return res.status(500).json({ error: `Error al crear lote: ${msg}` });
   }
 });
 
@@ -240,7 +250,7 @@ router.patch('/:id/estado', async (req, res) => {
     // Validate state transition
     const { rows: [actual] } = await pool.query(`SELECT estado, cantidad_actual FROM lotes WHERE id = $1`, [id]);
     if (!actual) return res.status(404).json({ error: 'Lote no encontrado' });
-    const TRANS_LOTE: Record<string, string[]> = { cuarentena: ['aprobado', 'rechazado'], aprobado: ['rechazado'], rechazado: [] };
+    const TRANS_LOTE: Record<string, string[]> = { cuarentena: ['aprobado', 'rechazado'], aprobado: ['cuarentena', 'rechazado'], rechazado: [] };
     if (!(TRANS_LOTE[actual.estado] ?? []).includes(estado)) {
       return res.status(422).json({ error: `No se puede cambiar de "${actual.estado}" a "${estado}"` });
     }
@@ -273,6 +283,13 @@ router.patch('/:id/estado', async (req, res) => {
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
            VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
           [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} rechazado: ${motivo}`]
+        );
+      } else if (estado === 'cuarentena' && actual.estado === 'aprobado') {
+        // Vuelta a cuarentena (revisión post-aprobación) — sale del stock disponible
+        await pool.query(
+          `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
+          [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} devuelto a cuarentena: ${motivo}`]
         );
       }
     }

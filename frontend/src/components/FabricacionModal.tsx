@@ -1,9 +1,10 @@
 /**
  * FabricacionModal — Vista por pasos con tanque minimalista rojo
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { recetasApi, produccionApi, lotesApi, proveedoresApi } from '../api/client';
 import type { OrdenProduccion, IngredienteReceta, Receta, PasoReceta } from '../types';
 import clsx from 'clsx';
@@ -12,6 +13,9 @@ import BarcodeScanner from './BarcodeScanner';
 import TanqueRojo from './TanqueRojo';
 import TanqueEnvasado from './TanqueEnvasado';
 import SearchSelect from './SearchSelect';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from './ToastFields';
+import { checkStockBajo } from '../lib/stockAlerts';
 
 interface Props {
   orden: OrdenProduccion | null;
@@ -23,6 +27,7 @@ type Fase = 'cargando' | 'preparando' | 'confirmando' | 'fabricando' | 'completa
 
 // ── Componente principal ──────────────────────────────────────────────────────
 export default function FabricacionModal({ orden, onClose, onDone }: Props) {
+  const navigate = useNavigate();
   const [fase, setFase] = useState<Fase>('cargando');
   const [receta, setReceta] = useState<Receta | null>(null);
   const [confirmados, setConfirmados] = useState<Set<string>>(new Set());
@@ -48,6 +53,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   const [limpiezaDestino, setLimpiezaDestino] = useState('');
   const [limpiezaProveedorId, setLimpiezaProveedorId] = useState('');
   const [proveedores, setProveedores] = useState<{ id: string; nombre: string; telefono?: string; email?: string }[]>([]);
+  const inicioFabRef = useRef<string | null>(null);
 
   const ingredientes: IngredienteReceta[] = receta?.ingredientes ?? [];
   const pasos: PasoReceta[] = receta?.pasos ?? [];
@@ -111,8 +117,11 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
 
   useEffect(() => {
     if (orden) {
+      inicioFabRef.current = new Date().toISOString();
       cargar();
       proveedoresApi.listar().then(r => setProveedores(r.data as typeof proveedores)).catch(() => {});
+    } else {
+      inicioFabRef.current = null;
     }
   }, [orden, cargar]);
 
@@ -220,6 +229,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
         fotos: fotos.length > 0 ? fotos : undefined,
         cantidad_real_producida: cantidadReal || undefined,
         registro_limpieza: registroLimpieza || undefined,
+        fecha_inicio_cliente: inicioFabRef.current ?? undefined,
       });
       clearInterval(fillInterval);
       setFillPct(100);
@@ -229,30 +239,54 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       if (orden) localStorage.removeItem(`fab_paso_${orden.id}`);
       // If QC out of range, show warning before completing
       if (res.qc_fuera_de_rango) {
-        setErrorMsg(`⚠ Control de calidad fuera de rango:\n${(res.qc_desviaciones ?? []).join('\n')}\n\nEl lote se ha creado en CUARENTENA. Requiere aprobación manual en Lotes.`);
+        const errMsg = `⚠ Control de calidad fuera de rango:\n${(res.qc_desviaciones ?? []).join('\n')}\n\nEl lote se ha creado en CUARENTENA. Requiere aprobación manual en Lotes.`;
+        setErrorMsg(errMsg);
+        notify.warning('Lote en cuarentena', { description: 'QC fuera de rango — requiere aprobación manual' });
         setFase('error');
         onDone();
       } else {
+        // Compute duration in minutes
+        const inicio = inicioFabRef.current;
+        const duracionMin = inicio ? Math.round((Date.now() - new Date(inicio).getTime()) / 60000) : 0;
+        const cantidadFinal = cantidadReal || cantidad;
+        const ordenId = orden.id;
+        notify.success('Fabricación completada', {
+          description: (
+            <ToastBlock title={`Lote ${res.lote_producido ?? '—'}`}>
+              <ToastField label="Producido" value={`${cantidadFinal} ${unidad}`} />
+              <ToastField label="Duración" value={duracionMin > 0 ? `${duracionMin} min` : ''} />
+            </ToastBlock>
+          ),
+          button: {
+            title: 'Ver detalle',
+            onClick: () => {
+              onClose();
+              navigate(`/produccion?detalle=${ordenId}`);
+            },
+          },
+          expand: true,
+        });
+        setTimeout(() => checkStockBajo(), 1500);
         setTimeout(() => { setFase('completado'); onDone(); }, 1000);
       }
     } catch (err: unknown) {
       clearInterval(fillInterval);
       setFillPct(0);
+      let parsedMsg = 'Error inesperado';
       if (axios.isAxiosError(err)) {
         const raw = err.response?.data?.detalle ?? err.response?.data?.mensaje ?? err.response?.data?.error ?? '';
-        // Parse STOCK_INSUFICIENTE:Acetato de Vinilo:necesario=460:disponible=100
         if (raw.includes('STOCK_INSUFICIENTE')) {
           const parts = raw.split(':');
           const nombre = parts[1] ?? '';
           const nec = parts[2]?.split('=')[1] ?? '?';
           const disp = parts[3]?.split('=')[1] ?? '?';
-          setErrorMsg(`Stock insuficiente de ${nombre}: necesitas ${parseFloat(nec).toFixed(1)}, tienes ${parseFloat(disp).toFixed(1)}`);
+          parsedMsg = `Stock insuficiente de ${nombre}: necesitas ${parseFloat(nec).toFixed(1)}, tienes ${parseFloat(disp).toFixed(1)}`;
         } else {
-          setErrorMsg(raw || 'Error inesperado');
+          parsedMsg = raw || 'Error inesperado';
         }
-      } else {
-        setErrorMsg('Error inesperado');
       }
+      setErrorMsg(parsedMsg);
+      notify.error('Fabricación fallida', { description: parsedMsg });
       setFase('error');
     }
   };
@@ -423,7 +457,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
 
                               return (
                                 <motion.div
-                                  key={ing.id}
+                                  key={ing.id || ing.materia_prima_id || `ing-${i}`}
                                   initial={{ opacity: 0, y: 5 }}
                                   animate={{ opacity: 1, y: 0 }}
                                   transition={{ delay: i * 0.05 }}
@@ -549,12 +583,12 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                   {unassignedIngs.length > 0 && (
                     <div className="border-t border-gray-100 pt-3 space-y-1.5">
                       <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Otros ingredientes</p>
-                      {unassignedIngs.map((ing) => {
+                      {unassignedIngs.map((ing, idx) => {
                         const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
                         const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
                         const conf = confirmados.has(ing.id);
                         return (
-                          <div key={ing.id} className={clsx(
+                          <div key={ing.id || ing.materia_prima_id || `un-${idx}`} className={clsx(
                             'flex items-center gap-2 rounded-lg px-3 py-1.5 border text-xs',
                             conf ? 'border-emerald-200 bg-emerald-50' : 'border-gray-100'
                           )}>
@@ -586,7 +620,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                       const conf = confirmados.has(ing.id);
                       return (
                         <motion.div
-                          key={ing.id}
+                          key={ing.id || ing.materia_prima_id || `ing2-${i}`}
                           initial={{ opacity: 0, x: -8 }}
                           animate={{ opacity: 1, x: 0 }}
                           transition={{ delay: i * 0.04 }}
@@ -843,11 +877,11 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                     {ingredientesSinStock.length > 0 && (
                       <div className="rounded-lg border-2 border-red-300 bg-red-50 p-3 space-y-1">
                         <p className="text-xs font-bold text-loga-red">Stock insuficiente:</p>
-                        {ingredientesSinStock.map(ing => {
+                        {ingredientesSinStock.map((ing, idx) => {
                           const nec = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
                           const stock = parseFloat(ing.stock_actual ?? '0');
                           return (
-                            <p key={ing.id} className="text-xs text-red-700">
+                            <p key={ing.id || ing.materia_prima_id || `sk-${idx}`} className="text-xs text-red-700">
                               <b>{ing.nombre_mp}</b>: necesitas {nec.toFixed(1)} {ing.unidad_medida}, tienes {stock.toFixed(1)} {ing.unidad_medida}
                               <span className="text-loga-red font-bold"> (faltan {(nec - stock).toFixed(1)})</span>
                             </p>

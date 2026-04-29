@@ -92,6 +92,17 @@ export const produccionController = {
 
       const registro_limpieza = typeof req.body.registro_limpieza === 'string' && req.body.registro_limpieza.trim() ? req.body.registro_limpieza.trim() : undefined;
 
+      // Captura de duración: timestamp de apertura del modal de fabricación (cliente)
+      let fecha_inicio_cliente: string | undefined;
+      if (typeof req.body.fecha_inicio_cliente === 'string' && req.body.fecha_inicio_cliente.trim()) {
+        const t = Date.parse(req.body.fecha_inicio_cliente);
+        const ahora = Date.now();
+        // Solo aceptar si parsea, no es futuro y no más viejo que 24h
+        if (!Number.isNaN(t) && t <= ahora + 60_000 && ahora - t < 24 * 3600 * 1000) {
+          fecha_inicio_cliente = new Date(t).toISOString();
+        }
+      }
+
       // ── Load recipe config for QC enforcement ──
       const { rows: [ordenCheck] } = await pool.query(
         `SELECT r.ph_min, r.ph_max, r.solidos_min, r.solidos_max, r.viscosidad_min, r.viscosidad_max, r.pasos
@@ -162,7 +173,7 @@ export const produccionController = {
       // ── Everything passed to service runs inside a single SERIALIZABLE transaction ──
       const resultado = await produccionService.confirmarOrden(id, usuario_id, {
         ph, foto_url, foto_urls, solidos, viscosidad, fecha_fabricacion, cantidad_real_producida,
-        qc_fuera_de_rango, registro_limpieza, nota_qc,
+        qc_fuera_de_rango, registro_limpieza, nota_qc, fecha_inicio_cliente,
       });
 
       // Post-transaction: only non-critical operations (cache + async alerts)
@@ -830,12 +841,17 @@ export const produccionController = {
         );
         if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
         if (['borrador', 'confirmada'].includes(orden.estado)) {
+          await pool.query(
+            `UPDATE pedidos SET orden_produccion_id = NULL, estado = CASE WHEN estado IN ('completado', 'cancelado') THEN estado ELSE 'confirmado' END WHERE orden_produccion_id = $1`,
+            [id]
+          );
           await pool.query(`DELETE FROM ordenes_produccion WHERE id = $1`, [id]);
         } else {
           await pool.query(`UPDATE ordenes_produccion SET estado = 'cancelada' WHERE id = $1`, [id]);
         }
         return res.json({ ok: true, revertido: false });
       } catch (err: unknown) {
+        console.error('[produccion.eliminar:borrar]', err);
         return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
       }
     }
@@ -857,8 +873,12 @@ export const produccionController = {
         return res.status(409).json({ error: 'La orden ya está cancelada' });
       }
 
-      // Borrador/confirmada → eliminar directamente
+      // Borrador/confirmada → eliminar directamente (deslinkar pedidos primero por FK)
       if (['borrador', 'confirmada'].includes(orden.estado)) {
+        await client.query(
+          `UPDATE pedidos SET orden_produccion_id = NULL, estado = CASE WHEN estado IN ('completado', 'cancelado') THEN estado ELSE 'confirmado' END WHERE orden_produccion_id = $1`,
+          [id]
+        );
         await client.query(`DELETE FROM ordenes_produccion WHERE id = $1`, [id]);
         await client.query('COMMIT');
         return res.json({ ok: true, revertido: false });
@@ -930,15 +950,19 @@ export const produccionController = {
         [id]
       );
 
-      // Eliminar lote producido si existe
+      // Marcar lote producido como rechazado (no DELETE: stock_moves FK ON DELETE RESTRICT preserva trazabilidad)
       if (orden.lote_producido_id) {
-        await client.query(`DELETE FROM lotes WHERE id = $1`, [orden.lote_producido_id]);
+        await client.query(
+          `UPDATE lotes SET estado = 'rechazado', cantidad_actual = 0 WHERE id = $1`,
+          [orden.lote_producido_id]
+        );
       }
 
       await client.query('COMMIT');
       return res.json({ ok: true, revertido: true, numero_orden: orden.numero_orden });
     } catch (err: unknown) {
       await client.query('ROLLBACK');
+      console.error('[produccion.eliminar]', err);
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
     } finally {
       client.release();

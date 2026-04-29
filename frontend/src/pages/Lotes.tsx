@@ -8,6 +8,8 @@ import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
 import { FormField, Input, Select, Textarea } from '../components/FormField';
 import clsx from 'clsx';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 const ESTADO_CFG: Record<EstadoLote, { label: string; cls: string }> = {
   aprobado:   { label: 'Aprobado',   cls: 'bg-emerald-100 text-emerald-700' },
@@ -118,15 +120,28 @@ export default function Lotes() {
   const cambiarEstado = async (id: string, estado: EstadoLote) => {
     const motivo = window.prompt(`Motivo del cambio a "${ESTADO_CFG[estado].label}":`);
     if (!motivo?.trim()) return;
+    const lote = lotes.find(l => l.id === id);
     setCambiandoId(id);
     try {
-      await lotesApi.cambiarEstado(id, estado, motivo.trim());
+      await notify.promise(
+        lotesApi.cambiarEstado(id, estado, motivo.trim()),
+        {
+          loading: 'Cambiando estado…',
+          success: `Lote → ${ESTADO_CFG[estado].label}`,
+          successDesc: (
+            <ToastBlock title={lote?.lote_interno}>
+              <ToastField label="Producto" value={lote?.producto_nombre} span={2} />
+              <ToastField label="Cantidad" value={lote ? `${parseFloat(lote.cantidad_actual).toLocaleString('es-ES', { maximumFractionDigits: 2 })} ${lote.unidad_medida}` : ''} />
+              <ToastField label="Estado" value={ESTADO_CFG[estado].label} />
+              <ToastField label="Motivo" value={motivo.trim()} span={2} />
+            </ToastBlock>
+          ),
+          error: 'Error al cambiar estado',
+        }
+      );
       cargar();
-    } catch {
-      alert('Error al cambiar estado');
-    } finally {
-      setCambiandoId(null);
-    }
+    } catch { /* notificado */ }
+    finally { setCambiandoId(null); }
   };
 
   const verTrazabilidad = async (lote: Lote) => {
@@ -455,7 +470,7 @@ export default function Lotes() {
             </Select>
           </FormField>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <FormField label={`Cantidad (${productoSeleccionado?.unidad_medida ?? 'ud'})`} required>
               <Input
                 type="number" min="0.001" step="0.001"
@@ -473,7 +488,7 @@ export default function Lotes() {
             </FormField>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <FormField label="Fecha de fabricación">
               <Input
                 type="date"

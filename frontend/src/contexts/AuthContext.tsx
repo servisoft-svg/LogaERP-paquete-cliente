@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import api from '../api/client';
+import { notify } from '../lib/notify';
 
 interface User {
   id: string;
@@ -58,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     sessionStorage.removeItem('loga_token');
     delete api.defaults.headers.common['Authorization'];
     setUser(null);
+    notify.info('Sesión cerrada');
   };
 
   // Auto-refresh token every 30 minutes
@@ -72,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
       } catch {
         // Token expired or invalid, logout
+        notify.warning('Tu sesión ha caducado');
         logout();
       }
     }, 30 * 60 * 1000); // 30 minutes

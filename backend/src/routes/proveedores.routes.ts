@@ -4,13 +4,15 @@ import { pool } from '../db/pool';
 const router = Router();
 
 // GET /api/proveedores
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
+    const incluirInactivos = req.query.todos === 'true';
     const { rows } = await pool.query(
       `SELECT pv.*,
               COUNT(p.id) AS num_productos
        FROM proveedores pv
        LEFT JOIN productos p ON p.proveedor_id = pv.id AND p.activo = TRUE
+       ${incluirInactivos ? '' : 'WHERE pv.activo = TRUE'}
        GROUP BY pv.id
        ORDER BY pv.nombre ASC`
     );

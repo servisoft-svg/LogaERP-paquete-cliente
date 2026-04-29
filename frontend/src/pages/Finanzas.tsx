@@ -6,6 +6,7 @@ import {
 import { finanzasApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
 interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
@@ -188,7 +189,8 @@ export default function Finanzas() {
       a.download = `${tipo}.csv`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch { /* ignore */ }
+      notify.success('Exportación lista', { description: `${tipo}.csv descargado` });
+    } catch { notify.error(`No se pudo exportar ${tipo}`); }
   };
 
   const beneficioBruto = data.ventas.facturacion_total - data.costeProd.coste_total;

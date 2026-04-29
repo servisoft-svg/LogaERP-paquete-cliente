@@ -5,6 +5,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import Navbar from './components/Navbar';
 import Login from './pages/Login';
 import SpinnerColaBlanca, { LoadingScreen } from './components/SpinnerColaBlanca';
+import { Toaster } from 'sileo';
+import 'sileo/styles.css';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
@@ -60,6 +62,20 @@ export default function App() {
       <BrowserRouter>
         <AuthProvider>
           <AppContent />
+          <Toaster
+            position="bottom-center"
+            theme="system"
+            offset={16}
+            options={{
+              roundness: 18,
+              styles: {
+                title: 'text-[13px]! font-semibold!',
+                description: 'text-[12px]! opacity-80!',
+                badge: 'scale-95',
+                button: 'text-[12px]! font-medium!',
+              },
+            }}
+          />
         </AuthProvider>
       </BrowserRouter>
     </ErrorBoundary>

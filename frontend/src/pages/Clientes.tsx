@@ -7,6 +7,8 @@ import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
 import ConfirmModal from '../components/ConfirmModal';
 import { FormField, Input, Textarea } from '../components/FormField';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 export default function Clientes() {
   const [clientes, setClientes]       = useState<Cliente[]>([]);
@@ -58,12 +60,32 @@ export default function Clientes() {
     }
     setSaving(true);
     setError('');
-    try {
+    const ejecutar = async () => {
+      let nivel: string | undefined;
       if (editando) {
-        await clientesApi.editar(editando.id, form);
+        const res = await clientesApi.editar(editando.id, form);
+        nivel = (res.data as { nivel?: string | null } | undefined)?.nivel ?? editando.nivel ?? undefined;
       } else {
-        await clientesApi.crear(form);
+        const res = await clientesApi.crear(form);
+        nivel = (res.data as { nivel?: string | null } | undefined)?.nivel ?? undefined;
       }
+      return { ...form, nivel };
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: editando ? 'Guardando cliente…' : 'Creando cliente…',
+        success: editando ? 'Cliente guardado' : 'Cliente creado',
+        successDesc: (d) => (
+          <ToastBlock title={d.nombre}>
+            <ToastField label="NIF/CIF" value={d.nif} />
+            <ToastField label="Nivel" value={d.nivel ? String(d.nivel).toUpperCase() : undefined} />
+            <ToastField label="Email" value={d.email} span={2} />
+            <ToastField label="Teléfono" value={d.telefono} />
+            <ToastField label="Dirección" value={d.direccion} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
+      });
       setModalOpen(false);
       cargar();
     } catch (err: unknown) {
@@ -77,11 +99,23 @@ export default function Clientes() {
   const handleEliminar = async () => {
     if (!confirmElim) return;
     setDeleting(true);
+    const c = confirmElim;
     try {
-      await clientesApi.eliminar(confirmElim.id);
+      await notify.promise(clientesApi.eliminar(confirmElim.id), {
+        loading: 'Desactivando…',
+        success: 'Cliente desactivado',
+        successDesc: (
+          <ToastBlock title={c.nombre}>
+            <ToastField label="NIF/CIF" value={c.nif} />
+            <ToastField label="Teléfono" value={c.telefono} />
+            <ToastField label="Email" value={c.email} span={2} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo desactivar',
+      });
       setConfirmElim(null);
       cargar();
-    } catch { /* silencioso */ }
+    } catch { /* notificado */ }
     finally { setDeleting(false); }
   };
 
@@ -318,7 +352,7 @@ export default function Clientes() {
             />
           </FormField>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <FormField label="Telefono">
               <Input
                 type="tel"

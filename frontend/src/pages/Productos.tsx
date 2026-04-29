@@ -13,6 +13,8 @@ import ConfirmModal from '../components/ConfirmModal';
 import BarcodeScanner from '../components/BarcodeScanner';
 import EmailModal from '../components/EmailModal';
 import { FormField, Input, Select, Textarea } from '../components/FormField';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 import clsx from 'clsx';
 
@@ -102,6 +104,7 @@ export default function Productos() {
   const [loading, setLoading]         = useState(true);
   const [busqueda, setBusqueda]       = useState('');
   const [filtroTipo, setFiltroTipo]   = useState<TipoProducto | ''>('');
+  const [filtroBajoStock, setFiltroBajoStock] = useState(false);
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Producto | null>(null);
   const [form, setForm]               = useState<FormData>(EMPTY);
@@ -216,8 +219,8 @@ export default function Productos() {
     }
     setSaving(true);
     setError('');
-    try {
-      const payload = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null };
+    const payload = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null };
+    const ejecutarGuardar = async () => {
       if (editando) {
         await productosApi.editar(editando.id, payload);
         // Si el stock cambió, registrar el ajuste
@@ -232,16 +235,41 @@ export default function Productos() {
             ...(editLoteId ? { lote_id: editLoteId } : {}),
           });
         }
-        // Update modified lotes
         for (const l of editLotes) {
           const original = originalLotes.find(ol => ol.id === l.id);
           if (original && original.cantidad_actual !== l.cantidad_actual) {
             await lotesApi.actualizar(l.id, { cantidad_actual: parseFloat(l.cantidad_actual) });
           }
         }
+        return { nombre: form.nombre, codigo: editando.codigo, tipo: form.tipo, unidad: form.unidad_medida, precio_compra: form.precio_unitario, precio_venta: form.precio_venta, stock_minimo: form.stock_minimo };
       } else {
-        await productosApi.crear(payload);
+        const res = await productosApi.crear(payload);
+        const data = res.data as { nombre?: string; codigo?: string };
+        return { nombre: data?.nombre ?? form.nombre, codigo: data?.codigo ?? '', tipo: form.tipo, unidad: form.unidad_medida, precio_compra: form.precio_unitario, precio_venta: form.precio_venta, stock_minimo: form.stock_minimo };
       }
+    };
+    try {
+      await notify.promise(ejecutarGuardar(), {
+        loading: editando ? 'Guardando producto…' : 'Creando producto…',
+        success: editando ? 'Producto guardado' : 'Producto creado',
+        successDesc: (d) => {
+          const tipoLabel = TIPOS_FORM.find(t => t.value === d.tipo)?.label ?? d.tipo;
+          const minN = parseFloat(d.stock_minimo ?? '0');
+          const pc = parseFloat(d.precio_compra ?? '0');
+          const pv = parseFloat(d.precio_venta ?? '0');
+          return (
+            <ToastBlock title={d.nombre}>
+              <ToastField label="Código" value={d.codigo} />
+              <ToastField label="Tipo" value={tipoLabel} />
+              <ToastField label="Unidad" value={d.unidad} />
+              <ToastField label="Precio compra" value={pc > 0 ? `${pc.toFixed(2)} EUR` : ''} />
+              <ToastField label="Precio venta" value={pv > 0 ? `${pv.toFixed(2)} EUR` : ''} />
+              <ToastField label="Stock mín." value={minN > 0 ? `${minN.toLocaleString('es-ES', { maximumFractionDigits: 2 })} ${d.unidad}` : ''} />
+            </ToastBlock>
+          );
+        },
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
+      });
       setModalOpen(false);
       await cargar();
     } catch (err: unknown) {
@@ -290,8 +318,7 @@ export default function Productos() {
     }
     setSavingStock(true);
     setErrorStock('');
-    try {
-      // 1. Crear el lote
+    const ejecutar = async () => {
       const provNombre = proveedores.find((p) => p.id === stockProveedorId)?.nombre;
       await lotesApi.crear({
         producto_id:       stockProducto.id,
@@ -305,18 +332,52 @@ export default function Productos() {
         ubicacion:         stockUbicacion.trim() || null,
         precio_compra:     stockPrecio ? Number(stockPrecio) : undefined,
       });
-
-      // Si el precio cambio, actualizar producto
+      // Update precio del producto — secundario, no debe romper el flujo si falla
       if (stockPrecio && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001) {
-        await productosApi.editar(stockProducto.id, { precio_unitario: Number(stockPrecio) });
+        try {
+          await productosApi.editar(stockProducto.id, { precio_unitario: Number(stockPrecio) });
+        } catch (e) {
+          console.warn('No se pudo actualizar precio del producto:', e);
+        }
       }
-      // Stock del producto se sincroniza automáticamente en backend al crear lote
-
+      return {
+        nombre: stockProducto.nombre,
+        cantidad: Number(stockCantidad),
+        unidad: stockProducto.unidad_medida,
+        lote_interno: stockLoteInterno.trim().toUpperCase(),
+        proveedor: provNombre,
+        precio: stockPrecio ? Number(stockPrecio) : undefined,
+        caducidad: stockCaducidad || undefined,
+        ubicacion: stockUbicacion.trim() || undefined,
+      };
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: 'Añadiendo stock…',
+        success: 'Stock añadido',
+        successDesc: (d) => (
+          <ToastBlock title={`${d.nombre} · +${d.cantidad.toLocaleString('es-ES')} ${d.unidad}`}>
+            <ToastField label="Lote" value={d.lote_interno} span={2} />
+            <ToastField label="Proveedor" value={d.proveedor} span={2} />
+            <ToastField label="Precio compra" value={d.precio !== undefined ? `${d.precio.toFixed(4)} EUR/${d.unidad}` : ''} />
+            <ToastField label="Caducidad" value={d.caducidad ? new Date(d.caducidad).toLocaleDateString('es-ES') : ''} />
+            <ToastField label="Ubicación" value={d.ubicacion} span={2} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al añadir stock',
+      });
       setModalStock(false);
       await cargar();
     } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-      setErrorStock(msg ?? 'Error al añadir stock');
+      // Si el lote ya existe (409), regenerar código para que el siguiente intento funcione
+      if (status === 409 && stockProducto) {
+        setStockLoteInterno(generarCodigoLote(stockProducto));
+        setErrorStock('Código duplicado — generamos uno nuevo, vuelve a pulsar Añadir.');
+      } else {
+        setErrorStock(msg ?? 'Error al añadir stock');
+      }
     } finally {
       setSavingStock(false);
     }
@@ -325,9 +386,21 @@ export default function Productos() {
   const handleEliminar = (p: Producto) => setConfirmElim(p);
   const doEliminar = async () => {
     if (!confirmElim) return;
-    await productosApi.eliminar(confirmElim.id);
-    setConfirmElim(null);
-    await cargar();
+    const p = confirmElim;
+    try {
+      await notify.promise(productosApi.eliminar(confirmElim.id), {
+        loading: 'Desactivando…',
+        success: 'Producto desactivado',
+        successDesc: (
+          <ToastBlock title={p.nombre}>
+            <ToastField label="Código" value={p.codigo} span={2} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo desactivar',
+      });
+      setConfirmElim(null);
+      await cargar();
+    } catch { /* notificado */ }
   };
 
   const toggleLotes = async (pId: string) => {
@@ -344,8 +417,11 @@ export default function Productos() {
     else { setSortField(field); setSortDir('asc'); }
   };
 
+  const cantidadBajoStock = productos.filter(p => p.nivel_stock === 'rojo' || p.nivel_stock === 'naranja').length;
+
   const productosFiltrados = productos
     .filter((p) => !filtroTipo || p.tipo === filtroTipo)
+    .filter((p) => !filtroBajoStock || p.nivel_stock === 'rojo' || p.nivel_stock === 'naranja')
     .filter((p) =>
       !busqueda ||
       p.nombre.toLowerCase().includes(busqueda.toLowerCase()) ||
@@ -468,11 +544,88 @@ export default function Productos() {
               {label}
             </button>
           ))}
+          {cantidadBajoStock > 0 && (
+            <button
+              onClick={() => setFiltroBajoStock(v => !v)}
+              className={clsx(
+                'ml-1 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0',
+                filtroBajoStock
+                  ? 'bg-loga-red text-white'
+                  : 'border border-red-100 bg-red-50 text-loga-red hover:bg-red-100'
+              )}
+              title={filtroBajoStock ? 'Quitar filtro' : 'Filtrar solo bajo stock'}
+            >
+              <span className={clsx('h-1.5 w-1.5 rounded-full', filtroBajoStock ? 'bg-white' : 'bg-loga-red animate-pulse')} />
+              Bajo stock
+              <span className={clsx('rounded-md px-1 text-[10px] tabular-nums', filtroBajoStock ? 'bg-white/20' : 'bg-loga-red text-white')}>
+                {cantidadBajoStock}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Tabla */}
-      <div className="rounded-xl border border-gray-100 overflow-hidden shadow-sm">
+      {/* Mobile cards (md:hidden) */}
+      <div className="flex flex-col gap-2 md:hidden">
+        {productosFiltrados.length === 0 && (
+          <div className="flex flex-col items-center py-12 text-gray-400">
+            <Package size={32} className="mb-2 text-gray-200" />
+            <p className="text-sm">{busqueda || filtroTipo ? 'Sin resultados' : 'No hay productos'}</p>
+          </div>
+        )}
+        {productosFiltrados.map(p => (
+          <div key={p.id}
+            className={clsx('rounded-xl border bg-white shadow-sm p-3 space-y-2', {
+              'border-red-200 bg-red-50/40': p.nivel_stock === 'rojo',
+              'border-amber-200 bg-amber-50/40': p.nivel_stock === 'naranja',
+              'border-gray-100': p.nivel_stock === 'verde' || !p.nivel_stock,
+            })}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1" onClick={() => toggleLotes(p.id)}>
+                <p className="text-[10px] font-mono text-gray-400">{p.codigo}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-semibold text-gray-900 truncate">{p.nombre}</p>
+                  {p.nivel_stock === 'rojo' && <AlertTriangle size={12} className="text-loga-red shrink-0" />}
+                  {p.nivel_stock === 'naranja' && <AlertTriangle size={12} className="text-amber-500 shrink-0" />}
+                </div>
+                <div className="flex items-center gap-2 mt-1">
+                  <TipoBadge tipo={p.tipo} />
+                  <span className={clsx('text-sm font-bold tabular-nums', {
+                    'text-loga-red': p.nivel_stock === 'rojo',
+                    'text-amber-600': p.nivel_stock === 'naranja',
+                    'text-emerald-600': p.nivel_stock === 'verde',
+                    'text-gray-700': !p.nivel_stock,
+                  })}>
+                    {parseFloat(p.stock_actual).toLocaleString('es-ES', { maximumFractionDigits: 2 })} <span className="text-[10px] font-normal text-gray-500">{p.unidad_medida}</span>
+                  </span>
+                </div>
+                {p.proveedor_nombre && <p className="text-[10px] text-gray-400 truncate mt-0.5">{p.proveedor_nombre}</p>}
+              </div>
+            </div>
+            <div className="flex items-center gap-1 pt-1 border-t border-gray-100">
+              <button onClick={() => abrirStock(p)} className="flex-1 rounded-lg bg-emerald-50 text-emerald-600 py-2 text-[11px] font-semibold flex items-center justify-center gap-1">
+                <PackagePlus size={12} /> Stock
+              </button>
+              {p.tipo === 'producto_terminado' && (
+                <button onClick={() => navigate(`/produccion?producto=${encodeURIComponent(p.nombre)}`)} className="flex-1 rounded-lg bg-loga-red/10 text-loga-red py-2 text-[11px] font-semibold flex items-center justify-center gap-1">
+                  <Factory size={12} /> Producir
+                </button>
+              )}
+              {p.tipo !== 'producto_terminado' && p.proveedor_nombre && (
+                <button onClick={() => setEmailProducto(p)} className="flex-1 rounded-lg bg-blue-50 text-blue-600 py-2 text-[11px] font-semibold flex items-center justify-center gap-1">
+                  <Mail size={12} /> Pedir
+                </button>
+              )}
+              <button onClick={() => abrirEditar(p)} className="rounded-lg border border-gray-200 p-2 text-gray-500" aria-label="Editar"><Pencil size={14} /></button>
+              <button onClick={() => handleEliminar(p)} className="rounded-lg border border-gray-200 p-2 text-gray-400" aria-label="Eliminar"><Trash2 size={14} /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabla (md+) */}
+      <div className="hidden md:block rounded-xl border border-gray-100 overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-100 text-sm">
             <thead className="bg-gray-50">
@@ -509,8 +662,8 @@ export default function Productos() {
                   animate={{ opacity: 1 }}
                   transition={{ delay: i * 0.03 }}
                   className={clsx('transition-colors', {
-                    'bg-red-50/60 hover:bg-red-50': p.nivel_stock === 'rojo',
-                    'bg-amber-50/60 hover:bg-amber-50': p.nivel_stock === 'naranja',
+                    'bg-red-50/60 hover:bg-red-50 shadow-[inset_3px_0_0_0_#FF0000]': p.nivel_stock === 'rojo',
+                    'bg-amber-50/60 hover:bg-amber-50 shadow-[inset_3px_0_0_0_#F59E0B]': p.nivel_stock === 'naranja',
                     'hover:bg-gray-50': p.nivel_stock === 'verde' || !p.nivel_stock,
                   })}
                 >
@@ -1118,13 +1271,25 @@ export default function Productos() {
                 setImportResult(null);
                 try {
                   const parsed = JSON.parse(importJson);
-                  const { data } = await productosApi.importar(parsed);
-                  const d = data as { ok: boolean; creados: number };
+                  const res = await notify.promise(productosApi.importar(parsed), {
+                    loading: 'Importando productos…',
+                    success: (r) => {
+                      const d = (r as { data: { creados: number } }).data;
+                      return `${d.creados} producto(s) importado(s)`;
+                    },
+                    error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al importar',
+                  });
+                  const d = (res as { data: { ok: boolean; creados: number } }).data;
                   setImportResult(`${d.creados} producto(s) importado(s) correctamente.`);
                   cargar();
                 } catch (err: unknown) {
-                  const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
-                  setImportResult(msg ?? (err instanceof SyntaxError ? 'JSON invalido — revisa la sintaxis' : 'Error al importar'));
+                  if (err instanceof SyntaxError) {
+                    notify.error('JSON inválido — revisa la sintaxis');
+                    setImportResult('JSON invalido — revisa la sintaxis');
+                  } else {
+                    const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                    setImportResult(msg ?? 'Error al importar');
+                  }
                 } finally {
                   setImporting(false);
                 }

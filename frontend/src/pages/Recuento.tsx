@@ -4,6 +4,7 @@ import { ArrowLeft, ClipboardList, Calculator, Check, AlertTriangle } from 'luci
 import { productosApi, lotesApi } from '../api/client';
 import type { Producto } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
 interface LoteRecuento {
@@ -93,10 +94,19 @@ export default function Recuento() {
     if (!diferencias || diferencias.length === 0) return;
     setApplying(true);
     setError('');
-    try {
+    const ejecutar = async () => {
       for (const d of diferencias) {
         await lotesApi.actualizar(d.lote.id, { cantidad_actual: d.contado });
       }
+      return diferencias.length;
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: 'Aplicando recuento…',
+        success: 'Recuento aplicado',
+        successDesc: (n) => `${n} lote(s) actualizado(s)`,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al aplicar cambios',
+      });
       setApplied(true);
     } catch {
       setError('Error al aplicar cambios');
@@ -242,7 +252,22 @@ export default function Recuento() {
                     {diferencias.length} diferencia{diferencias.length !== 1 ? 's' : ''} encontrada{diferencias.length !== 1 ? 's' : ''}
                   </span>
                 </div>
-                <table className="min-w-full divide-y divide-amber-100 text-xs">
+                {/* Mobile cards */}
+                <div className="flex flex-col gap-2 p-3 md:hidden">
+                  {diferencias.map((d, i) => (
+                    <div key={i} className="rounded-lg border border-amber-100 bg-white p-3">
+                      <p className="text-sm font-semibold text-gray-800 truncate">{d.producto.nombre}</p>
+                      <p className="text-[11px] font-mono text-gray-500 truncate">{d.lote.lote_interno}</p>
+                      <div className="grid grid-cols-3 gap-2 mt-2 text-[11px]">
+                        <div><p className="text-gray-400">Sistema</p><p className="tabular-nums font-medium text-gray-700">{d.sistema.toLocaleString('es-ES', { maximumFractionDigits: 2 })}</p></div>
+                        <div><p className="text-gray-400">Contado</p><p className="tabular-nums font-bold text-gray-900">{d.contado.toLocaleString('es-ES', { maximumFractionDigits: 2 })}</p></div>
+                        <div><p className="text-gray-400">Dif</p><p className={clsx('tabular-nums font-bold', d.diff > 0 ? 'text-emerald-600' : 'text-loga-red')}>{d.diff > 0 ? '+' : ''}{d.diff.toLocaleString('es-ES', { maximumFractionDigits: 2 })}</p></div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {/* Desktop table */}
+                <table className="hidden md:table min-w-full divide-y divide-amber-100 text-xs">
                   <thead className="bg-amber-50/50">
                     <tr>
                       <th className="px-4 py-2 text-left font-medium text-gray-600 uppercase tracking-wide">Producto</th>

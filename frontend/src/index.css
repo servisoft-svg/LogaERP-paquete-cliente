@@ -8,12 +8,35 @@
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden; /* nunca scroll horizontal global en móvil */
   }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: #FF0000; }
   .dark ::-webkit-scrollbar-thumb { background: #555; }
+
+  /* Mobile: inputs/selects/textareas a 16px para evitar zoom automático iOS al focus */
+  @media (max-width: 767px) {
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+    /* Touch targets mínimo 40px en botones de acción dentro de tablas */
+    table button,
+    table a {
+      min-height: 36px;
+    }
+  }
+
+  /* Safe area iOS — bottom nav y main respetan notch/home indicator */
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
 }
 
 @layer utilities {
@@ -21,6 +44,37 @@
   .bg-loga-red     { background-color: #FF0000; }
   .border-loga-red { border-color: #FF0000; }
 }
+
+/* ═══════════════════════════════════
+   Sileo — minimalista, mobile-friendly
+   Mantiene el morphing SVG (pill → card). Sin overrides agresivos.
+   ═══════════════════════════════════ */
+:root {
+  --sileo-width: 360px;
+}
+
+/* Tipografía refinada (letterspacing apretado) */
+[data-sileo-title] {
+  letter-spacing: -0.015em;
+  font-weight: 600;
+}
+[data-sileo-description] {
+  letter-spacing: -0.005em;
+  line-height: 1.45;
+}
+
+/* Mobile: levantar el toast por encima de la tab bar (h-14 = 56px + safe-area).
+   Sileo aplica su propio offset; lo sumamos vía margen para no tocar la prop. */
+@media (max-width: 767px) {
+  :root { --sileo-width: calc(100vw - 24px); }
+  [data-sileo-viewport][data-position="bottom-center"],
+  [data-sileo-viewport][data-position="bottom-left"],
+  [data-sileo-viewport][data-position="bottom-right"] {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 64px) !important;
+  }
+}
+
+/* Dark mode: el fill se gestiona por theme="system" en el Toaster — sin overrides. */
 
 /* ═══════════════════════════════════
    DARK MODE — gris neutro

@@ -2,6 +2,7 @@
 
 ## Indice
 
+0. [Notificaciones del sistema](#0-notificaciones-del-sistema)
 1. [Productos](#1-productos)
 2. [Recetas](#2-recetas)
 3. [Lotes y Stock](#3-lotes-y-stock)
@@ -12,6 +13,89 @@
 8. [Clientes](#8-clientes)
 9. [Finanzas](#9-finanzas)
 10. [Configuracion y Administracion](#10-configuracion-y-administracion)
+11. [Uso desde movil](#11-uso-desde-movil)
+
+---
+
+## 0. Notificaciones del sistema
+
+Todas las acciones de la aplicacion (crear, editar, eliminar, planificar, fabricar, envasar, consumir, enviar email, hacer backup, etc.) generan una **notificacion visual** en la parte **inferior central** de la pantalla. No hay alertas tipo `alert()` del navegador — todo es feedback en la interfaz.
+
+### Tipos de notificacion
+
+| Tipo | Color del estado | Cuando aparece |
+|------|------------------|----------------|
+| **Cargando** | Gris animado | Mientras dura la operacion (ej: "Guardando…", "Fabricando…") |
+| **Exito** | Verde | Al completar correctamente. Incluye detalle de lo guardado (nombre, codigo, cantidad, total, etc.) |
+| **Error** | Rojo | Si la operacion falla. Muestra el motivo exacto del servidor |
+| **Aviso** | Ambar | Stock bajo, lote en cuarentena por QC, sesion proxima a caducar |
+| **Info** | Azul | Sesion cerrada, mensajes informativos |
+
+### Caracteristicas
+
+- **Pill que se despliega**: la notificacion aparece como una pildora compacta con el titulo. A los 150 ms se despliega automaticamente a una tarjeta mas grande con la descripcion (animacion gooey morphing). Tras unos segundos colapsa de nuevo y desaparece.
+- **Una sola operacion = una sola notificacion**: la notificacion de "Cargando…" se transforma en exito o error al terminar. No quedan notificaciones huerfanas.
+- **Contenido enriquecido**: las notificaciones de exito muestran detalle del registro afectado (ej: al confirmar un pedido se ven las lineas del pedido y el total dentro del propio toast).
+- **Boton de accion** (opcional): algunas notificaciones incluyen un boton para navegar al detalle (ej: "Ver detalle" tras fabricar).
+- **Hover pausa**: al pasar el raton (o tocar en movil) por encima, el temporizador se pausa hasta que apartas el dedo.
+- **Swipe para descartar**: en movil, deslizar la notificacion hacia abajo la cierra inmediatamente.
+- **Posicion movil**: en pantallas pequenas la notificacion se eleva por encima de la barra inferior de navegacion para no taparla, y respeta el safe-area del notch/home indicator.
+- **Stock bajo automatico**: tras cualquier operacion que consuma stock (fabricar, envasar, consumir pedido), si algun producto queda por debajo del stock minimo, salta una notificacion de aviso con la lista de productos afectados (codigo, nombre, stock actual). Throttled a 1 alerta cada 8 segundos para evitar spam.
+- **Spinner de envio de email**: durante el envio de pedidos a proveedor o albaranes a cliente, el spinner es el logo de Loga llenandose y vaciandose en bucle.
+
+### Acciones que generan notificacion
+
+A continuacion aparece una lista de las acciones notificadas. Las marcadas con (rich) muestran detalle ampliado dentro del propio toast.
+
+**Productos**
+- Crear / editar producto (rich: nombre + codigo)
+- Eliminar producto
+- Anadir stock manual a un producto (rich: nombre + cantidad anadida + unidad)
+
+**Recetas**
+- Crear / editar / duplicar receta de fabricacion o envasado (rich: nombre + producto)
+- Eliminar receta
+- Anadir / eliminar ingrediente
+
+**Lotes y stock**
+- Crear lote (entrada de stock)
+- Cambiar estado del lote (rich: lote + nuevo estado + motivo)
+- Ajuste manual de stock
+- Reconciliar stock
+
+**Fabricacion**
+- Planificar nueva orden (rich: receta + cantidad + cliente + fecha)
+- Fabricar (rich: lote producido + cantidad real + duracion en minutos + boton "Ver detalle")
+- Lote en cuarentena por QC fuera de rango (warning)
+- Eliminar / revertir orden
+
+**Envasado**
+- Planificar envasado
+- Envasado rapido y planificado (rich: producto + unidades producidas)
+- Errores de stock con lista de materiales que faltan
+
+**Pedidos**
+- Crear / editar pedido (rich: cliente + numero de lineas + total EUR)
+- Cambiar estado del pedido (rich: cliente + lista de lineas con cantidad + total)
+- Consumir stock (rich: numero de pedido completado)
+- Cancelar pedido
+- Enviar albaran por email (loading "Enviando…" → "Email enviado")
+- Descargar albaran PDF
+
+**Clientes / Proveedores**
+- Crear / editar / eliminar (rich: nombre)
+
+**Configuracion**
+- Guardar configuracion general
+- Probar conexion SMTP (success o error de conexion)
+- Backup manual (rich: tamano + fecha)
+- Restaurar backup
+
+**Sesion**
+- Login correcto (rich: bienvenida con nombre del usuario)
+- Credenciales invalidas
+- Logout (info: "Sesion cerrada")
+- Sesion caducada (warning antes de logout automatico)
 
 ---
 
@@ -271,6 +355,22 @@ Todo ocurre en una unica transaccion atomica (si algo falla, no se hace nada):
 7. Se calcula merma si la cantidad real difiere de la planificada
 8. Si habia un pedido vinculado, pasa a estado "fabricado"
 9. **Alertas automaticas**: el sistema comprueba si algun ingrediente ha bajado del stock minimo y genera notificacion instantanea
+10. **Tiempo de fabricacion**: se guarda automaticamente la duracion real (`fecha_inicio` = momento en que se abrio el modal de Fabricar; `fecha_fin` = momento en que se confirmo). Estos datos solo se registran si la fabricacion se completa con exito. Si el operario abre el modal y lo cierra sin confirmar, no se guarda nada y el cronometro empieza de cero la siguiente vez.
+
+**Tiempo de fabricacion (recopilacion automatica):**
+
+Crear una nueva planificacion no inicia el cronometro. El cronometro empieza cuando se pulsa el boton **Fabricar** (se abre el modal) y se detiene cuando la fabricacion se confirma con exito. Permite calcular:
+- Duracion real por orden (`fecha_fin - fecha_inicio`)
+- Tiempo medio de fabricacion por receta
+- Productividad por operario (cruzando con `operario_id`)
+
+Consulta SQL ejemplo para ver duraciones:
+```sql
+SELECT numero_orden, fecha_inicio, fecha_fin, fecha_fin - fecha_inicio AS duracion
+FROM ordenes_produccion
+WHERE estado = 'completada' AND fecha_inicio IS NOT NULL
+ORDER BY fecha_fin DESC;
+```
 
 **Registro de Limpieza (Medioambiente):**
 
@@ -429,6 +529,8 @@ En la lista de pedidos, cada uno muestra un boton de color segun lo que necesita
 | **Verde** | Consumir | Hay stock suficiente del producto envasado | Pulsar para seleccionar lotes y completar |
 | **Naranja** | Envasar | Hay cola granel pero faltan botes | Pulsar para ir a envasar el producto |
 | **Rojo** | Fabricar | No hay cola granel suficiente | Pulsar para crear orden de fabricacion |
+
+Para pedidos en estados intermedios (`fabricado` o `envasado`) el boton de cierre es **"Consumir"** (desktop) o **"Consumir y completar"** (movil). Pulsarlo descuenta el stock del producto final segun los lotes FEFO seleccionados y deja el pedido en `completado` en una sola accion. **Nunca** existe un atajo "marcar completado" sin descontar stock — el unico camino al estado completado es a traves del consumo real.
 
 La columna **Accion** muestra el estado con color para ver de un vistazo que pedidos necesitan atencion.
 
@@ -708,6 +810,38 @@ Si crees que hay discrepancias:
 2. Muestra productos donde stock_actual != suma de lotes aprobados
 3. Pulsar **Reconciliar** para corregir automaticamente
 4. Cada correccion queda registrada en stock_moves con el motivo, usuario y cantidades antes/despues
+
+---
+
+## 11. Uso desde movil
+
+La aplicacion esta optimizada para usar comodamente desde telefono o tablet.
+
+### Acceso desde movil
+
+- En la misma red WiFi que el ordenador donde corre la app, abrir el navegador del telefono y entrar a `http://<IP-del-ordenador>:5173` (la IP local se muestra en la consola de Vite al arrancar).
+- En produccion (Railway/dominio propio), entrar a la URL publica.
+- Recomendado: anadir a pantalla inicio para que parezca una app nativa (en iOS Safari: boton compartir > Anadir a pantalla de inicio).
+
+### Adaptaciones automaticas en pantallas pequenas
+
+- **Barra inferior**: navegacion principal en la parte de abajo (Dashboard, Productos, Recetas, Produccion, Pedidos) + boton **Mas** para el resto. Respeta el safe-area del iPhone.
+- **Tablas en cards**: en Productos, Pedidos, Ordenes de fabricacion, Lotes, Recuento y Dashboard las tablas se sustituyen por tarjetas verticales con la misma informacion mas legible.
+- **Modales bottom-sheet**: los modales (nuevo pedido, editar producto, anadir lote, etc.) se anclan a la parte inferior de la pantalla con esquinas redondeadas arriba, en lugar de centrados.
+- **Formularios apilados**: los campos que en desktop van en 2-3 columnas (telefono+email, fechas, niveles de cliente, etc.) se apilan verticalmente para evitar inputs estrechos.
+- **Inputs sin zoom iOS**: todos los campos de texto/select/textarea fuerzan tamano minimo 16 px en movil para evitar que iOS haga zoom al hacer foco.
+- **Tap targets de 36 px+**: botones de accion en cards y filas tienen una altura minima tactil comoda.
+- **Notificaciones por encima de la barra**: las notificaciones aparecen por encima de la tab bar inferior para no taparla, con swipe-down para descartar.
+
+### Lectura de codigo de barras
+
+Al fabricar un lote o anadir stock, el icono de **escaner** abre la camara del movil y permite leer codigos de barras EAN/Code-128 directamente. Solo hace falta dar permiso de camara la primera vez.
+
+### Limitaciones conocidas
+
+- La descarga de PDF (albaran, trazabilidad CSV) abre el archivo en una pestana nueva — desde ahi se puede compartir o guardar.
+- Algunos graficos de Finanzas se ven mejor en horizontal o desde tablet.
+- El reporte de plastico (Ley 7/2022) se exporta como Excel — abrir desde Numbers/Sheets en movil.
 
 ---
 

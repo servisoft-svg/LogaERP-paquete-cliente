@@ -12,6 +12,8 @@ import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
 import { FormField, Input, Select, Textarea } from '../components/FormField';
 import ReactorVisualization from '../components/ReactorVisualization';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
 
 import clsx from 'clsx';
 
@@ -153,11 +155,9 @@ export default function Recetas() {
   const guardarEnvasadoReceta = async () => {
     if (!envRecForm.producto_id || !envRecForm.cola_id || !envRecForm.envase_id) return;
     setSavingEnv(true);
-    try {
-      const prodFinal = productos.find(p => p.id === envRecForm.producto_id);
-      const nombre = envRecForm.nombre || `Envasado ${prodFinal?.nombre ?? ''}`;
-
-      // Build ingredientes: cola (1 ud) + envase (1 ud) + materials
+    const prodFinal = productos.find(p => p.id === envRecForm.producto_id);
+    const nombre = envRecForm.nombre || `Envasado ${prodFinal?.nombre ?? ''}`;
+    const ejecutar = async () => {
       const ingredientes = [
         { materia_prima_id: envRecForm.cola_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'kg' },
         { materia_prima_id: envRecForm.envase_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'ud' },
@@ -165,10 +165,8 @@ export default function Recetas() {
           materia_prima_id: m.producto_id, cantidad: parseFloat(m.cantidad) || 1, porcentaje_merma: 0, unidad_medida: 'ud',
         })),
       ];
-
       if (editandoEnv) {
         await recetasApi.editar(editandoEnv.id, { nombre, producto_id: envRecForm.producto_id, rendimiento: 1, tipo_receta: 'envasado' });
-        // Delete old ingredients and add new
         for (const ing of (editandoEnv.ingredientes ?? [])) {
           await recetasApi.eliminarIngrediente(editandoEnv.id, ing.id);
         }
@@ -182,19 +180,33 @@ export default function Recetas() {
           await recetasApi.addIngrediente(nueva.id, ing);
         }
       }
-      // Also update granel_id on the product
       await productosApi.editar(envRecForm.producto_id, { granel_id: envRecForm.cola_id } as any);
-
+      return { nombre };
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: editandoEnv ? 'Guardando receta…' : 'Creando receta…',
+        success: editandoEnv ? 'Receta guardada' : 'Receta creada',
+        successDesc: (d) => d.nombre,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo guardar la receta',
+      });
       setModalEnv(false);
       cargar();
-    } catch { /* */ }
+    } catch { /* notificado */ }
     finally { setSavingEnv(false); }
   };
 
   const eliminarEnvReceta = async (r: Receta) => {
     if (!confirm(`Eliminar receta "${r.nombre}"?`)) return;
-    await recetasApi.eliminar(r.id);
-    cargar();
+    try {
+      await notify.promise(recetasApi.eliminar(r.id), {
+        loading: 'Eliminando…',
+        success: 'Receta eliminada',
+        successDesc: r.nombre,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo eliminar',
+      });
+      cargar();
+    } catch { /* notificado */ }
   };
 
   const cargar = useCallback(async () => {
@@ -270,15 +282,20 @@ export default function Recetas() {
     }
     setSavingReceta(true);
     setErrorReceta('');
-    try {
-      const qcFields: Record<string, number> = {};
-      if (formReceta.ph_min) qcFields.ph_min = Number(formReceta.ph_min);
-      if (formReceta.ph_max) qcFields.ph_max = Number(formReceta.ph_max);
-      if (formReceta.solidos_min) qcFields.solidos_min = Number(formReceta.solidos_min);
-      if (formReceta.solidos_max) qcFields.solidos_max = Number(formReceta.solidos_max);
-      if (formReceta.viscosidad_min) qcFields.viscosidad_min = Number(formReceta.viscosidad_min);
-      if (formReceta.viscosidad_max) qcFields.viscosidad_max = Number(formReceta.viscosidad_max);
+    const qcFields: Record<string, number> = {};
+    if (formReceta.ph_min) qcFields.ph_min = Number(formReceta.ph_min);
+    if (formReceta.ph_max) qcFields.ph_max = Number(formReceta.ph_max);
+    if (formReceta.solidos_min) qcFields.solidos_min = Number(formReceta.solidos_min);
+    if (formReceta.solidos_max) qcFields.solidos_max = Number(formReceta.solidos_max);
+    if (formReceta.viscosidad_min) qcFields.viscosidad_min = Number(formReceta.viscosidad_min);
+    if (formReceta.viscosidad_max) qcFields.viscosidad_max = Number(formReceta.viscosidad_max);
 
+    const productoNombre = productos.find(p => p.id === formReceta.producto_id)?.nombre;
+    const numPasos = formReceta.pasos?.length ?? 0;
+    const hasQC = Object.keys(qcFields).length > 0;
+
+    const ejecutar = async () => {
+      let id = editandoReceta?.id;
       if (editandoReceta) {
         await recetasApi.editar(editandoReceta.id, {
           nombre: formReceta.nombre.trim(),
@@ -290,7 +307,7 @@ export default function Recetas() {
           ...qcFields,
         });
       } else {
-        await recetasApi.crear({
+        const res = await recetasApi.crear({
           nombre: formReceta.nombre.trim(),
           producto_id: formReceta.producto_id || undefined,
           rendimiento: formReceta.tipo_receta === 'envasado' ? 1 : (formReceta.rendimiento ? Number(formReceta.rendimiento) : undefined),
@@ -299,7 +316,43 @@ export default function Recetas() {
           tipo_receta: formReceta.tipo_receta,
           ...qcFields,
         });
+        id = (res.data as { id?: string })?.id;
       }
+      return { id, nombre: formReceta.nombre.trim() };
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: editandoReceta ? 'Guardando receta…' : 'Creando receta…',
+        success: editandoReceta ? 'Receta guardada' : 'Receta creada',
+        successDesc: () => (
+          <>
+            <ToastBlock title={formReceta.nombre.trim()}>
+              <ToastField label="Tipo" value={formReceta.tipo_receta === 'envasado' ? 'Envasado' : 'Fabricación'} />
+              <ToastField label="Producto" value={productoNombre} span={2} />
+              <ToastField
+                label="Rendimiento"
+                value={formReceta.tipo_receta !== 'envasado' && formReceta.rendimiento ? `${Number(formReceta.rendimiento).toLocaleString('es-ES')} kg/tanda` : ''}
+              />
+              <ToastField label="Pasos definidos" value={numPasos > 0 ? numPasos : ''} />
+              <ToastField label="Control de calidad" value={hasQC ? 'Activo' : ''} />
+            </ToastBlock>
+            {!editandoReceta && (
+              <div className="text-[11px] italic text-gray-400 mt-1">Añade ingredientes para que esté lista para fabricar.</div>
+            )}
+          </>
+        ),
+        successButton: !editandoReceta ? {
+          title: 'Añadir ingredientes',
+          onClick: (data) => {
+            if (data?.id) {
+              setExpandida(data.id);
+              cargarDetalle(data.id);
+              setTimeout(() => abrirNuevoIng(), 200);
+            }
+          },
+        } : undefined,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
+      });
       setModalReceta(false);
       cargar();
       if (expandida) cargarDetalle(expandida);
@@ -314,22 +367,24 @@ export default function Recetas() {
   const eliminarReceta = async (r: Receta) => {
     if (!confirm(`Desactivar receta "${r.nombre}"?`)) return;
     try {
-      await recetasApi.eliminar(r.id);
+      await notify.promise(recetasApi.eliminar(r.id), {
+        loading: 'Desactivando…',
+        success: 'Receta desactivada',
+        successDesc: r.nombre,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo desactivar',
+      });
       cargar();
       if (expandida === r.id) {
         setExpandida(null);
         setRecetaDetalle(null);
       }
-    } catch { /* silencioso */ }
+    } catch { /* notificado */ }
   };
 
   const duplicarReceta = async (r: Receta) => {
-    try {
-      // Load full detail with ingredients
+    const ejecutar = async () => {
       const detRes = await recetasApi.obtener(r.id);
       const detalle = detRes.data as Receta;
-
-      // Create new recipe with same data but " (copia)" appended
       const qcFields: Record<string, number> = {};
       if (detalle.ph_min) qcFields.ph_min = Number(detalle.ph_min);
       if (detalle.ph_max) qcFields.ph_max = Number(detalle.ph_max);
@@ -347,8 +402,6 @@ export default function Recetas() {
         ...qcFields,
       });
       const nueva = nuevaRes.data as Receta;
-
-      // Add each ingredient to the new recipe
       for (const ing of (detalle.ingredientes ?? [])) {
         await recetasApi.addIngrediente(nueva.id, {
           materia_prima_id: ing.materia_prima_id,
@@ -357,9 +410,17 @@ export default function Recetas() {
           unidad_medida: ing.unidad_medida,
         });
       }
-
+      return { nombre: nueva.nombre };
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: 'Duplicando receta…',
+        success: 'Receta duplicada',
+        successDesc: (d) => d.nombre,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo duplicar',
+      });
       cargar();
-    } catch { /* silencioso */ }
+    } catch { /* notificado */ }
   };
 
   /* ---- Ingredientes CRUD ---- */
@@ -390,20 +451,28 @@ export default function Recetas() {
     if (!expandida) return;
     setSavingIng(true);
     setErrorIng('');
-    try {
-      const payload = {
-        materia_prima_id: formIng.materia_prima_id,
-        cantidad: Number(formIng.cantidad),
-        porcentaje_merma: Number(formIng.porcentaje_merma) || 0,
-        unidad_medida: formIng.unidad_medida,
-      };
+    const expandidaId = expandida;
+    const payload = {
+      materia_prima_id: formIng.materia_prima_id,
+      cantidad: Number(formIng.cantidad),
+      porcentaje_merma: Number(formIng.porcentaje_merma) || 0,
+      unidad_medida: formIng.unidad_medida,
+    };
+    const ejecutar = async () => {
       if (editandoIng) {
-        await recetasApi.editarIngrediente(expandida, editandoIng.id, payload);
+        await recetasApi.editarIngrediente(expandidaId, editandoIng.id, payload);
       } else {
-        await recetasApi.addIngrediente(expandida, payload);
+        await recetasApi.addIngrediente(expandidaId, payload);
       }
+    };
+    try {
+      await notify.promise(ejecutar(), {
+        loading: editandoIng ? 'Guardando ingrediente…' : 'Añadiendo ingrediente…',
+        success: editandoIng ? 'Ingrediente guardado' : 'Ingrediente añadido',
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar ingrediente',
+      });
       setModalIng(false);
-      cargarDetalle(expandida);
+      cargarDetalle(expandidaId);
       cargar();
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
@@ -416,11 +485,17 @@ export default function Recetas() {
   const eliminarIng = async (ing: IngredienteReceta) => {
     if (!expandida) return;
     if (!confirm(`Eliminar ingrediente "${ing.nombre_mp}"?`)) return;
+    const expandidaId = expandida;
     try {
-      await recetasApi.eliminarIngrediente(expandida, ing.id);
-      cargarDetalle(expandida);
+      await notify.promise(recetasApi.eliminarIngrediente(expandidaId, ing.id), {
+        loading: 'Eliminando ingrediente…',
+        success: 'Ingrediente eliminado',
+        successDesc: ing.nombre_mp,
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo eliminar',
+      });
+      cargarDetalle(expandidaId);
       cargar();
-    } catch { /* silencioso */ }
+    } catch { /* notificado */ }
   };
 
   const [soloConStock, setSoloConStock] = useState(false);

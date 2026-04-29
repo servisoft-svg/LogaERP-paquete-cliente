@@ -12,6 +12,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Mail, Package, Send, CheckCircle, AlertCircle, ChevronRight, Eye } from 'lucide-react';
 import { stockApi, configuracionApi } from '../api/client';
 import type { Producto } from '../types';
+import { notify } from '../lib/notify';
+import SpinnerColaBlanca from './SpinnerColaBlanca';
 import clsx from 'clsx';
 
 interface EmailModalProps {
@@ -74,13 +76,21 @@ export default function EmailModal({ producto, onClose }: EmailModalProps) {
     if (!producto) return;
     setStep('enviando');
     try {
-      await stockApi.enviarPedido({
-        producto_id:       producto.id,
-        destinatario,
-        cantidad_sugerida: cantidadSugerida,
-        notas_adicionales: notas,
-        cuerpo_personalizado: cuerpoEditado !== null ? cuerpoEditado : undefined,
-      });
+      await notify.promise(
+        stockApi.enviarPedido({
+          producto_id:       producto.id,
+          destinatario,
+          cantidad_sugerida: cantidadSugerida,
+          notas_adicionales: notas,
+          cuerpo_personalizado: cuerpoEditado !== null ? cuerpoEditado : undefined,
+        }),
+        {
+          loading: 'Enviando email…',
+          success: 'Email enviado',
+          successDesc: destinatario,
+          error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo enviar el email',
+        }
+      );
       setStep('exito');
     } catch {
       setErrorMsg('No se pudo enviar el email. Verifique la configuración SMTP.');
@@ -287,7 +297,7 @@ export default function EmailModal({ producto, onClose }: EmailModalProps) {
 
             {step === 'enviando' && (
               <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center py-6 gap-3">
-                <div className="h-10 w-10 rounded-full border-2 border-loga-red border-t-transparent animate-spin" />
+                <SpinnerColaBlanca size="md" />
                 <p className="text-sm text-gray-500">Enviando email…</p>
               </motion.div>
             )}

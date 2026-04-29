@@ -16,6 +16,9 @@ import Modal from '../components/Modal';
 import { FormField, Input } from '../components/FormField';
 import clsx from 'clsx';
 import { useAuth } from '../contexts/AuthContext';
+import { notify } from '../lib/notify';
+import { ToastBlock, ToastField } from '../components/ToastFields';
+import { checkStockBajo } from '../lib/stockAlerts';
 import Paginacion from '../components/Paginacion';
 import SearchSelect from '../components/SearchSelect';
 
@@ -131,7 +134,7 @@ export default function OrdenesFabricacion() {
       setTimeout(() => { setEmailOrdenId(null); setEmailDest(''); setEmailExito(false); }, 2000);
     } catch (err: unknown) {
       const apiErr = err as { response?: { data?: { error?: string } } };
-      alert(apiErr?.response?.data?.error ?? 'Error al enviar');
+      notify.error(apiErr?.response?.data?.error ?? 'Error al enviar');
     } finally {
       setEnviandoEmail(false);
     }
@@ -207,29 +210,42 @@ export default function OrdenesFabricacion() {
 
   const handleCrearEnvasado = async () => {
     if (!envForm.cola_id || !envForm.envase_id || !envForm.cantidad) return;
+    const envase = productos.find(p => p.id === envForm.envase_id);
+    const prodFinal = productos.find(p => p.id === envForm.producto_final_id);
+    const cantidadUd = parseInt(envForm.cantidad);
     try {
-      const envase = productos.find(p => p.id === envForm.envase_id);
       const mats = envMateriales.filter(m => m.producto_id && parseFloat(m.cantidad) > 0).map(m => ({ producto_id: m.producto_id, cantidad: parseFloat(m.cantidad) }));
-      await produccionApi.envasadoPlanificar({
-        producto_final_id: envForm.producto_final_id || undefined,
-        cola_id: envForm.cola_id,
-        envase_id: envForm.envase_id,
-        cantidad_unidades: parseInt(envForm.cantidad),
-        fecha_planificada: envForm.fecha || undefined,
-        cliente: envForm.cliente || undefined,
-        cliente_id: envForm.cliente_id || undefined,
-        formato_label: envase?.nombre,
-        notas: envForm.notas || undefined,
-        materiales: mats.length > 0 ? mats : undefined,
-      });
+      await notify.promise(
+        produccionApi.envasadoPlanificar({
+          producto_final_id: envForm.producto_final_id || undefined,
+          cola_id: envForm.cola_id,
+          envase_id: envForm.envase_id,
+          cantidad_unidades: cantidadUd,
+          fecha_planificada: envForm.fecha || undefined,
+          cliente: envForm.cliente || undefined,
+          cliente_id: envForm.cliente_id || undefined,
+          formato_label: envase?.nombre,
+          notas: envForm.notas || undefined,
+          materiales: mats.length > 0 ? mats : undefined,
+        }),
+        {
+          loading: 'Planificando envasado…',
+          success: 'Envasado planificado',
+          successDesc: (
+            <ToastBlock title={prodFinal?.nombre ?? 'Producto'}>
+              <ToastField label="Cantidad" value={`${cantidadUd.toLocaleString('es-ES')} ud`} />
+              <ToastField label="Envase" value={envase?.nombre} />
+              <ToastField label="Cliente" value={envForm.cliente} span={2} />
+            </ToastBlock>
+          ),
+          error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al planificar envasado',
+        }
+      );
       setShowEnvasadoForm(false);
       setEnvForm({ producto_final_id: '', cola_id: '', envase_id: '', cantidad: '', fecha: '', cliente: '', cliente_id: '', notas: '' });
       setEnvMateriales([]);
       cargar();
-    } catch (err: unknown) {
-      const apiErr = err as { response?: { data?: { error?: string } } };
-      alert(apiErr?.response?.data?.error ?? 'Error al planificar envasado');
-    }
+    } catch { /* notificado */ }
   };
 
   // Step 1: Show preview (lots to consume)
@@ -240,7 +256,7 @@ export default function OrdenesFabricacion() {
       setEnvasadoPreview({ ordenId, data });
     } catch (err: unknown) {
       const apiErr = err as { response?: { data?: { error?: string } } };
-      alert(apiErr?.response?.data?.error ?? 'Error al cargar preview');
+      notify.error(apiErr?.response?.data?.error ?? 'Error al cargar preview');
     } finally {
       setLoadingPreview(false);
     }
@@ -261,12 +277,25 @@ export default function OrdenesFabricacion() {
       const { data } = await produccionApi.confirmarEnvasado(ordenId);
       clearInterval(interval);
       setEnvasadoAnimacion(prev => prev ? { ...prev, fillPct: 100, resultado: data } : null);
+      const r = data as { producto_envasado?: string; cantidad?: number; lote?: string; peso_cola_consumido?: number };
+      notify.success('Envasado completado', {
+        description: (
+          <ToastBlock title={r.producto_envasado}>
+            <ToastField label="Unidades" value={r.cantidad !== undefined ? `${r.cantidad.toLocaleString('es-ES')} ud` : ''} />
+            <ToastField label="Cola consumida" value={r.peso_cola_consumido !== undefined ? `${r.peso_cola_consumido.toLocaleString('es-ES', { maximumFractionDigits: 2 })} kg` : ''} />
+            <ToastField label="Lote" value={r.lote} span={2} />
+          </ToastBlock>
+        ),
+      });
       setTimeout(() => setEnvasadoAnimacion(prev => prev ? { ...prev, fase: 'completado' } : null), 800);
       cargar();
+      setTimeout(() => checkStockBajo(), 1500);
     } catch (err: unknown) {
       clearInterval(interval);
       const apiErr = err as { response?: { data?: { error?: string } } };
-      setEnvasadoAnimacion(prev => prev ? { ...prev, fillPct: 0, fase: 'error', errorMsg: apiErr?.response?.data?.error ?? 'Error al envasar' } : null);
+      const msg = apiErr?.response?.data?.error ?? 'Error al envasar';
+      notify.error('Envasado fallido', { description: msg });
+      setEnvasadoAnimacion(prev => prev ? { ...prev, fillPct: 0, fase: 'error', errorMsg: msg } : null);
     }
   };
 
@@ -294,7 +323,7 @@ export default function OrdenesFabricacion() {
       if (detalleOrden?.orden.id === confirmElim.id) setDetalleOrden(null);
     } catch (err: unknown) {
       const apiErr = err as { response?: { data?: { mensaje?: string; error?: string } } };
-      alert(apiErr?.response?.data?.mensaje ?? apiErr?.response?.data?.error ?? 'Error al eliminar');
+      notify.error(apiErr?.response?.data?.mensaje ?? apiErr?.response?.data?.error ?? 'Error al eliminar');
     } finally {
       setBorrando(null);
       setConfirmElim(null);
@@ -345,6 +374,18 @@ export default function OrdenesFabricacion() {
     setSearchParams({}, { replace: true });
   }, [searchParams, recetas, clientesList, setSearchParams]);
 
+  // Abrir detalle desde URL ?detalle=ORDENID (toast "Ver detalle" tras fabricar)
+  useEffect(() => {
+    const detalleId = searchParams.get('detalle');
+    if (detalleId && ordenes.length > 0) {
+      const orden = ordenes.find((o) => o.id === detalleId);
+      if (orden) {
+        verDetalle(orden);
+        setSearchParams({}, { replace: true });
+      }
+    }
+  }, [searchParams, ordenes]);
+
   // Abrir envasado rápido desde URL ?tipo=envasado&producto=X&cantidad=Y (desde Pedidos)
   useEffect(() => {
     const tipo = searchParams.get('tipo');
@@ -383,24 +424,38 @@ export default function OrdenesFabricacion() {
   }, [searchParams, ordenes]);
 
   const handleCrearOrden = async () => {
+    const recetaSel = recetas.find(r => r.id === form.receta_id);
+    const cantidad = parseFloat(form.cantidad_planificada);
     try {
-      await produccionApi.crear({
-        receta_id:            form.receta_id,
-        cantidad_planificada: parseFloat(form.cantidad_planificada),
-        fecha_planificada:    form.fecha_planificada || undefined,
-        cliente:              form.cliente || undefined,
-        cliente_id:           form.cliente_id || undefined,
-        notas:                form.notas || undefined,
-        pedido_id:            form.pedido_id || undefined,
-      });
+      await notify.promise(
+        produccionApi.crear({
+          receta_id:            form.receta_id,
+          cantidad_planificada: cantidad,
+          fecha_planificada:    form.fecha_planificada || undefined,
+          cliente:              form.cliente || undefined,
+          cliente_id:           form.cliente_id || undefined,
+          notas:                form.notas || undefined,
+          pedido_id:            form.pedido_id || undefined,
+        }),
+        {
+          loading: 'Planificando orden de fabricación…',
+          success: 'Orden planificada',
+          successDesc: (
+            <ToastBlock title={recetaSel?.nombre ?? 'Receta'}>
+              <ToastField label="Cantidad" value={`${cantidad.toLocaleString('es-ES')} ${recetaSel?.unidad_medida ?? 'kg'}`} />
+              <ToastField label="Cliente" value={form.cliente} />
+              <ToastField label="Fecha" value={form.fecha_planificada ? new Date(form.fecha_planificada).toLocaleDateString('es-ES') : ''} span={2} />
+            </ToastBlock>
+          ),
+          error: 'No se pudo crear la orden',
+        }
+      );
       setShowForm(false);
       setStep(1);
       setClienteMode('select');
       setForm({ receta_id: '', cantidad_planificada: '', fecha_planificada: '', cliente: '', cliente_id: '', notas: '', pedido_id: '' });
       cargar();
-    } catch {
-      alert('Error al crear la orden');
-    }
+    } catch { /* notificado por notify.promise */ }
   };
 
 

@@ -11,6 +11,7 @@ import { stockApi, produccionApi, pedidosApi, configuracionApi, finanzasApi } fr
 import type { Producto, OrdenProduccion, Notificacion, Pedido } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
 interface BackupStatus {
@@ -354,13 +355,15 @@ export default function Dashboard() {
                       await produccionApi.editar(dragItem.id, { fecha_planificada: cell.dateStr });
                       const res = await produccionApi.dashboard(mes);
                       setOrdenes(res.data as OrdenProduccion[]);
-                    } catch {}
+                      notify.success('Orden reprogramada');
+                    } catch { notify.error('No se pudo mover la orden'); }
                   } else if (dragItem?.tipo === 'recordatorio') {
                     try {
                       await produccionApi.moverRecordatorio(dragItem.id, cell.dateStr);
                       const res = await produccionApi.recordatorios(mes);
                       setRecordatorios(res.data as typeof recordatorios);
-                    } catch {}
+                      notify.success('Recordatorio movido');
+                    } catch { notify.error('No se pudo mover el recordatorio'); }
                   }
                   setDragItem(null);
                 } : undefined}
@@ -445,7 +448,13 @@ export default function Dashboard() {
               )}>
                 <span className="text-sm">📌</span>
                 <span className="text-xs font-semibold text-gray-800 flex-1">{r.titulo}</span>
-                <button onClick={() => { produccionApi.eliminarRecordatorio(r.id).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))); }}
+                <button onClick={() => {
+                  notify.promise(produccionApi.eliminarRecordatorio(r.id), {
+                    loading: 'Eliminando…',
+                    success: 'Recordatorio eliminado',
+                    error: 'No se pudo eliminar',
+                  }).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))).catch(() => {});
+                }}
                   className="text-gray-400 hover:text-loga-red"><Trash2 size={12} /></button>
               </div>
             ))}
@@ -668,8 +677,15 @@ export default function Dashboard() {
                   {p.estado === 'nuevo' && (
                     <button
                       onClick={async () => {
-                        await pedidosApi.editar(p.id, { estado: 'confirmado' });
-                        cargarDatos();
+                        try {
+                          await notify.promise(pedidosApi.editar(p.id, { estado: 'confirmado' }), {
+                            loading: 'Confirmando…',
+                            success: 'Pedido confirmado',
+                            successDesc: p.numero_pedido,
+                            error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo confirmar',
+                          });
+                          cargarDatos();
+                        } catch { /* notificado */ }
                       }}
                       className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2 text-xs font-semibold text-white hover:bg-blue-700 transition-colors"
                     >
@@ -686,7 +702,35 @@ export default function Dashboard() {
       {/* Ultimas ordenes */}
       <section>
         <h2 className="text-base font-semibold text-gray-900 mb-4">Ultimas ordenes</h2>
-        <div className="rounded-xl border border-gray-100 overflow-hidden shadow-sm overflow-x-auto">
+
+        {/* Mobile cards */}
+        <div className="flex flex-col gap-2 md:hidden">
+          {ordenes.length === 0 && (
+            <p className="text-xs text-gray-400 text-center py-6">No hay ordenes</p>
+          )}
+          {ordenes.slice(0, 10).map(o => (
+            <div key={o.id} onClick={() => navigate(`/produccion?orden_id=${o.id}`)}
+              className="rounded-xl border border-gray-100 bg-white shadow-sm p-3 active:bg-gray-50">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-mono text-gray-400">{o.numero_orden}</p>
+                  <p className="text-sm font-semibold text-gray-900 truncate">{o.receta_nombre ?? '—'}</p>
+                  {o.cliente && <p className="text-[11px] text-gray-500 truncate">{o.cliente}</p>}
+                </div>
+                <EstadoBadge estado={o.estado} />
+              </div>
+              <div className="flex items-center justify-between mt-2 text-[11px] text-gray-500">
+                <span className="font-mono tabular-nums font-bold text-gray-700">
+                  {parseFloat(o.cantidad_planificada).toLocaleString('es-ES', { maximumFractionDigits: 2 })} kg
+                </span>
+                <span>{o.fecha_planificada ? new Date(o.fecha_planificada).toLocaleDateString('es-ES') : new Date(o.created_at).toLocaleDateString('es-ES')}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden md:block rounded-xl border border-gray-100 overflow-hidden shadow-sm overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-100 text-sm">
             <thead className="bg-gray-50">
               <tr>
@@ -740,12 +784,17 @@ export default function Dashboard() {
               <button onClick={() => setNuevoRec(null)} className="flex-1 rounded-lg border border-gray-200 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50">Cancelar</button>
               <button disabled={!nuevoRec.titulo.trim()} onClick={async () => {
                 try {
-                  await produccionApi.crearRecordatorio(nuevoRec);
+                  await notify.promise(produccionApi.crearRecordatorio(nuevoRec), {
+                    loading: 'Guardando recordatorio…',
+                    success: 'Recordatorio guardado',
+                    successDesc: nuevoRec.titulo,
+                    error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo guardar',
+                  });
                   const mes = `${calMonth.getFullYear()}-${String(calMonth.getMonth() + 1).padStart(2, '0')}`;
                   const res = await produccionApi.recordatorios(mes);
                   setRecordatorios(res.data as typeof recordatorios);
                   setNuevoRec(null);
-                } catch {}
+                } catch { /* notificado */ }
               }} className="flex-1 rounded-lg bg-indigo-600 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:bg-gray-300 transition-colors">
                 Guardar
               </button>
@@ -800,14 +849,22 @@ export default function Dashboard() {
                   onClick={async () => {
                     setEnviandoEmail(true);
                     try {
-                      await configuracionApi.enviarEmail({
-                        to: emailSugerido.to,
-                        subject: `Pedido sugerido — ${emailSugerido.producto}`,
-                        body: `Estimado/a ${emailSugerido.cliente},\n\nSegún nuestro historial de colaboración, le sugerimos un nuevo pedido de:\n\n• Producto: ${emailSugerido.producto}\n• Cantidad habitual: ${emailSugerido.cantidad.toLocaleString('es-ES')} ${emailSugerido.unidad}\n• Fecha estimada: ${emailSugerido.rango}\n\n¿Le preparamos el pedido?\n\nSaludos,\nColas Loga`,
-                      });
+                      await notify.promise(
+                        configuracionApi.enviarEmail({
+                          to: emailSugerido.to,
+                          subject: `Pedido sugerido — ${emailSugerido.producto}`,
+                          body: `Estimado/a ${emailSugerido.cliente},\n\nSegún nuestro historial de colaboración, le sugerimos un nuevo pedido de:\n\n• Producto: ${emailSugerido.producto}\n• Cantidad habitual: ${emailSugerido.cantidad.toLocaleString('es-ES')} ${emailSugerido.unidad}\n• Fecha estimada: ${emailSugerido.rango}\n\n¿Le preparamos el pedido?\n\nSaludos,\nColas Loga`,
+                        }),
+                        {
+                          loading: 'Enviando email…',
+                          success: 'Email enviado',
+                          successDesc: emailSugerido.to,
+                          error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo enviar el email',
+                        }
+                      );
                       setEmailExito(true);
                       setTimeout(() => { setEmailSugerido(null); setEmailExito(false); }, 2000);
-                    } catch { /* error */ }
+                    } catch { /* notificado */ }
                     finally { setEnviandoEmail(false); }
                   }}
                   className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300 transition-colors"

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { LogIn, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { notify } from '../lib/notify';
 
 interface UserData {
   id: string;
@@ -45,10 +46,12 @@ export default function Login() {
         localStorage.removeItem('loga_remember_email');
       }
       const usuario = await login(email, password, remember);
+      notify.success(`Bienvenido, ${usuario.nombre}`);
       setPendingUser(usuario);
       setAnimating(true);
     } catch {
       setError('Email o contrasena incorrectos');
+      notify.error('Credenciales inválidas');
       setLoading(false);
     }
   };
