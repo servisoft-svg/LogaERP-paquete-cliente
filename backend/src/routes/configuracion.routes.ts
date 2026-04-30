@@ -3,6 +3,7 @@ import nodemailer from 'nodemailer';
 import path from 'path';
 import { pool } from '../db/pool';
 import { alertaService } from '../services/alerta.service';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -108,6 +109,14 @@ router.post('/enviar-email', async (req, res) => {
     const { to, subject, body } = req.body;
     if (!to || !subject || !body) return res.status(400).json({ error: 'Faltan campos: to, subject, body' });
 
+    // Anti header-injection: rechazar valores que contengan CR/LF en cabeceras
+    if (typeof to !== 'string' || /[\r\n]/.test(to)) return res.status(400).json({ error: '"to" inválido' });
+    if (typeof subject !== 'string' || /[\r\n]/.test(subject)) return res.status(400).json({ error: '"subject" inválido' });
+    if (typeof body !== 'string') return res.status(400).json({ error: '"body" inválido' });
+    // Validación email destinatario (single address, no Bcc/Cc smuggling)
+    const emailOk = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to.trim());
+    if (!emailOk) return res.status(400).json({ error: 'Email destinatario inválido' });
+
     const { rows: [cfg] } = await pool.query(`SELECT smtp_user, smtp_pass_enc FROM configuracion_global LIMIT 1`);
     const smtpUser = cfg?.smtp_user || process.env.SMTP_USER;
     const smtpPass = cfg?.smtp_pass_enc || process.env.SMTP_PASS;
@@ -121,15 +130,25 @@ router.post('/enviar-email', async (req, res) => {
       auth: { user: smtpUser, pass: smtpPass },
     });
 
+    // Escape HTML del body para evitar inyección en HTML mail body
+    const escapeHtml = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
     await transporter.sendMail({
       from: process.env.EMAIL_FROM || `ERP Loga <${smtpUser}>`,
-      to,
-      subject,
-      html: body.replace(/\n/g, '<br>'),
+      to: to.trim(),
+      subject: subject.trim(),
+      text: body, // versión plana
+      html: escapeHtml(body).replace(/\n/g, '<br>'),
     });
 
     return res.json({ ok: true, mensaje: 'Email enviado correctamente.' });
   } catch (err: unknown) {
+    logger.error('[configuracion.enviar-email]', { err });
     return res.status(500).json({ error: 'Error al enviar email. Verifica la configuración SMTP.' });
   }
 });

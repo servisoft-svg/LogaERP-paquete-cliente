@@ -28,7 +28,7 @@ interface BackupStatus {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { isAdmin } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [productos, setProductos]       = useState<Producto[]>([]);
   const [ordenes, setOrdenes]           = useState<OrdenProduccion[]>([]);
   const [notifs, setNotifs]             = useState<Notificacion[]>([]);
@@ -138,6 +138,20 @@ export default function Dashboard() {
   const alertas = productos.filter(p => p.alerta_activa).length;
   const pendientes = ordenes.filter(o => ['borrador', 'confirmada'].includes(o.estado)).length;
   const completadas = ordenes.filter(o => o.estado === 'completada').length;
+  const pedidosPendientes = pedidos.filter(p => ['confirmado', 'fabricado', 'envasado'].includes(p.estado)).length;
+  const lotesPorCaducar = notifs.filter(n => n.tipo === 'caducidad').length;
+  const erroresAuto = backupStatus?.error ? 1 : 0;
+
+  // Saludo según hora
+  const saludo = (() => {
+    const h = new Date().getHours();
+    if (h < 6) return 'Buenas noches';
+    if (h < 13) return 'Buenos días';
+    if (h < 21) return 'Buenas tardes';
+    return 'Buenas noches';
+  })();
+  const fechaLargaHoy = new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
+  const nombreUser = (user?.nombre ?? user?.email?.split('@')[0] ?? '').split(' ')[0];
 
   // Production chart - last 7 days
   const last7Days = useMemo(() => {
@@ -191,6 +205,57 @@ export default function Dashboard() {
 
   return (
     <div className="animate-fade-in space-y-6">
+      {/* ═══ HERO Saludo minimalista ═══ */}
+      <motion.section
+        initial={{ opacity: 0, y: -4 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3, ease: 'easeOut' }}
+        className="flex items-end justify-between gap-4 flex-wrap pb-1"
+      >
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-medium text-gray-400 tracking-wide capitalize">{fechaLargaHoy}</p>
+          <h1 className="mt-0.5 text-2xl sm:text-[28px] font-bold text-gray-900 tracking-tight leading-tight">
+            {saludo}{nombreUser && <span className="text-gray-300">, </span>}
+            {nombreUser && <span className="text-loga-red">{nombreUser}</span>}
+          </h1>
+        </div>
+
+        <div className="flex flex-wrap gap-1.5 items-center">
+          {pedidosPendientes > 0 && (
+            <button onClick={() => navigate('/pedidos')}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:border-loga-red hover:text-loga-red transition-colors">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full rounded-full bg-loga-red opacity-60 animate-ping" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-loga-red" />
+              </span>
+              <span className="tabular-nums font-bold">{pedidosPendientes}</span>
+              <span>pedido{pedidosPendientes !== 1 ? 's' : ''}</span>
+            </button>
+          )}
+          {lotesPorCaducar > 0 && (
+            <button onClick={() => navigate('/lotes')}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:border-amber-500 hover:text-amber-600 transition-colors">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              <span className="tabular-nums font-bold">{lotesPorCaducar}</span>
+              <span>caducan</span>
+            </button>
+          )}
+          {erroresAuto > 0 && (
+            <button onClick={() => navigate('/automatizaciones?tab=historial')}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-loga-red hover:bg-red-100 transition-colors">
+              <AlertTriangle size={11} />
+              <span>backup</span>
+            </button>
+          )}
+          {pedidosPendientes === 0 && lotesPorCaducar === 0 && erroresAuto === 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
+              <CheckCircle size={11} />
+              <span>Todo al día</span>
+            </span>
+          )}
+        </div>
+      </motion.section>
+
       {/* KPI Cards */}
       <section className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
@@ -425,6 +490,7 @@ export default function Dashboard() {
           const raw = o.fecha_planificada ?? o.created_at;
           return raw && new Date(raw).toLocaleDateString('en-CA') === diaSeleccionado;
         });
+        const dayPreds = predicciones.filter(p => p.dias_restantes > 0 && p.fecha_estimada === diaSeleccionado);
         const fechaLabel = new Date(diaSeleccionado + 'T12:00').toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
         return (
           <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
@@ -438,7 +504,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {dayRecs.length === 0 && dayOrds.length === 0 && (
+            {dayRecs.length === 0 && dayOrds.length === 0 && dayPreds.length === 0 && (
               <p className="text-xs text-gray-400 text-center py-3">Sin actividad este día</p>
             )}
 
@@ -479,6 +545,30 @@ export default function Dashboard() {
                 <span className={clsx('rounded-md px-1.5 py-0.5 text-[9px] font-bold',
                   o.estado === 'completada' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
                 )}>{o.estado}</span>
+              </div>
+            ))}
+
+            {dayPreds.map((p, i) => (
+              <div key={`pred-${i}`}
+                className={clsx('flex items-center gap-3 rounded-lg px-3 py-2 border',
+                  p.urgente ? 'border-rose-200 bg-rose-50/60' : 'border-indigo-200 bg-indigo-50/50'
+                )}>
+                <Sparkles size={14} className={p.urgente ? 'text-rose-500 shrink-0' : 'text-indigo-500 shrink-0'} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className={clsx('rounded px-1 py-0.5 text-[8px] font-bold uppercase text-white',
+                      p.urgente ? 'bg-rose-500' : 'bg-indigo-500'
+                    )}>Predicción</span>
+                    <p className="text-xs font-bold text-gray-900 truncate">{p.cliente_nombre}</p>
+                  </div>
+                  <p className="text-[10px] text-gray-500 truncate">
+                    {p.producto_nombre} · {p.cantidad_media.toLocaleString('es-ES', { maximumFractionDigits: 1 })} {p.unidad_medida}
+                    {' · '}<span className="font-semibold">{p.probabilidad}% prob.</span>
+                  </p>
+                </div>
+                <span className={clsx('rounded-md px-1.5 py-0.5 text-[9px] font-bold',
+                  p.urgente ? 'bg-rose-100 text-rose-700' : 'bg-indigo-100 text-indigo-700'
+                )}>en {p.dias_restantes}d</span>
               </div>
             ))}
           </motion.section>

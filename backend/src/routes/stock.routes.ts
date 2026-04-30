@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
 import { stockController } from '../controllers/stock.controller';
+import { toNum } from '../types';
+import { logger } from '../lib/logger';
+import { invalidarCacheFinanzas } from './finanzas.routes';
 
 const router = Router();
 
@@ -57,8 +60,8 @@ router.post('/reconciliar', async (req, res) => {
     `);
 
     for (const d of discrepancias) {
-      const antes = parseFloat(d.stock_actual);
-      const despues = parseFloat(d.stock_lotes);
+      const antes = toNum(d.stock_actual);
+      const despues = toNum(d.stock_lotes);
       const diferencia = despues - antes;
 
       // Update stock_actual
@@ -84,9 +87,11 @@ router.post('/reconciliar', async (req, res) => {
     }
 
     await client.query('COMMIT');
+    invalidarCacheFinanzas(); // reconciliación cambia stock_actual → invalida valoración
     return res.json({ ok: true, corregidos: discrepancias.length });
   } catch (err: unknown) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(rbErr => logger.error('[stock.reconciliar] ROLLBACK fallo', { err: rbErr }));
+    logger.error('[stock.reconciliar]', { err });
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   } finally {
     client.release();

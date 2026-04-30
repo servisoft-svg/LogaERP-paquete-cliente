@@ -28,15 +28,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token');
-    if (token) {
-      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      api.get('/auth/me')
-        .then(res => setUser(res.data as User))
-        .catch(() => { localStorage.removeItem('loga_token'); sessionStorage.removeItem('loga_token'); })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    if (!token) { setLoading(false); return; }
+    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    // El interceptor 401 ya intenta refresh automático y reintenta /me.
+    // Si tras todo eso devuelve 401, sí limpiamos el token.
+    api.get('/auth/me')
+      .then(res => setUser(res.data as User))
+      .catch(err => {
+        if (err?.response?.status === 401) {
+          localStorage.removeItem('loga_token');
+          sessionStorage.removeItem('loga_token');
+        }
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const login = async (email: string, password: string, remember: boolean) => {
@@ -62,23 +66,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     notify.info('Sesión cerrada');
   };
 
-  // Auto-refresh token every 30 minutes
+  // Auto-refresh proactivo cada 6h: token TTL 7d, refresca pronto para no
+  // depender del 401 catch. También refresca al volver a la pestaña tras
+  // estar inactivo.
   useEffect(() => {
     if (!user) return;
-    const interval = setInterval(async () => {
+    let mounted = true;
+    const refrescar = async () => {
       try {
         const { data } = await api.post('/auth/refresh');
         const { token } = data as { token: string };
         const storage = localStorage.getItem('loga_token') ? localStorage : sessionStorage;
         storage.setItem('loga_token', token);
         api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      } catch {
-        // Token expired or invalid, logout
-        notify.warning('Tu sesión ha caducado');
-        logout();
-      }
-    }, 30 * 60 * 1000); // 30 minutes
-    return () => clearInterval(interval);
+      } catch { /* el interceptor maneja logout si es definitivo */ }
+    };
+    const interval = setInterval(refrescar, 6 * 60 * 60 * 1000); // 6 horas
+    const onVisible = () => { if (mounted && document.visibilityState === 'visible') refrescar(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [user]);
 
   return (

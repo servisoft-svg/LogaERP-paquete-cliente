@@ -208,18 +208,53 @@ router.get('/resumen', async (_req, res) => {
     }
     rentabilidad.sort((a, b) => b.margen_pct - a.margen_pct);
 
-    // 2. Inmovilizado en stock — solo usa precio_compra del lote (precision real)
+    // 2. Inmovilizado en stock — valoración a coste con fallback:
+    //    1º coste real del lote (precio_compra) si existe
+    //    2º coste medio del producto (coste_medio_actual)
+    //    3º precio_unitario configurado en la ficha del producto
+    //    4º 0 (sin coste asignado, no contribuye)
+    // Esto asegura que añadir un producto con coste pero sin lotes
+    // (ej: stock inicial cargado) sí aparece en la valoración.
     const { rows: [inmovilizado] } = await pool.query(`
+      WITH lote_val AS (
+        SELECT
+          p.id AS producto_id, p.tipo,
+          SUM(l.cantidad_actual *
+              COALESCE(
+                NULLIF(l.precio_compra, 0),
+                NULLIF(p.coste_medio_actual, 0),
+                NULLIF(p.precio_unitario, 0),
+                0
+              )) AS valor_lotes,
+          SUM(l.cantidad_actual) AS stock_lotes
+        FROM lotes l
+        JOIN productos p ON p.id = l.producto_id
+        WHERE p.activo = TRUE AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+        GROUP BY p.id, p.tipo
+      ),
+      stock_resto AS (
+        -- Stock_actual del producto que NO está cubierto por lotes (legacy o ajustes)
+        SELECT
+          p.id AS producto_id, p.tipo,
+          GREATEST(0, p.stock_actual - COALESCE(lv.stock_lotes, 0)) AS resto,
+          COALESCE(NULLIF(p.coste_medio_actual, 0), NULLIF(p.precio_unitario, 0), 0) AS coste
+        FROM productos p
+        LEFT JOIN lote_val lv ON lv.producto_id = p.id
+        WHERE p.activo = TRUE AND p.stock_actual > 0
+      ),
+      todo AS (
+        SELECT producto_id, tipo, valor_lotes AS valor FROM lote_val
+        UNION ALL
+        SELECT producto_id, tipo, (resto * coste) AS valor FROM stock_resto
+      )
       SELECT
-        COALESCE(SUM(CASE WHEN p.tipo = 'materia_prima' THEN l.cantidad_actual * l.precio_compra ELSE 0 END), 0) AS valor_mp,
-        COALESCE(SUM(CASE WHEN p.tipo = 'producto_fabricado' THEN l.cantidad_actual * l.precio_compra ELSE 0 END), 0) AS valor_fab,
-        COALESCE(SUM(CASE WHEN p.tipo = 'producto_envasado' THEN l.cantidad_actual * l.precio_compra ELSE 0 END), 0) AS valor_env,
-        COALESCE(SUM(CASE WHEN p.tipo = 'producto_terminado' THEN l.cantidad_actual * l.precio_compra ELSE 0 END), 0) AS valor_pt,
-        COALESCE(SUM(CASE WHEN p.tipo = 'material_embalaje' THEN l.cantidad_actual * l.precio_compra ELSE 0 END), 0) AS valor_emb,
-        COALESCE(SUM(l.cantidad_actual * l.precio_compra), 0) AS valor_total
-      FROM lotes l
-      JOIN productos p ON p.id = l.producto_id
-      WHERE p.activo = TRUE AND l.estado = 'aprobado' AND l.cantidad_actual > 0 AND l.precio_compra IS NOT NULL
+        COALESCE(SUM(CASE WHEN tipo = 'materia_prima' THEN valor ELSE 0 END), 0) AS valor_mp,
+        COALESCE(SUM(CASE WHEN tipo = 'producto_fabricado' THEN valor ELSE 0 END), 0) AS valor_fab,
+        COALESCE(SUM(CASE WHEN tipo = 'producto_envasado' THEN valor ELSE 0 END), 0) AS valor_env,
+        COALESCE(SUM(CASE WHEN tipo = 'producto_terminado' THEN valor ELSE 0 END), 0) AS valor_pt,
+        COALESCE(SUM(CASE WHEN tipo = 'material_embalaje' THEN valor ELSE 0 END), 0) AS valor_emb,
+        COALESCE(SUM(valor), 0) AS valor_total
+      FROM todo
     `);
 
     // 3. Inmovilizado detallado (top 10 por valor) — usa CMP real de lotes, no precio_unitario

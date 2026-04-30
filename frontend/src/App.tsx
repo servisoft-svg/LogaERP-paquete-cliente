@@ -7,6 +7,7 @@ import Login from './pages/Login';
 import SpinnerColaBlanca, { LoadingScreen } from './components/SpinnerColaBlanca';
 import { Toaster } from 'sileo';
 import 'sileo/styles.css';
+import { useAutomatizacionesLive } from './hooks/useAutomatizacionesLive';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
@@ -19,6 +20,7 @@ const Pedidos = lazy(() => import('./pages/Pedidos'));
 const Configuracion = lazy(() => import('./pages/Configuracion'));
 const Finanzas = lazy(() => import('./pages/Finanzas'));
 const Recuento = lazy(() => import('./pages/Recuento'));
+const Automatizaciones = lazy(() => import('./pages/Automatizaciones'));
 
 function AppContent() {
   const { user, loading, isAdmin } = useAuth();
@@ -28,6 +30,9 @@ function AppContent() {
     const t = setTimeout(() => setSplash(false), 1800);
     return () => clearTimeout(t);
   }, []);
+
+  // Hook live de automatizaciones (polling 30s + sileo toasts)
+  useAutomatizacionesLive();
 
   if (loading || splash) return <LoadingScreen />;
   if (!user) return <Login />;
@@ -49,6 +54,7 @@ function AppContent() {
             <Route path="/finanzas" element={isAdmin ? <Finanzas /> : <Navigate to="/" replace />} />
             <Route path="/configuracion" element={isAdmin ? <Configuracion /> : <Navigate to="/" replace />} />
             <Route path="/recuento" element={isAdmin ? <Recuento /> : <Navigate to="/" replace />} />
+            <Route path="/automatizaciones" element={<Automatizaciones />} />
           </Routes>
         </Suspense>
       </main>

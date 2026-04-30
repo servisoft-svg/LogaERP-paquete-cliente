@@ -89,6 +89,7 @@ export interface IngredienteReceta {
   porcentaje_merma: string;
   unidad_medida: string;
   stock_actual?: string;
+  stock_disponible?: string;
   sds_url?: string | null;
 }
 

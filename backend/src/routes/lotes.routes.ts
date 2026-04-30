@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
+import { invalidarCacheFinanzas } from './finanzas.routes';
 
 const router = Router();
 
@@ -19,8 +20,16 @@ router.get('/', async (req, res) => {
     if (producto_id) { sql += ` AND l.producto_id = $${idx++}`; params.push(String(producto_id)); }
     if (estado)      { sql += ` AND l.estado = $${idx++}`;      params.push(String(estado)); }
     if (busqueda)    {
-      sql += ` AND (l.lote_interno ILIKE $${idx} OR l.lote_proveedor ILIKE $${idx} OR p.nombre ILIKE $${idx})`;
-      params.push(`%${busqueda}%`); idx++;
+      // Búsqueda accent-insensitive: normalizamos texto y patrón quitando diacríticos.
+      // unaccent() requiere extensión postgres; si no está, usamos translate como fallback.
+      sql += ` AND (
+        translate(lower(l.lote_interno), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
+        OR translate(lower(COALESCE(l.lote_proveedor,'')), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
+        OR translate(lower(p.nombre), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
+        OR translate(lower(p.codigo), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
+      )`;
+      const qNorm = String(busqueda).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      params.push(`%${qNorm}%`); idx++;
     }
 
     sql += ` ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC LIMIT 500`;
@@ -105,7 +114,7 @@ router.post('/', async (req, res) => {
       const { rows: pendientes } = await pool.query(
         `SELECT id, fecha_solicitud, cantidad_solicitada
          FROM pedidos_proveedor
-         WHERE producto_id = $1 AND estado = 'pendiente'
+         WHERE producto_id = $1 AND estado IN ('borrador', 'enviado', 'pendiente')
          ORDER BY fecha_solicitud ASC`,
         [producto_id]
       );
@@ -126,6 +135,17 @@ router.post('/', async (req, res) => {
            WHERE id = $4`,
           [lote.id, cantRecibida.toFixed(6), leadTimeHoras, pp.id]
         );
+        // Cancela el resto de borradores/enviados pendientes del mismo producto
+        // (ya hay material entrante, no necesitamos varios pedidos abiertos)
+        if (pendientes.length > 1) {
+          const restoIds = pendientes.slice(1).map(p => p.id);
+          await pool.query(
+            `UPDATE pedidos_proveedor SET estado = 'cancelado',
+               notas = COALESCE(notas, '') || E'\nCancelado automáticamente al recibir lote ' || $1
+             WHERE id = ANY($2::uuid[])`,
+            [lote.lote_interno, restoIds]
+          );
+        }
       }
     } catch (e) {
       console.warn('[POST /lotes] Auto-complete pedidos_proveedor falló (no crítico):', e);
@@ -147,6 +167,7 @@ router.post('/', async (req, res) => {
       [(req as any).user?.id ?? null, lote.id, `Lote ${lote.lote_interno} creado: ${Number(qty).toFixed(2)} ${req.body.unidad_medida ?? 'kg'}`]
     );
 
+    invalidarCacheFinanzas(); // nuevo lote afecta inmovilizado
     return res.status(201).json(lote);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';
@@ -211,6 +232,7 @@ router.put('/:id', async (req, res) => {
       [(req as any).user?.id ?? null, lote.id, `Lote ${lote.lote_interno} modificado`]
     );
 
+    invalidarCacheFinanzas(); // cambio cantidad/precio_compra afecta inmovilizado
     res.json(lote);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -299,6 +321,7 @@ router.patch('/:id/estado', async (req, res) => {
        VALUES ($1, 'CAMBIO_ESTADO_LOTE', 'lotes', $2, $3)`,
       [(req as any).user?.id ?? null, id, motivo]
     );
+    invalidarCacheFinanzas(); // estado lote afecta inmovilizado (sólo aprobado cuenta)
     return res.json(lote);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';

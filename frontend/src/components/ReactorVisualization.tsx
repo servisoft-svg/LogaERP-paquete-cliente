@@ -165,7 +165,7 @@ export default function ReactorVisualization({ pasos, ingredientes, rendimiento 
                   )}
                   {currentPaso.duracion_min && (
                     <div className="flex items-center gap-1 text-xs text-gray-500">
-                      <Clock size={12} /><span>{currentPaso.duracion_min}s</span>
+                      <Clock size={12} /><span>{currentPaso.duracion_min} min</span>
                     </div>
                   )}
                 </div>

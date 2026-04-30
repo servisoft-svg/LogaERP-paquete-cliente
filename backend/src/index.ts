@@ -24,6 +24,8 @@ import { auditoriaMiddleware } from './middleware/auditoria';
 import { pool }          from './db/pool';
 import { queuesHealthy } from './queues/index';
 import { logger }        from './lib/logger';
+import { automatizacionesService } from './services/automatizaciones.service';
+import automatizacionesRoutes from './routes/automatizaciones.routes';
 
 dotenv.config();
 
@@ -90,14 +92,18 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(auditoriaMiddleware);
 // Uploads protected: require auth token in query or header
+import jwt from 'jsonwebtoken';
 app.use('/uploads', (req, res, next) => {
-  const token = req.query.token as string || req.headers.authorization?.replace('Bearer ', '');
+  const rawToken = req.query.token;
+  const token = (typeof rawToken === 'string' ? rawToken : '') ||
+    req.headers.authorization?.replace('Bearer ', '') || '';
   if (!token) return res.status(401).json({ error: 'No autorizado' });
   try {
-    const jwt = require('jsonwebtoken');
-    jwt.verify(token, process.env.JWT_SECRET);
+    jwt.verify(token, process.env.JWT_SECRET as string);
     next();
-  } catch { return res.status(401).json({ error: 'Token invalido' }); }
+  } catch {
+    return res.status(401).json({ error: 'Token invalido' });
+  }
 }, express.static(path.join(process.cwd(), 'uploads')));
 
 app.get('/health', async (_req, res) => {
@@ -137,6 +143,7 @@ app.use('/api/clientes',      authMiddleware, clientesRoutes);
 app.use('/api/pedidos',       authMiddleware, pedidosRoutes);
 app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
+app.use('/api/automatizaciones', authMiddleware, automatizacionesRoutes);
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });
@@ -157,6 +164,46 @@ const server = http.createServer(app);
 server.listen(PORT, () => {
   logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
 });
+
+// Cron interno: reintentar emails de automatización cada 5 min
+const RETRY_INTERVAL_MS = 5 * 60 * 1000;
+const retryTimer = setInterval(() => {
+  automatizacionesService.procesarReintentosEmail()
+    .then(n => { if (n > 0) logger.info(`[auto.retry] ${n} reintentos procesados`); })
+    .catch(err => logger.error('[auto.retry] error', { err }));
+}, RETRY_INTERVAL_MS);
+retryTimer.unref();
+
+// Cron interno: backup nocturno (chequea cada minuto, idempotente)
+const BACKUP_INTERVAL_MS = 60 * 1000;
+const backupTimer = setInterval(() => {
+  automatizacionesService.tickBackupNocturno()
+    .catch(err => logger.error('[auto.backup] error', { err }));
+}, BACKUP_INTERVAL_MS);
+backupTimer.unref();
+
+// Cron interno: barrer pedidos pendientes de auto-completar y albarán cada 90s.
+// Idempotente: cada acción tiene anti-dupe (albaran_enviado=true / estado completado).
+const SWEEP_INTERVAL_MS = 90 * 1000;
+const sweepTimer = setInterval(() => {
+  automatizacionesService.sweepPedidos()
+    .catch(err => logger.error('[auto.sweep] error', { err }));
+}, SWEEP_INTERVAL_MS);
+sweepTimer.unref();
+
+// Cron stock: cada 5 min comprueba productos bajo mínimo cubiertos por reglas
+// activas y dispara las acciones (creación orden, email, etc.). Anti-dupe interno.
+const STOCK_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const stockSweepTimer = setInterval(() => {
+  automatizacionesService.sweepStockReglas()
+    .catch(err => logger.error('[auto.stock-sweep] error', { err }));
+}, STOCK_SWEEP_INTERVAL_MS);
+stockSweepTimer.unref();
+// Disparar una primera vez al arrancar (10s después para que la app esté lista)
+setTimeout(() => {
+  automatizacionesService.sweepStockReglas()
+    .catch(err => logger.error('[auto.stock-sweep:initial] error', { err }));
+}, 10_000);
 
 // ── Graceful shutdown ───────────────────────────────────────
 function shutdown(signal: string) {

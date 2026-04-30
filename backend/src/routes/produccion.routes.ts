@@ -6,6 +6,9 @@ import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { isAllowedExtension } from '../lib/fileValidation';
 import { alertaService } from '../services/alerta.service';
+import { automatizacionesService } from '../services/automatizaciones.service';
+import { toNum } from '../types';
+import { logger } from '../lib/logger';
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, path.join(process.cwd(), 'uploads')),
@@ -108,11 +111,25 @@ router.post('/envasado-rapido', async (req, res) => {
       return res.status(400).json({ error: 'Cola y cantidad son obligatorios.' });
     }
 
-    // Obtener datos de cola y envase (ALL queries use client for SERIALIZABLE)
-    const { rows: [cola] } = await client.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1 FOR UPDATE`, [cola_id]);
-    const { rows: [envase] } = envase_id ? await client.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1 FOR UPDATE`, [envase_id]) : { rows: [null as any] };
+    // Lock cola + envase en una sola query (orden determinístico evita deadlocks)
+    interface ProdLock { id: string; nombre: string; codigo: string; stock_actual: string; coste_medio_actual: string | null; precio_unitario: string | null }
+    const lockIds = envase_id ? [cola_id, envase_id] : [cola_id];
+    const { rows: lockedRows } = await client.query<ProdLock>(
+      `SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario
+       FROM productos WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
+      [lockIds]
+    );
+    const cola = lockedRows.find(r => r.id === cola_id);
+    const envase: ProdLock | null = envase_id ? (lockedRows.find(r => r.id === envase_id) ?? null) : null;
 
-    if (!cola) return res.status(404).json({ error: 'Cola no encontrada.' });
+    if (!cola) {
+      await client.query('ROLLBACK').catch(rbErr => logger.error('[envasado-rapido] ROLLBACK fallo', { err: rbErr }));
+      return res.status(404).json({ error: 'Cola no encontrada.' });
+    }
+    if (envase_id && !envase) {
+      await client.query('ROLLBACK').catch(rbErr => logger.error('[envasado-rapido] ROLLBACK fallo', { err: rbErr }));
+      return res.status(404).json({ error: 'Envase no encontrado.' });
+    }
 
     // ── Box/Pallet multiplier: detect "Caja 18" or "Palé 60" in envase name ──
     let multiplicador = 1;
@@ -125,15 +142,18 @@ router.post('/envasado-rapido', async (req, res) => {
 
     // Calcular peso por envase desde peso_unitario_kg del producto envasado o del envase
     const { rows: [envInfo] } = await client.query(`SELECT peso_unitario_kg FROM productos WHERE id = $1`, [envase_id || cola_id]);
-    let pesoEnvase = parseFloat(envInfo?.peso_unitario_kg ?? '0');
-    if (!pesoEnvase && envase) {
+    let pesoEnvase = toNum(envInfo?.peso_unitario_kg, 0);
+    if (pesoEnvase <= 0 && envase) {
       const match = envase.nombre.match(/(\d+(?:\.\d+)?)\s*(g|kg|L)/i);
       if (match) {
         pesoEnvase = parseFloat(match[1]);
         if (match[2].toLowerCase() === 'g') pesoEnvase /= 1000;
       }
     }
-    if (!pesoEnvase) return res.status(400).json({ error: 'No se puede determinar el peso del envase. Define peso_unitario_kg en el producto.' });
+    if (!Number.isFinite(pesoEnvase) || pesoEnvase <= 0) {
+      await client.query('ROLLBACK').catch(rbErr => logger.error('[envasado-rapido] ROLLBACK fallo', { err: rbErr }));
+      return res.status(400).json({ error: 'Peso de envase no válido (debe ser > 0). Define peso_unitario_kg en el producto.' });
+    }
 
     const pesoTotal = pesoEnvase * totalUnidades;
 
@@ -163,7 +183,7 @@ router.post('/envasado-rapido', async (req, res) => {
       let nextNum = 1;
       if (maxCode) { const m = maxCode.codigo.match(/PE-(\d+)/); if (m) nextNum = parseInt(m[1], 10) + 1; }
       const codigo = `PE-${String(nextNum).padStart(3, '0')}`;
-      const costePE = (parseFloat(cola.coste_medio_actual || cola.precio_unitario) * pesoEnvase) + parseFloat(envase?.coste_medio_actual || envase?.precio_unitario || '0');
+      const costePE = (parseFloat(String(cola.coste_medio_actual || cola.precio_unitario || '0')) * pesoEnvase) + parseFloat(String(envase?.coste_medio_actual || envase?.precio_unitario || '0'));
       const { rows: [nuevo] } = await client.query(
         `INSERT INTO productos (codigo, nombre, tipo, unidad_medida, peso_unitario_kg, granel_id, precio_unitario)
          VALUES ($1, $2, 'producto_envasado', 'ud', $3, $4, $5) RETURNING id, nombre`,
@@ -225,7 +245,7 @@ router.post('/envasado-rapido', async (req, res) => {
         );
         restaEnv -= usar;
       }
-      if (restaEnv > 0.001) throw new Error(`STOCK_INSUFICIENTE:${envase.nombre}:falta=${restaEnv.toFixed(0)} en lotes`);
+      if (restaEnv > 0.001) throw new Error(`STOCK_INSUFICIENTE:${envase?.nombre ?? 'envase'}:falta=${restaEnv.toFixed(0)} en lotes`);
       await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [cantidadEnvases, envase_id]);
     }
 
@@ -255,8 +275,8 @@ router.post('/envasado-rapido', async (req, res) => {
     // ── Crear lote de producto envasado + stock_move de salida ──
     const loteInterno = `PE-${orden.numero_orden}-${Date.now()}`;
     // Cost per unit: (cola CMP * weight) + (envase CMP / multiplicador) + etiqueta CMP
-    const colaCMP = parseFloat(cola.coste_medio_actual || cola.precio_unitario);
-    const envaseCMP = parseFloat(envase?.coste_medio_actual || envase?.precio_unitario || '0');
+    const colaCMP = parseFloat(String(cola.coste_medio_actual || cola.precio_unitario || '0'));
+    const envaseCMP = parseFloat(String(envase?.coste_medio_actual || envase?.precio_unitario || '0'));
     let costePE = (colaCMP * pesoEnvase) + (multiplicador > 1 ? envaseCMP / multiplicador : envaseCMP);
     if (etiqueta_id) {
       const { rows: [etiq] } = await client.query(`SELECT coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [etiqueta_id]);
@@ -286,6 +306,14 @@ router.post('/envasado-rapido', async (req, res) => {
     const alertIds = [cola_id, envase_id, etiqueta_id].filter(Boolean) as string[];
     alertaService.checkStockMinimo(alertIds).catch(() => {});
 
+    // Automatizaciones: producto envasado producido + materiales consumidos
+    setImmediate(() => {
+      automatizacionesService.checkStockAndTrigger(pe.id).catch(err => console.error('[auto.envasado-pe]', err));
+      for (const id of alertIds) {
+        automatizacionesService.checkStockAndTrigger(id).catch(err => console.error('[auto.envasado-mat]', err));
+      }
+    });
+
     return res.json({
       ok: true,
       producto_envasado: pe.nombre,
@@ -299,7 +327,8 @@ router.post('/envasado-rapido', async (req, res) => {
       numero_orden: orden.numero_orden,
     });
   } catch (err: unknown) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(rbErr => logger.error('[envasado-rapido] ROLLBACK fallo', { err: rbErr }));
+    logger.error('[envasado-rapido]', { err });
     const msg = err instanceof Error ? err.message : '';
     return res.status(500).json({ error: msg || 'Error al envasar.' });
   } finally {
@@ -610,7 +639,8 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
       numero_orden: orden.numero_orden,
     });
   } catch (err: unknown) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(rbErr => logger.error('[confirmar-envasado] ROLLBACK fallo', { err: rbErr }));
+    logger.error('[confirmar-envasado]', { err });
     const msg = err instanceof Error ? err.message : '';
     return res.status(500).json({ error: msg || 'Error al confirmar envasado.' });
   } finally {

@@ -13,7 +13,8 @@
 8. [Clientes](#8-clientes)
 9. [Finanzas](#9-finanzas)
 10. [Configuracion y Administracion](#10-configuracion-y-administracion)
-11. [Uso desde movil](#11-uso-desde-movil)
+11. [Automatizaciones](#11-automatizaciones)
+12. [Uso desde movil](#12-uso-desde-movil)
 
 ---
 
@@ -813,7 +814,142 @@ Si crees que hay discrepancias:
 
 ---
 
-## 11. Uso desde movil
+## 11. Automatizaciones
+
+Sistema de reglas que ejecutan acciones automaticamente cuando se cumple un evento. Sustituye el trabajo manual repetitivo: pedidos a proveedor, ordenes de fabricacion/envasado, aprobacion de lotes, completar pedidos, enviar albaranes y backups.
+
+Acceso: menu **Auto** (icono rayo en navbar). Solo admins crean/editan reglas.
+
+### Estructura de la pagina
+
+- **Hero** rojo en la parte superior con 4 stats (activas, ejecuciones hoy, errores hoy, productos cubiertos) y boton **+ Nueva automatizacion**.
+- **Tabs**: `Reglas` (lo que el sistema hace) y `Historial` (todo lo que ha hecho).
+- En `Reglas`: primero los **Comportamientos del sistema** (4 cards globales), debajo las **Reglas por producto** (las que has creado).
+- Botones por card: **Play** (disparar manualmente sobre el estado actual), **Pencil** (configurar — solo donde aplica), **Power** (pausar/reanudar), **Toggle verde** en cabecera para activar.
+
+### 11.1 Comportamientos del sistema
+
+Son 4 toggles globales que cambian como funciona el flujo de trabajo. No estan ligados a productos concretos sino a procesos.
+
+#### Auto-fabricar desde pedido
+Cuando confirmas un pedido cuyo producto no tiene stock granel, el sistema crea automaticamente la orden de produccion con todos los datos: receta activa, cantidad ajustada al rendimiento, fecha planificada (= fecha de entrega del pedido o hoy + N dias), cliente y cliente_id, numero auto `OP-AUTO-AAAAMMDD-HHMMSS`. La orden queda en estado `confirmada` lista para fabricar y el pedido pasa a `en_produccion` linkado.
+
+- Anti-duplicado: si ya existe orden borrador/confirmada/en_proceso del mismo granel en los ultimos 5 dias, omite con motivo `orden_ya_pendiente`.
+- Si no hay receta activa para el producto: omite con motivo `sin_receta_fabricacion` (debes crear la receta primero).
+
+#### Auto-completar pedido con stock
+Cuando confirmas (o cambia a fabricado/envasado) un pedido y hay stock disponible del producto envasado, el sistema descuenta lotes FEFO y deja el pedido en `completado` sin que tengas que pulsar Consumir.
+
+- Funciona si las reservas propias del pedido cubren la cantidad O si hay stock libre suficiente (no reservado por otros pedidos).
+- Si el stock esta bloqueado por otros pedidos confirmados, omite con motivo `stock_bloqueado_por_otros_pedidos` y muestra que pedido lo retiene.
+- Tras completar, encadena con `Auto-email albaran` si esta activo.
+
+#### Enviar albaran por email
+Tras completar un pedido (manual o automatico), envia automaticamente el PDF del albaran + trazabilidad + fotos al email del cliente. Marca `pedidos.albaran_enviado = TRUE` para que **no se reenvie nunca al mismo pedido**, ni manual ni automaticamente.
+
+- **Filtro por cliente**: pulsa el icono lapiz de la card → modal con dos modos: **Todos los clientes** o **Solo seleccionados** (multi-select con buscador). Sin filtro = todos.
+- Si el cliente del pedido no esta en el filtro: omite (`cliente_fuera_filtro`).
+- Si el cliente no tiene email: omite (`cliente_sin_email`).
+- Si el albaran ya fue enviado: omite (`albaran_ya_enviado`).
+
+#### Backup nocturno cifrado
+Cada noche a la hora indicada (selector dentro de la card) hace un backup completo (DB + uploads) cifrado AES-256. Sube a Google Drive si rclone esta configurado. Idempotente: solo corre una vez al dia despues de la hora programada.
+
+- Editas la hora con el time picker dentro de la card.
+- Pulsando **Disparar** ejecuta backup ahora mismo (force) sin esperar a la hora programada.
+- Muestra fecha de la ultima ejecucion.
+
+### 11.2 Reglas por producto
+
+Reglas individuales que tu creas con el boton **+ Nueva automatizacion**. Cada regla tiene un icono y color (segun plantilla), un disparador (CUANDO) y una accion (HACER) sobre uno o varios productos seleccionados.
+
+#### Plantillas disponibles
+
+Al pulsar **+ Nueva automatizacion** se abre un picker con 6 plantillas para reglas + 3 atajos para activar comportamientos del sistema:
+
+| Plantilla | Cuando | Hacer | Aplica a |
+|-----------|--------|-------|----------|
+| **Email automatico al proveedor** | Stock baja del minimo | Crear orden compra borrador + enviar email al proveedor | materia_prima, material_embalaje |
+| **Orden de compra borrador** | Stock baja del minimo | Crear orden compra borrador (sin enviar email — tu lo envias luego) | materia_prima, material_embalaje |
+| **Crear orden de fabricacion** | Stock baja del minimo | Crear orden produccion borrador con receta y rendimiento | producto_fabricado |
+| **Crear orden de envasado** | Stock baja del minimo | Crear orden envasado borrador con cola, envase, materiales | producto_envasado |
+| **Aprobar lotes con QC OK** | Lote nuevo con QC dentro de rango | Marcar lote como `aprobado` automaticamente | producto_fabricado, producto_envasado |
+| **Rechazar lotes fuera de rango** | Lote nuevo con QC fuera de rango | Marcar lote como `rechazado` y bajar cantidad a 0 | producto_fabricado, producto_envasado |
+
+#### Wizard para crear una regla
+
+1. Pulsa **+ Nueva automatizacion** → picker con plantillas.
+2. Elige una plantilla → se abre wizard step-by-step:
+   - **Productos**: multi-select con buscador. Marca uno o varios productos del tipo correspondiente.
+   - **Cantidad** (solo plantillas de orden/email): cantidad fija opcional. Si la dejas vacia, el sistema calcula `stock_minimo × (1 + safety_pct%) - stock_actual`.
+   - **Destinatario** (solo email proveedor): email al que mandar. Por defecto el email del proveedor del producto, sobreescribible.
+   - **Nombre** + checkbox `Activar al guardar`. Resumen visual de la regla antes de confirmar.
+3. Pulsa **Crear regla** → aparece como card en `Reglas por producto`.
+
+#### Card de cada regla
+
+- Header con gradiente segun plantilla, icono y boton toggle activar/desactivar.
+- Visual `CUANDO -> HACER` con badges.
+- Lista de productos afectados (o "N productos" si son varios).
+- Footer: contador de ejecuciones, % exito, fecha ultima ejecucion + acciones:
+  - **Play**: ejecutar la regla manualmente sobre los productos seleccionados.
+  - **Edit**: re-abre el wizard para modificar la regla.
+  - **Duplicate**: clona la regla con sufijo "(copia)" desactivada.
+  - **Delete**: elimina la regla.
+
+#### Reglas que se omiten en lugar de fallar
+
+Las siguientes condiciones se loguean como `omitido` (no penalizan el % exito):
+
+- `producto_sin_proveedor` — la regla email proveedor no encuentra proveedor en el producto. Tip mostrado: asigna proveedor al producto.
+- `sin_receta_fabricacion` / `sin_receta_envasado` — no hay receta activa del producto.
+- `orden_pendiente_en_ventana` / `orden_ya_pendiente` — ya hay una orden borrador/confirmada del mismo producto recientemente. Anti-spam.
+- `stock_bloqueado_por_otros_pedidos` — el producto tiene reservas activas de otros pedidos.
+- `albaran_ya_enviado` — el albaran de ese pedido ya se mando.
+- `cliente_fuera_filtro` / `cliente_sin_email` — albaran no aplicable al cliente.
+
+### 11.3 Stats por regla
+
+Cada regla guarda 3 contadores: `ejecuciones_count` (total intentos), `ejecuciones_exito`, `ejecuciones_fallo`. La card muestra el ratio de exito y la ultima fecha. Las omisiones cuentan como ejecuciones pero no como fallo.
+
+### 11.4 Sweep periodico (cron interno)
+
+Un cron interno corre **cada 90 segundos** para procesar pendientes de los comportamientos del sistema:
+
+- `auto_fabricar_desde_pedido` activo → busca pedidos `confirmado` sin orden asociada → crea orden.
+- `auto_completar_pedidos_con_stock` activo → busca pedidos `confirmado/fabricado/envasado` → intenta completar.
+- `auto_email_albaran` activo → busca pedidos `completado` con `albaran_enviado=false` y email cliente → manda albaran.
+
+Tambien hooks directos en cada POST/PUT de pedidos para reaccion instantanea (no esperan al cron).
+
+### 11.5 Historial
+
+Tab `Historial`: lista las ultimas 100 ejecuciones (filtrable por tipo y resultado).
+
+Cada entrada muestra:
+- Icono y color segun tipo (verde exito, rojo error, ambar pendiente, gris omitido).
+- Etiqueta legible del evento: `Pedido auto-completado`, `Albaran enviado`, `Copia backup`, `Orden auto-fabricacion`, `Orden compra creada`, `Email proveedor enviado`, `Lote aprobado QC`, `Duplicado evitado`, `Error`.
+- Producto afectado + codigo.
+- **Detalle estructurado** en grid 2 columnas con todas las claves del JSONB: accion, motivo, regla, pedido, orden, producto, cantidad, unidad, destinatario, fecha planificada, necesario, reservado propio, libre no reservado, bloqueado por, archivo backup, tamaño, retry count, etc.
+- **Tip** en cursiva al final cuando aplique (p.ej. "Asigna un proveedor al producto en su ficha").
+- Mensaje de error literal si fallo definitivo.
+- Boton **Reintentar ahora** si el log es un email proveedor en estado `pendiente_reintento`.
+
+### 11.6 Toasts en vivo
+
+Mientras estas en cualquier pagina, un hook (polling 30s) detecta nuevas entradas no leidas y dispara un toast sileo con el detalle + boton "Ver orden" / "Ver historial". Asi te enteras de cada automatizacion sin tener que abrir el panel.
+
+### 11.7 Tabla de retencion de retry para emails
+
+Los emails al proveedor que fallan se reintentan automaticamente:
+- Maximo 3 reintentos (configurable en el endpoint `/automatizaciones/config`).
+- Intervalo 10 minutos por defecto (configurable).
+- Cron interno cada 5 minutos recoge logs `pendiente_reintento` con `next_retry_at <= NOW()` y reintenta.
+- Tras `email_max_reintentos` agotados → log pasa a `fallo_definitivo`.
+
+---
+
+## 12. Uso desde movil
 
 La aplicacion esta optimizada para usar comodamente desde telefono o tablet.
 

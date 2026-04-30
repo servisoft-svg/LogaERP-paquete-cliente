@@ -135,6 +135,27 @@ export const configuracionApi = {
   auditoria:      () => api.get('/configuracion/auditoria'),
 };
 
+export const automatizacionesApi = {
+  getConfig:        () => api.get('/automatizaciones/config'),
+  setConfig:        (data: object) => api.put('/automatizaciones/config', data),
+  productos:        () => api.get('/automatizaciones/productos'),
+  setProducto:      (id: string, data: object) => api.put(`/automatizaciones/productos/${id}`, data),
+  log:              (params?: Record<string, string | number>) => api.get('/automatizaciones/log', { params }),
+  noLeidas:         () => api.get('/automatizaciones/log/no-leidas'),
+  marcarLeidas:     (ids?: string[]) => api.post('/automatizaciones/log/marcar-leidas', ids ? { ids } : {}),
+  reintentar:       (id: string) => api.post(`/automatizaciones/log/${id}/retry`),
+  test:             (productoId: string) => api.post(`/automatizaciones/test/${productoId}`),
+  // Reglas
+  reglas:           () => api.get('/automatizaciones/reglas'),
+  reglaObtener:     (id: string) => api.get(`/automatizaciones/reglas/${id}`),
+  reglaCrear:       (data: object) => api.post('/automatizaciones/reglas', data),
+  reglaEditar:      (id: string, data: object) => api.put(`/automatizaciones/reglas/${id}`, data),
+  reglaEliminar:    (id: string) => api.delete(`/automatizaciones/reglas/${id}`),
+  reglaEjecutar:    (id: string, productoId?: string) => api.post(`/automatizaciones/reglas/${id}/ejecutar`, productoId ? { producto_id: productoId } : {}),
+  reglaDuplicar:    (id: string) => api.post(`/automatizaciones/reglas/${id}/duplicar`),
+  sistemaRun:       (accion: string) => api.post(`/automatizaciones/sistema/${accion}/run`),
+};
+
 export const finanzasApi = {
   resumen: () => api.get('/finanzas/resumen'),
   historialPrecios: (productoId?: string) => api.get('/finanzas/historial-precios', { params: productoId ? { producto_id: productoId } : {} }),
@@ -146,11 +167,32 @@ export const finanzasApi = {
 };
 
 // Interceptor: auto-retry on serialization conflict (PostgreSQL 40001)
-// + redirect on 401
+// + auto-refresh on 401 antes de logout
+let refreshPromise: Promise<string> | null = null;
+
+async function refrescarToken(): Promise<string> {
+  if (refreshPromise) return refreshPromise; // dedupe concurrent refreshes
+  refreshPromise = (async () => {
+    const old = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token');
+    if (!old) throw new Error('NO_TOKEN');
+    const { data } = await api.post('/auth/refresh', {}, {
+      headers: { Authorization: `Bearer ${old}` },
+      _skipRefresh: true,
+    } as never);
+    const { token } = data as { token: string };
+    const storage = localStorage.getItem('loga_token') ? localStorage : sessionStorage;
+    storage.setItem('loga_token', token);
+    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    return token;
+  })();
+  try { return await refreshPromise; }
+  finally { refreshPromise = null; }
+}
+
 api.interceptors.response.use(
   response => response,
   async error => {
-    const config = error.config;
+    const config = error.config ?? {};
     const status = error.response?.status;
     const msg = error.response?.data?.error ?? '';
 
@@ -161,12 +203,25 @@ api.interceptors.response.use(
     );
     if (isSerializationError && (config._retryCount ?? 0) < 2) {
       config._retryCount = (config._retryCount ?? 0) + 1;
-      // Wait 300-800ms before retry (with jitter to avoid thundering herd)
       await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
       return api(config);
     }
 
-    // 401 → logout
+    // 401 → intentar refresh y reintentar la request original UNA vez
+    const path = String(config.url ?? '');
+    const isAuthCall = path.includes('/auth/login') || path.includes('/auth/refresh');
+    if (status === 401 && !isAuthCall && !config._refreshTried) {
+      try {
+        const newToken = await refrescarToken();
+        config._refreshTried = true;
+        config.headers = { ...(config.headers ?? {}), Authorization: `Bearer ${newToken}` };
+        return api(config);
+      } catch {
+        // refresh falló → logout limpio
+      }
+    }
+
+    // 401 sin posibilidad de refrescar → logout
     if (status === 401) {
       localStorage.removeItem('loga_token');
       sessionStorage.removeItem('loga_token');

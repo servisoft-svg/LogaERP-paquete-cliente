@@ -33,8 +33,16 @@ export default function Pedidos() {
   const [modalOpen, setModalOpen]   = useState(false);
   const [editando, setEditando]     = useState<Pedido | null>(null);
   const [saving, setSaving]         = useState(false);
-  interface LineaForm { producto_id: string; cantidad: string; unidad_medida: string; precio_unitario: string; presentacion: string; }
-  const emptyLinea = (): LineaForm => ({ producto_id: '', cantidad: '', unidad_medida: 'kg', precio_unitario: '', presentacion: 'ud' });
+  interface LineaForm {
+    producto_id: string;
+    cantidad: string;
+    unidad_medida: string;
+    precio_unitario: string;
+    presentacion: string;
+    _customMult?: string;
+    _search?: string;
+  }
+  const emptyLinea = (): LineaForm => ({ producto_id: '', cantidad: '', unidad_medida: 'kg', precio_unitario: '', presentacion: 'ud', _customMult: '', _search: '' });
 
   // Presentaciones por formato de bote
   const getPresentaciones = (p: Producto) => {
@@ -65,7 +73,7 @@ export default function Pedidos() {
   const getMultiplicador = (linea: LineaForm) => {
     const prod = productos.find(p => p.id === linea.producto_id);
     if (!prod) return 1;
-    if (linea.presentacion === 'custom') return parseInt((linea as any)._customMult || '1', 10) || 1;
+    if (linea.presentacion === 'custom') return parseInt(linea._customMult || '1', 10) || 1;
     const pres = getPresentaciones(prod).find(p => p.value === linea.presentacion);
     return pres?.mult ?? 1;
   };
@@ -799,7 +807,7 @@ export default function Pedidos() {
                         </span>
                         <span className="font-semibold text-sm text-gray-900 flex-1">{prod.nombre}</span>
                         <span className="text-[10px] text-gray-400 font-mono">{parseFloat(prod.stock_actual).toFixed(0)} {prod.unidad_medida}</span>
-                        <button onClick={() => { const nl = [...lineas]; (nl[idx] as any)._search = ''; nl[idx] = { ...nl[idx], producto_id: '' }; setLineas(nl); }}
+                        <button onClick={() => { const nl = [...lineas]; nl[idx]._search = ''; nl[idx] = { ...nl[idx], producto_id: '' }; setLineas(nl); }}
                           className="text-gray-400 hover:text-loga-red"><X size={14} /></button>
                       </div>
                     ) : (
@@ -807,8 +815,8 @@ export default function Pedidos() {
                         <div className="relative">
                           <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300" />
                           <Input
-                            value={(linea as any)._search ?? ''}
-                            onChange={e => { const nl = [...lineas]; (nl[idx] as any)._search = e.target.value; nl[idx] = { ...nl[idx], producto_id: '' }; setLineas(nl); setDropdownOpen(idx); }}
+                            value={linea._search ?? ''}
+                            onChange={e => { const nl = [...lineas]; nl[idx]._search = e.target.value; nl[idx] = { ...nl[idx], producto_id: '' }; setLineas(nl); setDropdownOpen(idx); }}
                             onFocus={() => setDropdownOpen(idx)}
                             onBlur={() => setTimeout(() => setDropdownOpen(null), 200)}
                             placeholder="Buscar cola, bote, garrafa..."
@@ -817,7 +825,7 @@ export default function Pedidos() {
                           />
                         </div>
                         {dropdownOpen === idx && (() => {
-                          const q = ((linea as any)._search ?? '').toLowerCase();
+                          const q = (linea._search ?? '').toLowerCase();
                           const vendibles = productos.filter(p => p.activo && p.tipo !== 'materia_prima' && p.tipo !== 'material_embalaje');
                           const filtered = q ? vendibles.filter(p => p.nombre.toLowerCase().includes(q) || p.codigo.toLowerCase().includes(q)) : vendibles;
                           const granel = filtered.filter(p => p.tipo === 'producto_fabricado');
@@ -827,7 +835,7 @@ export default function Pedidos() {
                           const selectProd = (p: Producto) => {
                             const nl = [...lineas];
                             nl[idx] = { ...nl[idx], producto_id: p.id, unidad_medida: p.tipo === 'producto_envasado' ? 'ud' : (p.unidad_medida ?? 'kg'), precio_unitario: p.precio_venta ?? '0', presentacion: 'ud' };
-                            delete (nl[idx] as any)._search;
+                            delete nl[idx]._search;
                             setLineas(nl);
                           };
                           return (
@@ -880,8 +888,8 @@ export default function Pedidos() {
                               {linea.presentacion === 'custom' && (
                                 <Input
                                   type="number" min="1" step="1"
-                                  value={(linea as any)._customMult ?? ''}
-                                  onChange={e => { const nl = [...lineas]; (nl[idx] as any)._customMult = e.target.value; setLineas([...nl]); }}
+                                  value={linea._customMult ?? ''}
+                                  onChange={e => { const nl = [...lineas]; nl[idx]._customMult = e.target.value; setLineas([...nl]); }}
                                   placeholder="Uds/caja"
                                   className="w-20 text-center"
                                 />

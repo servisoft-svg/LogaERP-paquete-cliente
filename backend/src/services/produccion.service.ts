@@ -15,6 +15,7 @@ import { PoolClient } from 'pg';
 import { pool, withSerializableTransaction } from '../db/pool';
 import { toNum }  from '../types';
 import { alertaService } from './alerta.service';
+import { automatizacionesService } from './automatizaciones.service';
 
 interface LoteFIFO {
   id: string;
@@ -55,7 +56,13 @@ class ProduccionService {
     usuarioId?: string,
     extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string }
   ): Promise<ResultadoConfirmacion> {
-    return withSerializableTransaction(async (client) => {
+    // Closure variables para disparar automatizaciones tras COMMIT
+    let prodFinalId: string | null = null;
+    let lotePTId: string | null = null;
+    const consumedProductIds: string[] = [];
+    const qcOk = !(extra?.qc_fuera_de_rango ?? false);
+
+    const result = await withSerializableTransaction(async (client) => {
       // ── 1. Cargar orden ────────────────────────────────────────────────
       const { rows: [orden] } = await client.query<{
         id: string; numero_orden: string; receta_id: string;
@@ -204,6 +211,7 @@ class ProduccionService {
           cantidad_consumida: cantidadReal,
           lotes_usados: lotesUsados,
         });
+        consumedProductIds.push(ing.materia_prima_id);
       }
 
       // ── 5. Crear lote de producto terminado (usa cantidad_real si disponible) ──
@@ -226,6 +234,8 @@ class ProduccionService {
          RETURNING id`,
         [receta.producto_id, loteInterno, cantidadReal.toFixed(6), costePorUd.toFixed(6), loteEstado]
       );
+      prodFinalId = receta.producto_id;
+      lotePTId = lotePT.id;
 
       // Actualizar stock producto terminado (con version para optimistic locking)
       const { rows: [ptStock] } = await client.query<{ stock_actual: string; version: string }>(
@@ -332,6 +342,24 @@ class ProduccionService {
         consumos:       consumosLog,
       };
     });
+
+    // Post-COMMIT: disparar automatizaciones (fire-and-forget)
+    setImmediate(() => {
+      if (lotePTId) {
+        automatizacionesService.intentarAutoAprobacionLote(lotePTId, qcOk)
+          .catch(err => console.error('[auto.aprobacion]', err));
+      }
+      if (prodFinalId) {
+        automatizacionesService.checkStockAndTrigger(prodFinalId)
+          .catch(err => console.error('[auto.checkStock]', err));
+      }
+      for (const mpId of consumedProductIds) {
+        automatizacionesService.checkStockAndTrigger(mpId)
+          .catch(err => console.error('[auto.checkStock-mp]', err));
+      }
+    });
+
+    return result;
   }
 
   /** Crea orden en estado borrador */

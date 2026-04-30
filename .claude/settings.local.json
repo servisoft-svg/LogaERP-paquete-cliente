@@ -63,7 +63,22 @@
       "Bash(gh auth:*)",
       "Bash(git --version)",
       "Bash(brew install:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(pkill -9 -f \"vite\")",
+      "Bash(lsof -i:5173)",
+      "Bash(grep -r \"LIKE\\\\|OR\\\\|WHERE.*\\\\$\\\\|query\\\\\\(\\\\`\" /Users/adrianmartinlopez/Documents/Loga/backend/src --include=\"*.ts\")",
+      "Bash(grep -E \"query\\\\\\(\\\\`.*\\\\\\\\\\\\$\\\\{\")",
+      "Read(//tmp/**)",
+      "Bash(grep -v \"\\\\$\")",
+      "Bash(npm view *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(git add *)",
+      "Bash(npx --prefix backend tsc -p backend --noEmit)",
+      "Bash(grep -n \"http.get\\(\\\\`http://localhost\" backend/src/routes/pedidos.routes.ts)",
+      "Bash(grep -nB2 -A8 \"TO_CHAR\\(DATE_TRUNC\\('month', updated_at\\)\" backend/src/routes/finanzas.routes.ts)",
+      "Bash(grep -nB2 -A8 \"ordenes_fab\\\\|num_ordenes\\\\|ordenes.*completadas\\\\|coste.*produccion\" backend/src/routes/finanzas.routes.ts)"
     ]
   }
 }

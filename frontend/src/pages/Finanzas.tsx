@@ -299,7 +299,7 @@ export default function Finanzas() {
         {[
           { label: 'Ticket medio', value: data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0', unit: 'EUR/pedido', color: 'text-violet-600' },
           { label: 'Coste medio/orden', value: data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0', unit: 'EUR/orden', color: 'text-amber-600' },
-          { label: 'Producción rechazada', value: fmt(data.rechazos.valor_rechazado), unit: `${data.rechazos.ordenes_canceladas} órdenes · ${data.rechazos.lotes_rechazados} lotes`, color: 'text-loga-red' },
+          { label: 'Producción rechazada', value: `${fmt(data.rechazos.valor_rechazado)} EUR`, unit: `${data.rechazos.ordenes_canceladas} órdenes · ${data.rechazos.lotes_rechazados} lotes`, color: 'text-loga-red' },
           { label: 'Mermas producción', value: `${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')} kg`, unit: `${fmt(data.mermas?.total_eur ?? 0)} EUR · ${(data.mermas?.unidades_perdidas ?? 0).toLocaleString('es-ES')} ud perdidas`, color: 'text-amber-600' },
         ].map(({ label, value, unit, color }, i) => (
           <motion.div key={label} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 + i * 0.05 }}

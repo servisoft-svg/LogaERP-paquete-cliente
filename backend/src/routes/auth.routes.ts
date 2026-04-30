@@ -171,13 +171,30 @@ router.get('/me', async (req, res) => {
   }
 });
 
-// POST /api/auth/refresh - renew token
+// POST /api/auth/refresh - renew token. Acepta tokens recién expirados
+// (gracia 30 días) para que la sesión sobreviva entre recargas/reinicios.
 router.post('/refresh', async (req, res) => {
   try {
     const auth = req.headers.authorization?.replace('Bearer ', '');
     if (!auth) return res.status(401).json({ error: 'No autorizado' });
 
-    const decoded = verifyToken(auth);
+    const jwt = require('jsonwebtoken');
+    const JWT_SECRET = process.env.JWT_SECRET ?? '';
+    let decoded: { id: string; rol: string; iat?: number; exp?: number };
+    try {
+      decoded = jwt.verify(auth, JWT_SECRET) as typeof decoded;
+    } catch (err: unknown) {
+      // Token expirado: aceptarlo si la expiración fue hace <30 días
+      if (err instanceof Error && err.name === 'TokenExpiredError') {
+        const payload = jwt.verify(auth, JWT_SECRET, { ignoreExpiration: true }) as typeof decoded;
+        const ageS = Date.now() / 1000 - (payload.exp ?? 0);
+        if (ageS > 30 * 86400) return res.status(401).json({ error: 'Sesion expirada' });
+        decoded = payload;
+      } else {
+        return res.status(401).json({ error: 'Token invalido' });
+      }
+    }
+
     const { rows: [user] } = await pool.query(
       `SELECT id, nombre, email, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
       [decoded.id]

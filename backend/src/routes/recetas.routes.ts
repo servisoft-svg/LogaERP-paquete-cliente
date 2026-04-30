@@ -119,7 +119,15 @@ router.get('/:id', async (req, res) => {
 
     const { rows: ingredientes } = await pool.query(
       `SELECT ir.*, p.nombre AS nombre_mp, p.codigo AS codigo_mp,
-              p.unidad_medida, p.stock_actual, p.sds_url
+              p.unidad_medida, p.stock_actual, p.sds_url,
+              -- Stock realmente usable: solo lotes APROBADO con cantidad>0,
+              -- restando reservas activas. Es lo que la fabricación puede consumir.
+              COALESCE((
+                SELECT SUM(GREATEST(0, l.cantidad_actual
+                       - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id), 0)))
+                FROM lotes l
+                WHERE l.producto_id = p.id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+              ), 0) AS stock_disponible
        FROM ingredientes_receta ir
        JOIN productos p ON p.id = ir.materia_prima_id
        WHERE ir.receta_id = $1
@@ -224,7 +232,7 @@ router.post('/', async (req, res) => {
 // PUT /api/recetas/:id
 router.put('/:id', async (req, res) => {
   try {
-    const { nombre, rendimiento, notas, pasos, activa, tipo_receta, ph_min, ph_max, solidos_min, solidos_max, viscosidad_min, viscosidad_max } = req.body;
+    const { nombre, rendimiento, notas, pasos, activa, tipo_receta, producto_id, ph_min, ph_max, solidos_min, solidos_max, viscosidad_min, viscosidad_max } = req.body;
     if (rendimiento != null && Number(rendimiento) <= 0) {
       return res.status(400).json({ error: 'rendimiento debe ser mayor que 0' });
     }
@@ -236,6 +244,7 @@ router.put('/:id', async (req, res) => {
          activa     = COALESCE($4, activa),
          pasos      = COALESCE($6::JSONB, pasos),
          tipo_receta = COALESCE($7, tipo_receta),
+         producto_id = COALESCE($14::UUID, producto_id),
          ph_min     = $8::NUMERIC,
          ph_max     = $9::NUMERIC,
          solidos_min = $10::NUMERIC,
@@ -247,7 +256,8 @@ router.put('/:id', async (req, res) => {
       [nombre?.trim() ?? null, rendimiento != null ? Number(rendimiento).toFixed(6) : null,
        notas ?? null, activa ?? null, req.params.id,
        pasos !== undefined ? JSON.stringify(pasos) : null, tipo_receta ?? null,
-       ph_min ?? null, ph_max ?? null, solidos_min ?? null, solidos_max ?? null, viscosidad_min ?? null, viscosidad_max ?? null]
+       ph_min ?? null, ph_max ?? null, solidos_min ?? null, solidos_max ?? null, viscosidad_min ?? null, viscosidad_max ?? null,
+       producto_id ?? null]
     );
     if (!receta) return res.status(404).json({ error: 'Receta no encontrada' });
     return res.json(receta);

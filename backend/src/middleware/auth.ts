@@ -26,15 +26,15 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 }
 
 export function adminOnly(req: Request, res: Response, next: NextFunction) {
-  const user = (req as any).user as AuthUser;
-  if (!user || user.rol !== 'admin') {
+  const user = (req as Request & { user?: AuthUser }).user;
+  if (!user || typeof user.rol !== 'string' || user.rol !== 'admin') {
     return res.status(403).json({ error: 'Solo administradores' });
   }
   next();
 }
 
 export function signToken(user: { id: string; rol: string }): string {
-  return jwt.sign({ id: user.id, rol: user.rol }, JWT_SECRET, { expiresIn: '24h' });
+  return jwt.sign({ id: user.id, rol: user.rol }, JWT_SECRET, { expiresIn: '7d' });
 }
 
 export function verifyToken(token: string): AuthUser {

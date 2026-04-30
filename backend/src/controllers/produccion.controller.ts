@@ -226,10 +226,11 @@ export const produccionController = {
     }
   },
 
-  // GET /api/produccion/:id/trazabilidad.pdf
+  // GET /api/produccion/:id/trazabilidad.pdf  (?sin_costes=1 oculta sección de coste para envío al cliente)
   async trazabilidadPdf(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      const sinCostes = req.query.sin_costes === '1' || req.query.sin_costes === 'true';
 
       const { rows: [orden] } = await pool.query(
         `SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre,
@@ -466,7 +467,9 @@ export const produccionController = {
       y += 14;
 
       // ── SECCIÓN: COSTE DE PRODUCCIÓN ────────────────────────
-      {
+      // Omitida cuando ?sin_costes=1 (envío al cliente: solo trazabilidad de
+      // materias primas y lotes consumidos, sin información económica).
+      if (!sinCostes) {
         const BLUE      = '#1D4ED8';
         const BLUE_LIGHT= '#EFF6FF';
         const costRows: { nombre: string; cantidad: number; unidad: string; precio: number; subtotal: number }[] = [];

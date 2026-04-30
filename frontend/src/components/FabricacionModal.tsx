@@ -295,11 +295,11 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   const unidad = receta?.unidad_medida ?? 'kg';
   const paso = hasPasos ? pasos[pasoActual] : null;
 
-  // Check stock sufficiency for ALL ingredients
+  // Check stock sufficiency for ALL ingredients (usar stock_disponible = solo lotes APROBADO menos reservas)
   const ratio = receta && orden ? parseFloat(orden.cantidad_planificada) / parseFloat(receta.rendimiento) : 0;
   const ingredientesSinStock = ingredientes.filter(ing => {
     const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
-    const stock = parseFloat(ing.stock_actual ?? '0');
+    const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? '0');
     return stock < necesario;
   });
   const todoConStock = ingredientesSinStock.length === 0 && ingredientes.length > 0;
@@ -432,7 +432,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                             {paso.duracion_min && (
                               <div className="flex items-center gap-1.5 text-sm text-gray-500">
                                 <Clock size={14} />
-                                <span>{paso.duracion_min}s sim.</span>
+                                <span>{paso.duracion_min} min</span>
                               </div>
                             )}
                           </div>
@@ -451,7 +451,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                             {stepIngs.map((ing, i) => {
                               const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
                               const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
-                              const stock = parseFloat(ing.stock_actual ?? '0');
+                              const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                               const suficiente = stock >= necesario;
                               const conf = confirmados.has(ing.id);
 
@@ -615,7 +615,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                     {ingredientes.map((ing, i) => {
                       const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
                       const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
-                      const stock = parseFloat(ing.stock_actual ?? '0');
+                      const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                       const suficiente = stock >= necesario;
                       const conf = confirmados.has(ing.id);
                       return (
@@ -879,7 +879,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                         <p className="text-xs font-bold text-loga-red">Stock insuficiente:</p>
                         {ingredientesSinStock.map((ing, idx) => {
                           const nec = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
-                          const stock = parseFloat(ing.stock_actual ?? '0');
+                          const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                           return (
                             <p key={ing.id || ing.materia_prima_id || `sk-${idx}`} className="text-xs text-red-700">
                               <b>{ing.nombre_mp}</b>: necesitas {nec.toFixed(1)} {ing.unidad_medida}, tienes {stock.toFixed(1)} {ing.unidad_medida}

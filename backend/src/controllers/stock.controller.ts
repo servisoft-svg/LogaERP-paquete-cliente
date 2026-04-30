@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
 import { stockService }  from '../services/stock.service';
 import { alertaService } from '../services/alerta.service';
+import { automatizacionesService } from '../services/automatizaciones.service';
 import { emailService }  from '../services/email.service';
 import { pool }          from '../db/pool';
+import { invalidarCacheFinanzas } from '../routes/finanzas.routes';
 
 export const stockController = {
   async listarProductos(req: Request, res: Response) {
@@ -32,6 +34,10 @@ export const stockController = {
         cantidad: Number(cantidad),
         motivo,
         referencia_externa,
+      });
+      invalidarCacheFinanzas(); // ajuste cambia stock_actual → afecta inmovilizado
+      setImmediate(() => {
+        automatizacionesService.checkStockAndTrigger(producto_id).catch(err => console.error('[auto.ajuste]', err));
       });
       return res.json({ ok: true });
     } catch (err: unknown) {

@@ -76,74 +76,241 @@
 
 /* Dark mode: el fill se gestiona por theme="system" en el Toaster — sin overrides. */
 
-/* ═══════════════════════════════════
-   DARK MODE — gris neutro
-   Fondo: #171717  Cards: #262626
-   ═══════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════
+   DARK MODE — paleta WCAG-AA, escala neutral cálida
+   ───────────────────────────────────────────────────────
+   Tokens (apilados z=0 hasta z=4):
+     z0  body          #0e0e10  (zinc-950 cálido)
+     z1  card          #1a1a1d  (zinc-900)
+     z2  card-elev     #232326  (zinc-850)
+     z3  hover         #2a2a2e
+     z4  popover/dropdown  #303034
+   Bordes:
+     subtle        rgba(255,255,255,0.06)
+     soft          rgba(255,255,255,0.08)
+     strong        rgba(255,255,255,0.14)
+   Texto WCAG-AA contra z1:
+     primary       #f4f4f5  (15.8:1)  AAA
+     secondary     #c7c7cc  (8.4:1)   AAA
+     muted         #94949c  (4.7:1)   AA
+     subtle        #6f6f76  (3.0:1)   AA-Large
+   Brand:
+     loga-red      #FF3838  (más claro que #FF0000 — más legible sobre dark)
+     loga-red-bg   rgba(255,56,56,0.16)
+   ═══════════════════════════════════════════════════════ */
 
-/* Fondos */
-.dark .bg-white { background-color: #262626 !important; }
-.dark .bg-gray-50 { background-color: #2a2a2a !important; }
-.dark .bg-gray-100 { background-color: #333 !important; }
-.dark .bg-gray-200 { background-color: #404040 !important; }
-
-/* Bordes */
-.dark .border-gray-50 { border-color: #333 !important; }
-.dark .border-gray-100 { border-color: #3a3a3a !important; }
-.dark .border-gray-200 { border-color: #444 !important; }
-.dark .border-gray-300 { border-color: #555 !important; }
-
-/* Textos — TODOS claros para buen contraste */
-.dark .text-gray-900 { color: #ffffff !important; }
-.dark .text-gray-800 { color: #f0f0f0 !important; }
-.dark .text-gray-700 { color: #e0e0e0 !important; }
-.dark .text-gray-600 { color: #ccc !important; }
-.dark .text-gray-500 { color: #bbb !important; }
-.dark .text-gray-400 { color: #999 !important; }
-.dark .text-gray-300 { color: #888 !important; }
-
-/* Sombras */
-.dark .shadow-sm { box-shadow: 0 1px 3px rgba(0,0,0,0.5) !important; }
-.dark .shadow-md { box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important; }
-.dark .shadow-lg { box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important; }
-.dark .shadow-2xl { box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important; }
-
-/* Inputs */
-.dark input, .dark select, .dark textarea {
-  background-color: #1a1a1a !important;
-  color: #f0f0f0 !important;
-  border-color: #444 !important;
+.dark {
+  color-scheme: dark;
+  --tw-prose-bullets: #6f6f76;
+  --loga-red-dk: #FF3838;
 }
-.dark input::placeholder, .dark textarea::placeholder { color: #777 !important; }
-.dark input:focus, .dark select:focus, .dark textarea:focus { border-color: #FF0000 !important; }
+
+.dark body { background: #0e0e10 !important; color: #f4f4f5 !important; }
+
+/* Fondos: surfaces apiladas */
+.dark .bg-white         { background-color: #1a1a1d !important; }
+.dark .bg-gray-50       { background-color: #232326 !important; }
+.dark .bg-gray-100      { background-color: #2a2a2e !important; }
+.dark .bg-gray-200      { background-color: #303034 !important; }
+.dark .bg-gray-50\/50,
+.dark .bg-gray-50\/40   { background-color: rgba(35,35,38,0.5) !important; }
+
+/* Bordes: contraste suave */
+.dark .border-gray-50   { border-color: rgba(255,255,255,0.06) !important; }
+.dark .border-gray-100  { border-color: rgba(255,255,255,0.08) !important; }
+.dark .border-gray-200  { border-color: rgba(255,255,255,0.12) !important; }
+.dark .border-gray-300  { border-color: rgba(255,255,255,0.18) !important; }
+
+/* Textos: jerarquía clara con ratios AA mínimos */
+.dark .text-gray-900    { color: #f4f4f5 !important; }
+.dark .text-gray-800    { color: #e4e4e7 !important; }
+.dark .text-gray-700    { color: #d4d4d8 !important; }
+.dark .text-gray-600    { color: #c7c7cc !important; }
+.dark .text-gray-500    { color: #a1a1aa !important; }
+.dark .text-gray-400    { color: #94949c !important; }
+.dark .text-gray-300    { color: #71717a !important; }
+.dark .text-black       { color: #f4f4f5 !important; }
+
+/* Brand red — bump brillo para legibilidad sobre dark */
+.dark .text-loga-red    { color: #FF5252 !important; }
+.dark .bg-loga-red      { background-color: #FF3838 !important; }
+.dark .border-loga-red  { border-color: #FF5252 !important; }
+.dark .bg-loga-red:hover{ background-color: #FF5050 !important; }
+.dark .hover\:bg-loga-red-dark:hover { background-color: #DC2626 !important; }
+
+/* Shadows: colored glow para dar profundidad sin ruido */
+.dark .shadow-sm  { box-shadow: 0 1px 2px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04) !important; }
+.dark .shadow-md  { box-shadow: 0 4px 12px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.05) !important; }
+.dark .shadow-lg  { box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05) !important; }
+.dark .shadow-xl  { box-shadow: 0 12px 36px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06) !important; }
+.dark .shadow-2xl { box-shadow: 0 24px 64px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.07) !important; }
+
+/* Form fields */
+.dark input, .dark select, .dark textarea {
+  background-color: #14141a !important;
+  color: #f4f4f5 !important;
+  border-color: rgba(255,255,255,0.12) !important;
+}
+.dark input::placeholder, .dark textarea::placeholder { color: #71717a !important; }
+.dark input:focus, .dark select:focus, .dark textarea:focus {
+  border-color: #FF5252 !important;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255,56,56,0.18) !important;
+}
+.dark input:disabled, .dark select:disabled, .dark textarea:disabled {
+  background-color: rgba(20,20,26,0.5) !important;
+  color: #71717a !important;
+}
 
 /* Tablas */
-.dark table thead { background-color: #2a2a2a !important; }
-.dark table thead th { color: #bbb !important; }
-.dark table tbody tr { border-color: #333 !important; }
-.dark table tbody tr:hover { background-color: #333 !important; }
-.dark .divide-gray-50 > :not([hidden]) ~ :not([hidden]) { border-color: #333 !important; }
-.dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: #333 !important; }
+.dark table thead         { background-color: #232326 !important; }
+.dark table thead th      { color: #c7c7cc !important; }
+.dark table tbody tr      { border-color: rgba(255,255,255,0.06) !important; }
+.dark table tbody tr:hover { background-color: rgba(255,255,255,0.04) !important; }
+.dark .divide-gray-50  > :not([hidden]) ~ :not([hidden]) { border-color: rgba(255,255,255,0.06) !important; }
+.dark .divide-gray-100 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(255,255,255,0.08) !important; }
 
-/* Modal backdrop */
-.dark .bg-black\/30 { background-color: rgba(0,0,0,0.65) !important; }
-.dark .bg-black\/50 { background-color: rgba(0,0,0,0.7) !important; }
+/* Modal backdrop más opaco para mejor foco */
+.dark .bg-black\/30  { background-color: rgba(0,0,0,0.7) !important; }
+.dark .bg-black\/40  { background-color: rgba(0,0,0,0.75) !important; }
+.dark .bg-black\/50  { background-color: rgba(0,0,0,0.8) !important; }
 
-/* Badges — fondo sutil coloreado */
-.dark .bg-red-50 { background-color: rgba(239,68,68,0.15) !important; }
-.dark .bg-red-100 { background-color: rgba(239,68,68,0.2) !important; }
-.dark .bg-emerald-50 { background-color: rgba(16,185,129,0.15) !important; }
-.dark .bg-emerald-100 { background-color: rgba(16,185,129,0.2) !important; }
-.dark .bg-amber-50 { background-color: rgba(245,158,11,0.15) !important; }
-.dark .bg-amber-100 { background-color: rgba(245,158,11,0.2) !important; }
-.dark .bg-blue-50 { background-color: rgba(59,130,246,0.15) !important; }
-.dark .bg-blue-100 { background-color: rgba(59,130,246,0.2) !important; }
-.dark .bg-purple-50 { background-color: rgba(168,85,247,0.15) !important; }
-.dark .bg-purple-100 { background-color: rgba(168,85,247,0.2) !important; }
-.dark .bg-indigo-50 { background-color: rgba(99,102,241,0.15) !important; }
+/* Backdrop-blur funciona mejor con bg semitransparente */
+.dark .backdrop-blur-md, .dark .backdrop-blur-sm { background-color: rgba(14,14,16,0.6) !important; }
 
-/* Font mono en dark */
-.dark .font-mono { color: #ddd !important; }
+/* Badges semánticos — bg sutil + texto vivo */
+.dark .bg-red-50        { background-color: rgba(239,68,68,0.14) !important; }
+.dark .bg-red-100       { background-color: rgba(239,68,68,0.22) !important; }
+.dark .bg-red-50\/30    { background-color: rgba(239,68,68,0.10) !important; }
+.dark .bg-red-50\/40    { background-color: rgba(239,68,68,0.12) !important; }
+.dark .bg-red-50\/60    { background-color: rgba(239,68,68,0.18) !important; }
+.dark .bg-emerald-50    { background-color: rgba(16,185,129,0.14) !important; }
+.dark .bg-emerald-100   { background-color: rgba(16,185,129,0.22) !important; }
+.dark .bg-emerald-50\/50{ background-color: rgba(16,185,129,0.10) !important; }
+.dark .bg-amber-50      { background-color: rgba(245,158,11,0.14) !important; }
+.dark .bg-amber-100     { background-color: rgba(245,158,11,0.22) !important; }
+.dark .bg-amber-50\/30  { background-color: rgba(245,158,11,0.10) !important; }
+.dark .bg-amber-50\/40,
+.dark .bg-amber-50\/50  { background-color: rgba(245,158,11,0.12) !important; }
+.dark .bg-amber-50\/60  { background-color: rgba(245,158,11,0.18) !important; }
+.dark .bg-blue-50       { background-color: rgba(59,130,246,0.14) !important; }
+.dark .bg-blue-100      { background-color: rgba(59,130,246,0.22) !important; }
+.dark .bg-blue-50\/30,
+.dark .bg-blue-50\/50   { background-color: rgba(59,130,246,0.12) !important; }
+.dark .bg-purple-50     { background-color: rgba(168,85,247,0.14) !important; }
+.dark .bg-purple-100    { background-color: rgba(168,85,247,0.22) !important; }
+.dark .bg-indigo-50     { background-color: rgba(99,102,241,0.14) !important; }
+.dark .bg-indigo-100    { background-color: rgba(99,102,241,0.22) !important; }
+.dark .bg-indigo-50\/30,
+.dark .bg-indigo-50\/50 { background-color: rgba(99,102,241,0.10) !important; }
+.dark .bg-rose-50       { background-color: rgba(244,63,94,0.14) !important; }
+.dark .bg-rose-50\/50   { background-color: rgba(244,63,94,0.10) !important; }
+.dark .bg-cyan-50       { background-color: rgba(6,182,212,0.14) !important; }
 
-/* Lotes expandidos en productos */
+/* Borders coloreados */
+.dark .border-red-100   { border-color: rgba(239,68,68,0.30) !important; }
+.dark .border-red-200   { border-color: rgba(239,68,68,0.40) !important; }
+.dark .border-red-300   { border-color: rgba(239,68,68,0.50) !important; }
+.dark .border-emerald-100 { border-color: rgba(16,185,129,0.30) !important; }
+.dark .border-emerald-200 { border-color: rgba(16,185,129,0.40) !important; }
+.dark .border-emerald-300 { border-color: rgba(16,185,129,0.50) !important; }
+.dark .border-amber-100   { border-color: rgba(245,158,11,0.30) !important; }
+.dark .border-amber-200   { border-color: rgba(245,158,11,0.40) !important; }
+.dark .border-amber-300   { border-color: rgba(245,158,11,0.50) !important; }
+.dark .border-blue-100    { border-color: rgba(59,130,246,0.30) !important; }
+.dark .border-blue-200    { border-color: rgba(59,130,246,0.40) !important; }
+.dark .border-indigo-100  { border-color: rgba(99,102,241,0.30) !important; }
+.dark .border-purple-200  { border-color: rgba(168,85,247,0.40) !important; }
+.dark .border-rose-100    { border-color: rgba(244,63,94,0.30) !important; }
+
+/* Texto semántico — más brillante para contraste sobre dark */
+.dark .text-red-400     { color: #FF6B6B !important; }
+.dark .text-red-500     { color: #FF5252 !important; }
+.dark .text-red-600     { color: #FF6B6B !important; }
+.dark .text-red-700     { color: #FCA5A5 !important; }
+.dark .text-red-900     { color: #FCA5A5 !important; }
+.dark .text-emerald-400 { color: #34D399 !important; }
+.dark .text-emerald-500 { color: #34D399 !important; }
+.dark .text-emerald-600 { color: #34D399 !important; }
+.dark .text-emerald-700 { color: #6EE7B7 !important; }
+.dark .text-emerald-800 { color: #A7F3D0 !important; }
+.dark .text-amber-500   { color: #FBBF24 !important; }
+.dark .text-amber-600   { color: #FBBF24 !important; }
+.dark .text-amber-700   { color: #FCD34D !important; }
+.dark .text-amber-800   { color: #FDE68A !important; }
+.dark .text-blue-400    { color: #60A5FA !important; }
+.dark .text-blue-500    { color: #60A5FA !important; }
+.dark .text-blue-600    { color: #60A5FA !important; }
+.dark .text-blue-700    { color: #93C5FD !important; }
+.dark .text-blue-800    { color: #BFDBFE !important; }
+.dark .text-indigo-500  { color: #818CF8 !important; }
+.dark .text-indigo-600  { color: #818CF8 !important; }
+.dark .text-indigo-700  { color: #A5B4FC !important; }
+.dark .text-purple-600  { color: #C084FC !important; }
+.dark .text-purple-700  { color: #D8B4FE !important; }
+.dark .text-rose-700    { color: #FDA4AF !important; }
+.dark .text-rose-900    { color: #FECDD3 !important; }
+.dark .text-cyan-500    { color: #22D3EE !important; }
+
+/* Botones de acción — gradients más vivos */
+.dark .bg-gradient-to-br.from-loga-red,
+.dark .bg-gradient-to-r.from-loga-red {
+  background-image: linear-gradient(to bottom right, #FF3838, #E11D48) !important;
+}
+
+/* Hover backgrounds claros */
+.dark .hover\:bg-gray-50:hover  { background-color: rgba(255,255,255,0.04) !important; }
+.dark .hover\:bg-gray-100:hover { background-color: rgba(255,255,255,0.08) !important; }
+.dark .hover\:bg-white:hover    { background-color: #232326 !important; }
+.dark .hover\:bg-red-50:hover   { background-color: rgba(239,68,68,0.16) !important; }
+.dark .hover\:bg-blue-50:hover  { background-color: rgba(59,130,246,0.16) !important; }
+.dark .hover\:bg-emerald-50:hover { background-color: rgba(16,185,129,0.16) !important; }
+.dark .hover\:bg-amber-50:hover { background-color: rgba(245,158,11,0.16) !important; }
+.dark .hover\:bg-purple-50:hover{ background-color: rgba(168,85,247,0.16) !important; }
+
+/* Ring/outline en focus */
+.dark .focus\:ring-red-100:focus    { --tw-ring-color: rgba(255,56,56,0.30) !important; }
+.dark .focus\:ring-emerald-100:focus{ --tw-ring-color: rgba(16,185,129,0.30) !important; }
+.dark .focus\:ring-blue-200:focus   { --tw-ring-color: rgba(59,130,246,0.30) !important; }
+
+/* Mono code-like */
+.dark .font-mono       { color: #d4d4d8 !important; }
+.dark code             { background: rgba(255,255,255,0.06) !important; color: #f4f4f5 !important; }
+
+/* Scrollbar refinada */
+.dark ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12) !important; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #FF5252 !important; }
+
+/* Opacity tweaks */
 .dark .opacity-30 { opacity: 0.4 !important; }
+.dark .opacity-40 { opacity: 0.5 !important; }
+.dark .opacity-60 { opacity: 0.7 !important; }
+
+/* Modal interno: texto y bordes ya cubierto, pero forzar bg cards modales */
+.dark [data-sileo-toast] { background-color: #232326 !important; }
+
+/* Labels uppercase tracking — un poco más brillantes */
+.dark label, .dark .uppercase { color: inherit; }
+
+/* Backdrop blur navbar con tinte cálido */
+.dark .bg-white\/95     { background-color: rgba(14,14,16,0.92) !important; }
+.dark .bg-white\/90     { background-color: rgba(14,14,16,0.88) !important; }
+
+/* Gradients del hero/cards */
+.dark .from-red-50      { --tw-gradient-from: rgba(239,68,68,0.15) !important; }
+.dark .to-white         { --tw-gradient-to: #1a1a1d !important; }
+.dark .from-emerald-50  { --tw-gradient-from: rgba(16,185,129,0.15) !important; }
+.dark .from-amber-50    { --tw-gradient-from: rgba(245,158,11,0.15) !important; }
+.dark .from-blue-50     { --tw-gradient-from: rgba(59,130,246,0.15) !important; }
+.dark .from-indigo-50   { --tw-gradient-from: rgba(99,102,241,0.15) !important; }
+.dark .from-rose-50     { --tw-gradient-from: rgba(244,63,94,0.15) !important; }
+.dark .from-indigo-50\/30,
+.dark .from-indigo-50\/50 { --tw-gradient-from: rgba(99,102,241,0.10) !important; }
+
+/* Tab activo borde */
+.dark .border-loga-red\/20 { border-color: rgba(255,82,82,0.30) !important; }
+.dark .border-loga-red\/30 { border-color: rgba(255,82,82,0.40) !important; }
+
+/* Switch toggles activos: emerald */
+.dark .bg-emerald-500 { background-color: #10B981 !important; }
+.dark .bg-amber-500   { background-color: #F59E0B !important; }

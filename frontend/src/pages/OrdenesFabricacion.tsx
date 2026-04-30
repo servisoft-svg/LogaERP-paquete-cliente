@@ -485,27 +485,33 @@ export default function OrdenesFabricacion() {
     finally { setSavingEdit(false); }
   };
 
+  // Normaliza eliminando tildes/diacríticos para búsqueda accent-insensitive
+  const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
   const ordenesFiltradas = ordenes.filter(o => {
     // Filtrar por tab usando tipo_orden
     const tipoOrden = o.tipo_orden ?? 'fabricacion';
     if (tabProd === 'fabricacion' && tipoOrden !== 'fabricacion') return false;
     if (tabProd === 'envasado' && tipoOrden !== 'envasado') return false;
-    if (!busqueda) return true;
-    const q = busqueda.toLowerCase().trim();
+    if (!busqueda.trim()) return true;
+    const q = norm(busqueda.trim());
+    const qDigits = q.replace(/\D/g, '');
     const numPart = o.numero_orden.replace(/\D/g, '');
     const fecha = o.fecha_planificada ? new Date(o.fecha_planificada).toLocaleDateString('es-ES') : '';
     const cantidad = parseFloat(o.cantidad_planificada).toLocaleString('es-ES', { maximumFractionDigits: 0 });
-    return o.numero_orden.toLowerCase().includes(q)
-      || numPart.endsWith(q.replace(/\D/g, ''))
-      || (o.receta_nombre ?? '').toLowerCase().includes(q)
-      || (o.producto_nombre ?? '').toLowerCase().includes(q)
-      || (o.cliente ?? '').toLowerCase().includes(q)
-      || o.estado.toLowerCase().includes(q)
+    return norm(o.numero_orden).includes(q)
+      || (qDigits.length > 0 && numPart.endsWith(qDigits))
+      || norm(o.receta_nombre ?? '').includes(q)
+      || norm(o.producto_nombre ?? '').includes(q)
+      || norm(o.cliente ?? '').includes(q)
+      || norm(o.estado).includes(q)
       || fecha.includes(q)
       || cantidad.includes(q);
   });
 
   const [paginaProd, setPaginaProd] = useState(1);
+  // Reset pagina al cambiar busqueda o tab (si paginaProd queda fuera de rango → página vacía)
+  useEffect(() => { setPaginaProd(1); }, [busqueda, tabProd]);
   const POR_PAGINA = 25;
   const totalPaginasProd = Math.ceil(ordenesFiltradas.length / POR_PAGINA);
   const ordenesPag = ordenesFiltradas.slice((paginaProd - 1) * POR_PAGINA, paginaProd * POR_PAGINA);

@@ -73,7 +73,7 @@ router.get('/', async (req, res) => {
       params.push(`%${busqueda}%`); idx++;
     }
     const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10));
-    const limit = Math.min(200, parseInt(String(req.query.limit ?? '100'), 10));
+    const limit = Math.min(2000, parseInt(String(req.query.limit ?? '1000'), 10));
     const offset = (page - 1) * limit;
     sql += ` ORDER BY p.tipo ASC, p.nombre ASC LIMIT $${idx++} OFFSET $${idx++}`;
     params.push(String(limit), String(offset));
@@ -152,6 +152,7 @@ router.post('/', async (req, res) => {
         proveedor_id ?? null,
       ]
     );
+    invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
     return res.status(201).json(prod);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';
@@ -238,6 +239,7 @@ router.put('/:id', async (req, res) => {
       ]
     );
     if (!prod) return res.status(404).json({ error: 'Producto no encontrado' });
+    invalidarCacheFinanzas(); // cualquier edit puede afectar valor inventario
     return res.json(prod);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -307,6 +309,7 @@ router.get('/:id/trazabilidad.csv', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     await pool.query(`UPDATE productos SET activo = FALSE WHERE id = $1`, [req.params.id]);
+    invalidarCacheFinanzas(); // producto desactivado → ya no cuenta en inventario
     return res.json({ ok: true });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });

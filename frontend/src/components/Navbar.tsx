@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Factory, Layers, Bell,
-  Package, ChefHat, Truck, Users, ShoppingBag, BarChart3, Settings, LogOut, MoreHorizontal, X,
+  Package, ChefHat, Truck, Users, ShoppingBag, BarChart3, Settings, LogOut, MoreHorizontal, X, Zap,
   Moon, Sun,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -20,6 +20,7 @@ const LINKS = [
   { to: '/clientes',       label: 'Clientes',    icon: Users            },
   { to: '/pedidos',        label: 'Pedidos',     icon: ShoppingBag      },
   { to: '/finanzas',       label: 'Finanzas',    icon: BarChart3        },
+  { to: '/automatizaciones', label: 'Auto',     icon: Zap              },
   { to: '/configuracion',  label: 'Config.',     icon: Settings         },
 ];
 

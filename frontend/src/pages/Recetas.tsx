@@ -107,7 +107,6 @@ export default function Recetas() {
   const [importResult, setImportResult]     = useState<string | null>(null);
   const [importing, setImporting]           = useState(false);
 
-  const productosTerminados = productos.filter(p => (p.tipo === 'producto_fabricado' || p.tipo === 'producto_envasado' || p.tipo === 'producto_terminado') && p.activo);
   const productosEnvasados = productos.filter(p => p.tipo === 'producto_envasado' && p.activo);
   const colasFabricadas = productos.filter(p => p.tipo === 'producto_fabricado' && p.activo);
   const materialesEmbalaje = productos.filter(p => p.tipo === 'material_embalaje' && p.activo);
@@ -115,12 +114,12 @@ export default function Recetas() {
   // Envasado recipe modal
   const [modalEnv, setModalEnv] = useState(false);
   const [editandoEnv, setEditandoEnv] = useState<Receta | null>(null);
-  const [envRecForm, setEnvRecForm] = useState({ nombre: '', producto_id: '', cola_id: '', envase_id: '', materiales: [] as { producto_id: string; cantidad: string }[] });
+  const [envRecForm, setEnvRecForm] = useState({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', materiales: [] as { producto_id: string; cantidad: string }[] });
   const [savingEnv, setSavingEnv] = useState(false);
 
   const abrirNuevaEnvasado = () => {
     setEditandoEnv(null);
-    setEnvRecForm({ nombre: '', producto_id: '', cola_id: '', envase_id: '', materiales: [] });
+    setEnvRecForm({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', materiales: [] });
     setModalEnv(true);
   };
 
@@ -145,6 +144,7 @@ export default function Recetas() {
     setEnvRecForm({
       nombre: det.nombre,
       producto_id: det.producto_id ?? '',
+      producto_nuevo_nombre: '',
       cola_id: colaIng?.materia_prima_id ?? '',
       envase_id: envaseIng?.materia_prima_id ?? '',
       materiales: otrosMats.map(m => ({ producto_id: m.materia_prima_id, cantidad: String(m.cantidad ?? '1') })),
@@ -153,11 +153,26 @@ export default function Recetas() {
   };
 
   const guardarEnvasadoReceta = async () => {
-    if (!envRecForm.producto_id || !envRecForm.cola_id || !envRecForm.envase_id) return;
+    const tieneProductoOExiste = envRecForm.producto_id || envRecForm.producto_nuevo_nombre.trim();
+    if (!tieneProductoOExiste || !envRecForm.cola_id || !envRecForm.envase_id) return;
     setSavingEnv(true);
-    const prodFinal = productos.find(p => p.id === envRecForm.producto_id);
-    const nombre = envRecForm.nombre || `Envasado ${prodFinal?.nombre ?? ''}`;
     const ejecutar = async () => {
+      // Si el usuario tipeó un nombre nuevo (sin seleccionar existente), creamos el producto.
+      // Backend auto-genera código PE-XXX al ser tipo='producto_envasado'.
+      let productoFinalId = envRecForm.producto_id;
+      if (!productoFinalId && envRecForm.producto_nuevo_nombre.trim()) {
+        const created = await productosApi.crear({
+          nombre: envRecForm.producto_nuevo_nombre.trim(),
+          tipo: 'producto_envasado',
+          unidad_medida: 'ud',
+        });
+        productoFinalId = (created.data as { id: string }).id;
+      }
+
+      const prodFinal = productos.find(p => p.id === productoFinalId)
+        ?? { nombre: envRecForm.producto_nuevo_nombre.trim() };
+      const nombre = envRecForm.nombre || `Envasado ${prodFinal.nombre ?? ''}`;
+
       const ingredientes = [
         { materia_prima_id: envRecForm.cola_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'kg' },
         { materia_prima_id: envRecForm.envase_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'ud' },
@@ -166,7 +181,7 @@ export default function Recetas() {
         })),
       ];
       if (editandoEnv) {
-        await recetasApi.editar(editandoEnv.id, { nombre, producto_id: envRecForm.producto_id, rendimiento: 1, tipo_receta: 'envasado' });
+        await recetasApi.editar(editandoEnv.id, { nombre, producto_id: productoFinalId, rendimiento: 1, tipo_receta: 'envasado' });
         for (const ing of (editandoEnv.ingredientes ?? [])) {
           await recetasApi.eliminarIngrediente(editandoEnv.id, ing.id);
         }
@@ -174,13 +189,13 @@ export default function Recetas() {
           await recetasApi.addIngrediente(editandoEnv.id, ing);
         }
       } else {
-        const res = await recetasApi.crear({ nombre, producto_id: envRecForm.producto_id, rendimiento: 1, tipo_receta: 'envasado' });
+        const res = await recetasApi.crear({ nombre, producto_id: productoFinalId, rendimiento: 1, tipo_receta: 'envasado' });
         const nueva = res.data as Receta;
         for (const ing of ingredientes) {
           await recetasApi.addIngrediente(nueva.id, ing);
         }
       }
-      await productosApi.editar(envRecForm.producto_id, { granel_id: envRecForm.cola_id } as any);
+      await productosApi.editar(productoFinalId, { granel_id: envRecForm.cola_id } as never);
       return { nombre };
     };
     try {
@@ -213,7 +228,7 @@ export default function Recetas() {
     try {
       const [recRes, prodRes] = await Promise.all([
         recetasApi.listar({ activa: 'true' }),
-        productosApi.listar(),
+        productosApi.listar({ limit: '2000' }),
       ]);
       setRecetas(recRes.data as Receta[]);
       setProductos(prodRes.data as Producto[]);
@@ -666,17 +681,36 @@ export default function Recetas() {
 
               <div>
                 <label className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1.5">Producto final</label>
-                <SearchSelect
-                  options={productosEnvasados.map(p => ({ id: p.id, label: p.nombre, sub: p.codigo }))}
-                  value={envRecForm.producto_id}
-                  onChange={id => {
-                    const prod = productos.find(p => p.id === id);
-                    setEnvRecForm(f => ({ ...f, producto_id: id, cola_id: prod?.granel_id ?? f.cola_id, nombre: f.nombre || `Envasado ${prod?.nombre ?? ''}` }));
-                  }}
-                  placeholder="Buscar producto envasado..."
-                  selectedLabel={productos.find(p => p.id === envRecForm.producto_id)?.nombre}
-                  selectedSub={productos.find(p => p.id === envRecForm.producto_id)?.codigo}
-                />
+                {!envRecForm.producto_id && envRecForm.producto_nuevo_nombre ? (
+                  <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 px-3 py-2.5 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-bold text-emerald-700 uppercase">Nuevo producto envasado</p>
+                      <p className="text-sm font-semibold text-gray-900 truncate">{envRecForm.producto_nuevo_nombre}</p>
+                      <p className="text-[10px] text-gray-500">Se creará con código auto PE-XXX al guardar</p>
+                    </div>
+                    <button onClick={() => setEnvRecForm(f => ({ ...f, producto_nuevo_nombre: '' }))}
+                      className="rounded-lg p-1.5 text-gray-400 hover:bg-emerald-100 hover:text-loga-red shrink-0"><X size={14} /></button>
+                  </div>
+                ) : envRecForm.producto_id ? (
+                  <SearchSelect
+                    options={productosEnvasados.map(p => ({ id: p.id, label: p.nombre, sub: p.codigo }))}
+                    value={envRecForm.producto_id}
+                    onChange={id => {
+                      if (!id) { setEnvRecForm(f => ({ ...f, producto_id: '', producto_nuevo_nombre: '' })); return; }
+                      const prod = productos.find(p => p.id === id);
+                      setEnvRecForm(f => ({ ...f, producto_id: id, producto_nuevo_nombre: '', cola_id: prod?.granel_id ?? f.cola_id, nombre: f.nombre || `Envasado ${prod?.nombre ?? ''}` }));
+                    }}
+                    placeholder="Buscar producto envasado..."
+                    selectedLabel={productos.find(p => p.id === envRecForm.producto_id)?.nombre}
+                    selectedSub={productos.find(p => p.id === envRecForm.producto_id)?.codigo}
+                  />
+                ) : (
+                  <ProductoFinalCombo
+                    productos={productosEnvasados}
+                    onSelectExistente={(prod) => setEnvRecForm(f => ({ ...f, producto_id: prod.id, producto_nuevo_nombre: '', cola_id: prod.granel_id ?? f.cola_id, nombre: f.nombre || `Envasado ${prod.nombre}` }))}
+                    onCrearNuevo={(nombre) => setEnvRecForm(f => ({ ...f, producto_id: '', producto_nuevo_nombre: nombre, nombre: f.nombre || `Envasado ${nombre}` }))}
+                  />
+                )}
               </div>
 
               <div>
@@ -733,7 +767,7 @@ export default function Recetas() {
 
             <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50/50 shrink-0">
               <button onClick={() => setModalEnv(false)} className="text-sm text-gray-500 hover:text-gray-900">Cancelar</button>
-              <button onClick={guardarEnvasadoReceta} disabled={savingEnv || !envRecForm.producto_id || !envRecForm.cola_id || !envRecForm.envase_id}
+              <button onClick={guardarEnvasadoReceta} disabled={savingEnv || (!envRecForm.producto_id && !envRecForm.producto_nuevo_nombre.trim()) || !envRecForm.cola_id || !envRecForm.envase_id}
                 className="flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:bg-gray-300 transition-all">
                 <Check size={16} /> {editandoEnv ? 'Guardar' : 'Crear receta'}
               </button>
@@ -1024,18 +1058,33 @@ export default function Recetas() {
             </div>
           )}
 
-          {editandoReceta && (
-            <FormField label="Producto resultante">
-              <Select
-                value={formReceta.producto_id}
-                disabled
-              >
-                <option value="">— Sin producto —</option>
-                {productosTerminados.map(p => (
-                  <option key={p.id} value={p.id}>{p.codigo} — {p.nombre}</option>
-                ))}
-              </Select>
-            </FormField>
+          <FormField
+            label={formReceta.tipo_receta === 'fabricacion' ? 'Producto que produce esta receta (granel)' : 'Producto envasado'}
+            hint={editandoReceta
+              ? 'No editable: cambiar el producto de una receta rompe trazabilidad.'
+              : (formReceta.tipo_receta === 'fabricacion'
+                ? 'Selecciona el producto fabricado/granel que va a producirse al ejecutar esta receta.'
+                : 'Selecciona el producto envasado final.')}
+            required
+          >
+            <Select
+              value={formReceta.producto_id}
+              disabled={!!editandoReceta}
+              onChange={e => setFormReceta(f => ({ ...f, producto_id: e.target.value }))}
+            >
+              <option value="">— Selecciona producto —</option>
+              {(formReceta.tipo_receta === 'fabricacion'
+                ? productos.filter(p => p.tipo === 'producto_fabricado' && p.activo)
+                : productos.filter(p => p.tipo === 'producto_envasado' && p.activo)
+              ).map(p => (
+                <option key={p.id} value={p.id}>{p.codigo} — {p.nombre}</option>
+              ))}
+            </Select>
+          </FormField>
+          {!editandoReceta && formReceta.tipo_receta === 'fabricacion' && productos.filter(p => p.tipo === 'producto_fabricado' && p.activo).length === 0 && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+              No tienes productos de tipo «producto fabricado» (granel). Crea uno primero en Productos para asociarlo aquí.
+            </p>
           )}
 
           {/* QC Section — solo fabricación */}
@@ -1188,9 +1237,9 @@ export default function Recetas() {
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] text-gray-500 font-medium">Duración (seg simulación)</label>
+                      <label className="text-[10px] text-gray-500 font-medium">Duración (min)</label>
                       <Input
-                        type="number" min="1" max="60" step="1"
+                        type="number" min="1" max="600" step="1"
                         value={paso.duracion_min ?? ''}
                         onChange={e => {
                           const p = [...formReceta.pasos];
@@ -1433,6 +1482,69 @@ export default function Recetas() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────
+// ProductoFinalCombo: selector híbrido — elige existente o crea nuevo
+// ───────────────────────────────────────────────────────────────
+function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo }: {
+  productos: Producto[];
+  onSelectExistente: (p: Producto) => void;
+  onCrearNuevo: (nombre: string) => void;
+}) {
+  const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
+  const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const q = norm(text.trim());
+  const matches = q
+    ? productos.filter(p => norm(p.nombre).includes(q) || norm(p.codigo).includes(q))
+    : productos;
+  const exact = productos.find(p => norm(p.nombre) === q);
+
+  return (
+    <div className="relative">
+      <input
+        value={text}
+        onChange={e => { setText(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 200)}
+        placeholder="Buscar existente o escribir nombre nuevo..."
+        className="w-full rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none"
+      />
+      {open && (
+        <div className="absolute z-[200] mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-2xl overflow-hidden max-h-72 overflow-y-auto">
+          {matches.length > 0 && (
+            <div>
+              <p className="px-3 pt-2 pb-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Existentes</p>
+              {matches.map(p => (
+                <button key={p.id} type="button" onMouseDown={() => onSelectExistente(p)}
+                  className="w-full text-left px-3 py-2 hover:bg-emerald-50 transition-colors flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-800 truncate">{p.nombre}</p>
+                    <p className="text-[10px] font-mono text-gray-400">{p.codigo}</p>
+                  </div>
+                  <span className="text-[10px] text-gray-400">{parseFloat(p.stock_actual).toLocaleString('es-ES')} ud</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {q && !exact && (
+            <div className="border-t border-gray-100 bg-emerald-50/50">
+              <button type="button" onMouseDown={() => onCrearNuevo(text.trim())}
+                className="w-full text-left px-3 py-3 hover:bg-emerald-100 transition-colors">
+                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">+ Crear nuevo</p>
+                <p className="text-sm font-semibold text-gray-900">«{text.trim()}»</p>
+                <p className="text-[10px] text-gray-500">Se creará como producto envasado con código auto PE-XXX</p>
+              </button>
+            </div>
+          )}
+          {!q && matches.length === 0 && (
+            <p className="text-xs text-gray-400 text-center py-4">Empieza a escribir para buscar o crear</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

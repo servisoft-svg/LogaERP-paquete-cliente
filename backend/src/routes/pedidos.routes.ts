@@ -1,7 +1,10 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
+import { automatizacionesService } from '../services/automatizaciones.service';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -82,15 +85,27 @@ router.post('/', async (req, res) => {
     if (Array.isArray(lineas) && lineas.length > 100) {
       return res.status(400).json({ error: 'Maximo 100 lineas por pedido.' });
     }
-    if (Array.isArray(lineas) && lineas.length > 0) {
-      for (const l of lineas) {
-        if (!l.producto_id && !l.producto_nombre) continue;
-        await pool.query(
-          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal)
-           VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, $7::NUMERIC, $8::NUMERIC)`,
-          [pedido.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.notas ?? null, l.precio_unitario ?? null, l.subtotal ?? null]
+    // Batch insert lineas (1 sola query VALUES ($1...), ($N...))
+    const lineasValidas = Array.isArray(lineas)
+      ? lineas.filter((l: { producto_id?: string; producto_nombre?: string }) => l.producto_id || l.producto_nombre)
+      : [];
+    if (lineasValidas.length > 0) {
+      const placeholders: string[] = [];
+      const params: unknown[] = [];
+      let idx = 1;
+      for (const l of lineasValidas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; notas?: string; precio_unitario?: string|number; subtotal?: string|number }[]) {
+        placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
+        params.push(
+          pedido.id, l.producto_id ?? null, l.producto_nombre ?? null,
+          l.cantidad ?? null, l.unidad_medida ?? 'kg', l.notas ?? null,
+          l.precio_unitario ?? null, l.subtotal ?? null,
         );
       }
+      await pool.query(
+        `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal)
+         VALUES ${placeholders.join(', ')}`,
+        params
+      );
     }
 
     // Auto-reserve stock FIFO — wrapped in SERIALIZABLE to prevent double-booking
@@ -103,6 +118,7 @@ router.post('/', async (req, res) => {
       itemsToReserve.push({ producto_id, cantidad: parseFloat(String(cantidad)) });
     }
 
+    let reservationFailed = false;
     if (itemsToReserve.length > 0) {
       const resClient = await pool.connect();
       try {
@@ -130,15 +146,28 @@ router.post('/', async (req, res) => {
         }
         await resClient.query('COMMIT');
       } catch (resErr) {
-        await resClient.query('ROLLBACK').catch(() => {});
-        // Reservation failed but order created — non-fatal, can be re-reserved later
+        reservationFailed = true;
+        await resClient.query('ROLLBACK').catch(rbErr => logger.error('[POST pedidos] ROLLBACK reservas fallo', { err: rbErr }));
+        logger.error('[POST pedidos] reserva FIFO fallo — pedido creado sin reservas', { err: resErr, pedido_id: pedido.id });
       } finally {
         resClient.release();
       }
     }
 
-    res.status(201).json(pedido);
+    // Hook automatizaciones: pedido recién creado en 'confirmado' → intentar
+    // auto-fabricar (si no hay stock) o auto-completar (si sí lo hay).
+    if (pedido.estado === 'confirmado') {
+      setImmediate(() => {
+        automatizacionesService.autoFabricarPedido(pedido.id)
+          .catch(err => logger.error('[auto.fabricarPedido-POST]', { err }));
+        automatizacionesService.autoCompletarPedido(pedido.id)
+          .catch(err => logger.error('[auto.completarPedido-POST]', { err }));
+      });
+    }
+
+    res.status(201).json({ ...pedido, ...(reservationFailed ? { warning: 'reservation_failed' } : {}) });
   } catch (err: unknown) {
+    logger.error('[POST pedidos]', { err });
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
@@ -207,16 +236,36 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    // Reemplazar lineas si vienen (before totals recalculation)
+    // Reemplazar lineas atómicamente: DELETE + batch INSERT en una transacción.
+    // Si el INSERT falla, el DELETE se revierte y el pedido NO queda sin líneas.
     if (Array.isArray(lineas)) {
-      await pool.query(`DELETE FROM lineas_pedido WHERE pedido_id = $1`, [req.params.id]);
-      for (const l of lineas) {
-        if (!l.producto_id && !l.producto_nombre) continue;
-        await pool.query(
-          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal)
-           VALUES ($1, $2, $3, $4::NUMERIC, $5, $6::NUMERIC, $7::NUMERIC)`,
-          [req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, (parseFloat(l.cantidad ?? 0) * parseFloat(l.precio_unitario ?? 0)).toFixed(2)]
-        );
+      const txClient = await pool.connect();
+      try {
+        await txClient.query('BEGIN');
+        await txClient.query(`DELETE FROM lineas_pedido WHERE pedido_id = $1`, [req.params.id]);
+        const lineasValidas = lineas.filter((l: { producto_id?: string; producto_nombre?: string }) => l.producto_id || l.producto_nombre);
+        if (lineasValidas.length > 0) {
+          const placeholders: string[] = [];
+          const params: unknown[] = [];
+          let idx = 1;
+          for (const l of lineasValidas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; precio_unitario?: string|number }[]) {
+            placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
+            const subtotal = (parseFloat(String(l.cantidad ?? 0)) * parseFloat(String(l.precio_unitario ?? 0))).toFixed(2);
+            params.push(req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, subtotal);
+          }
+          await txClient.query(
+            `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal)
+             VALUES ${placeholders.join(', ')}`,
+            params
+          );
+        }
+        await txClient.query('COMMIT');
+      } catch (txErr) {
+        await txClient.query('ROLLBACK').catch(rbErr => logger.error('[PUT pedidos] ROLLBACK reemplazar lineas fallo', { err: rbErr }));
+        logger.error('[PUT pedidos] reemplazar lineas fallo', { err: txErr, pedido_id: req.params.id });
+        throw txErr;
+      } finally {
+        txClient.release();
       }
     }
 
@@ -265,6 +314,21 @@ router.put('/:id', async (req, res) => {
     );
     if (!pedido) return res.status(404).json({ error: 'Pedido no encontrado' });
 
+    // Hook automatizaciones: estados donde el pedido espera ser consumido
+    if (['confirmado', 'fabricado', 'envasado'].includes(pedido.estado)) {
+      setImmediate(() => {
+        automatizacionesService.autoFabricarPedido(pedido.id)
+          .catch(err => console.error('[auto.fabricarPedido]', err));
+        automatizacionesService.autoCompletarPedido(pedido.id)
+          .catch(err => console.error('[auto.completarPedido]', err));
+        // Aviso al cliente con trazabilidad cuando pasa a fabricado/envasado
+        if (['fabricado', 'envasado'].includes(pedido.estado)) {
+          automatizacionesService.autoEmailTrazabilidadFabricado(pedido.id)
+            .catch(err => console.error('[auto.trazabilidadFabricado]', err));
+        }
+      });
+    }
+
     res.json(pedido);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -286,25 +350,44 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id/lotes-disponibles', async (req, res) => {
   try {
     const { id } = req.params;
-    const { rows: lineas } = await pool.query(
+    const { rows: lineas } = await pool.query<{
+      producto_id: string; cantidad: string; producto_nombre: string; unidad_medida: string;
+    }>(
       `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre, p.unidad_medida
        FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
        WHERE lp.pedido_id = $1`, [id]
     );
-    const result: Record<string, any[]> = {};
-    for (const l of lineas) {
-      const { rows: lotes } = await pool.query(
-        `SELECT id, lote_interno, cantidad_actual, precio_compra, fecha_caducidad, fecha_entrada
-         FROM lotes WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC`,
-        [l.producto_id]
+    const productoIds = lineas.map(l => l.producto_id);
+    const result: Record<string, unknown[]> = {};
+    for (const l of lineas) result[l.producto_id] = [];
+
+    if (productoIds.length > 0) {
+      // 1 sola query para todos los lotes (en lugar de 1 por línea)
+      const { rows: lotes } = await pool.query<{
+        id: string; producto_id: string; lote_interno: string; cantidad_actual: string;
+        precio_compra: string | null; fecha_caducidad: string | null; fecha_entrada: string;
+      }>(
+        `SELECT id, producto_id, lote_interno, cantidad_actual, precio_compra, fecha_caducidad, fecha_entrada
+         FROM lotes
+         WHERE producto_id = ANY($1::uuid[]) AND estado = 'aprobado' AND cantidad_actual > 0
+         ORDER BY producto_id, fecha_caducidad ASC NULLS LAST, fecha_entrada ASC`,
+        [productoIds]
       );
-      result[l.producto_id] = lotes.map(lt => ({
-        ...lt, producto_nombre: l.producto_nombre, unidad_medida: l.unidad_medida, cantidad_pedida: l.cantidad,
-      }));
+      const lineaByProd = new Map(lineas.map(l => [l.producto_id, l]));
+      for (const lt of lotes) {
+        const linea = lineaByProd.get(lt.producto_id);
+        if (!linea) continue;
+        result[lt.producto_id].push({
+          ...lt,
+          producto_nombre: linea.producto_nombre,
+          unidad_medida: linea.unidad_medida,
+          cantidad_pedida: linea.cantidad,
+        });
+      }
     }
     res.json(result);
   } catch (err: unknown) {
+    logger.error('[GET lotes-disponibles]', { err, pedido_id: req.params.id });
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
@@ -352,19 +435,37 @@ router.post('/:id/consumir', async (req, res) => {
 
     if (items.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Pedido sin productos' }); }
 
-    // Verificar stock de todos los items primero
-    for (const item of items) {
-      if (item.cantidad <= 0) continue;
-      const { rows: [prod] } = await client.query(`SELECT stock_actual, nombre, unidad_medida FROM productos WHERE id = $1`, [item.producto_id]);
-      item.stock = parseFloat(prod.stock_actual);
-      item.nombre = prod.nombre;
-      item.unidad = prod.unidad_medida;
-      if (item.stock < item.cantidad) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({
-          error: 'STOCK_INSUFICIENTE',
-          mensaje: `${item.nombre}: stock ${item.stock.toFixed(3)} ${item.unidad}, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
-        });
+    // Lock TODOS los productos del pedido en una sola query (evita N+1 + race conditions
+    // entre filas distintas de la misma transacción)
+    const productoIds = items.filter(i => i.cantidad > 0).map(i => i.producto_id);
+    if (productoIds.length > 0) {
+      const { rows: prodRows } = await client.query<{
+        id: string; stock_actual: string; nombre: string; unidad_medida: string;
+      }>(
+        `SELECT id, stock_actual, nombre, unidad_medida
+         FROM productos WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+        [productoIds]
+      );
+      const prodMap = new Map(prodRows.map(p => [p.id, p]));
+
+      // Verificar stock con datos ya bloqueados
+      for (const item of items) {
+        if (item.cantidad <= 0) continue;
+        const prod = prodMap.get(item.producto_id);
+        if (!prod) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: `Producto ${item.producto_id} no encontrado` });
+        }
+        item.stock = parseFloat(prod.stock_actual);
+        item.nombre = prod.nombre;
+        item.unidad = prod.unidad_medida;
+        if (item.stock < item.cantidad) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            error: 'STOCK_INSUFICIENTE',
+            mensaje: `${item.nombre}: stock ${item.stock.toFixed(3)} ${item.unidad}, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
+          });
+        }
       }
     }
 
@@ -437,6 +538,16 @@ router.post('/:id/consumir', async (req, res) => {
     // Push-based: check stock alerts for consumed products
     const consumedIds = items.map(i => i.producto_id);
     alertaService.checkStockMinimo(consumedIds).catch(() => {});
+
+    // Automatizaciones: cada producto consumido puede haber bajado del mínimo
+    setImmediate(() => {
+      for (const id of consumedIds) {
+        automatizacionesService.checkStockAndTrigger(id).catch(err => console.error('[auto.pedido-consumir]', err));
+      }
+      // Auto-email albarán al cliente si toggle activo
+      automatizacionesService.autoEmailAlbaran(req.params.id)
+        .catch(err => console.error('[auto.email-albaran]', err));
+    });
 
     return res.json({ ok: true, consumidos });
   } catch (err: unknown) {
@@ -709,15 +820,17 @@ router.post('/:id/enviar-albaran', async (req, res) => {
     const { rows: lineas } = await pool.query(
       `SELECT lp.*, p.nombre AS producto_nombre_rel FROM lineas_pedido lp LEFT JOIN productos p ON p.id = lp.producto_id WHERE lp.pedido_id = $1`, [id]);
 
-    // Generate full albaran PDF by requesting our own endpoint
+    // Generate full albaran PDF by requesting our own endpoint (timeout 10s)
     const pdfBuffer = await new Promise<Buffer>((resolve, reject) => {
       const port = process.env.PORT || 3001;
-      http.get(`http://localhost:${port}/api/pedidos/${id}/albaran.pdf`, (pdfRes: any) => {
+      const req = http.get(`http://localhost:${port}/api/pedidos/${id}/albaran.pdf`, { timeout: 10_000 }, (pdfRes: any) => {
         const chunks: Buffer[] = [];
         pdfRes.on('data', (c: Buffer) => chunks.push(c));
         pdfRes.on('end', () => resolve(Buffer.concat(chunks)));
         pdfRes.on('error', reject);
-      }).on('error', reject);
+      });
+      req.on('timeout', () => req.destroy(new Error('PDF_TIMEOUT')));
+      req.on('error', reject);
     });
 
     // Attachments: albaran PDF
@@ -731,28 +844,38 @@ router.post('/:id/enviar-albaran', async (req, res) => {
       try {
         const trazBuffer = await new Promise<Buffer>((resolve, reject) => {
           const port = process.env.PORT || 3001;
-          http.get(`http://localhost:${port}/api/produccion/${pedido.orden_produccion_id}/trazabilidad.pdf`, (r: any) => {
+          const req = http.get(`http://localhost:${port}/api/produccion/${pedido.orden_produccion_id}/trazabilidad.pdf`, { timeout: 10_000 }, (r: any) => {
             const ch: Buffer[] = [];
             r.on('data', (c: Buffer) => ch.push(c));
             r.on('end', () => resolve(Buffer.concat(ch)));
             r.on('error', reject);
-          }).on('error', reject);
+          });
+          req.on('timeout', () => req.destroy(new Error('TRAZABILIDAD_TIMEOUT')));
+          req.on('error', reject);
         });
         attachments.push({ filename: `trazabilidad-${pedido.numero_pedido}.pdf`, content: trazBuffer, contentType: 'application/pdf' });
-      } catch { /* no trazabilidad */ }
+      } catch (trazErr) { logger.error('[enviar-albaran] trazabilidad fail', { err: trazErr }); }
 
-      // Fotos + documentos
+      // Fotos + documentos. Validamos que el path resuelto está dentro de uploads/
+      // (anti path-traversal: si la URL tiene ../../ no escapará del sandbox).
+      const uploadsRoot = path.resolve(process.cwd(), 'uploads');
+      const safeJoin = (rel: string): string | null => {
+        const resolved = path.resolve(process.cwd(), rel.replace(/^\//, ''));
+        if (!resolved.startsWith(uploadsRoot + path.sep)) return null;
+        return resolved;
+      };
       const { rows: [orden] } = await pool.query(`SELECT foto_urls, archivos, registro_limpieza FROM ordenes_produccion WHERE id = $1`, [pedido.orden_produccion_id]);
       if (orden) {
         const fotos: string[] = orden.foto_urls ?? [];
         for (let i = 0; i < fotos.length; i++) {
-          const p = path.join(process.cwd(), fotos[i].replace(/^\//, ''));
-          if (fs.existsSync(p)) attachments.push({ filename: `foto-lote-${i + 1}${path.extname(p)}`, path: p });
+          const p = safeJoin(fotos[i]);
+          if (p && fs.existsSync(p)) attachments.push({ filename: `foto-lote-${i + 1}${path.extname(p)}`, path: p });
         }
         const archivos: { url: string; nombre: string }[] = orden.archivos ?? [];
         for (const a of archivos) {
-          const p = path.join(process.cwd(), a.url.replace(/^\//, ''));
-          if (fs.existsSync(p)) attachments.push({ filename: a.nombre, path: p });
+          const p = safeJoin(a.url);
+          // filename en el adjunto: solo basename para evitar headers raros
+          if (p && fs.existsSync(p)) attachments.push({ filename: path.basename(a.nombre || path.basename(p)), path: p });
         }
       }
     }
@@ -777,6 +900,13 @@ router.post('/:id/enviar-albaran', async (req, res) => {
       attachments,
     });
 
+    // Marcar como enviado para evitar reenvíos automáticos
+    await pool.query(
+      `UPDATE pedidos SET albaran_enviado = TRUE, albaran_enviado_at = NOW(), albaran_enviado_a = $1
+       WHERE id = $2`,
+      [email, id]
+    );
+
     return res.json({ ok: true, enviado_a: email });
   } catch (err) {
     console.error('[enviarAlbaran]', err);
@@ -790,10 +920,13 @@ export async function webhookHandler(req: Request, res: Response) {
   try {
     const { cliente_nombre, cliente_email, producto_nombre, cantidad, unidad_medida, fecha_entrega, asunto, cuerpo, token } = req.body;
 
-    // Validate webhook token (required)
+    // Validate webhook token con comparación constant-time (anti timing attack)
     const expectedToken = process.env.WEBHOOK_TOKEN;
     if (!expectedToken) return res.status(500).json({ error: 'Webhook no configurado' });
-    if (!token || token !== expectedToken) {
+    const tokenStr = typeof token === 'string' ? token : '';
+    const a = Buffer.from(tokenStr);
+    const b = Buffer.from(expectedToken);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       return res.status(401).json({ error: 'Token invalido' });
     }
 

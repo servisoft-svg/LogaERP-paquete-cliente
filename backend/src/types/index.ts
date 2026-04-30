@@ -96,7 +96,9 @@ export interface ApiError {
   detalle?: string;
 }
 
-// Tipo helper: convierte strings NUMERIC a number
-export function toNum(val: string | number): number {
-  return typeof val === 'number' ? val : parseFloat(val);
+// Tipo helper: convierte strings NUMERIC a number, devuelve `def` si null/undefined/NaN
+export function toNum(val: string | number | null | undefined, def = 0): number {
+  if (val === null || val === undefined) return def;
+  const n = typeof val === 'number' ? val : parseFloat(val);
+  return Number.isFinite(n) ? n : def;
 }
