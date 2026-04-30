@@ -59,22 +59,29 @@ COMMENT ON COLUMN productos.dias_anticipacion IS 'Días entre detección y fecha
 COMMENT ON COLUMN productos.cantidad_promedio_mensual IS 'Manual override del consumo promedio. NULL = se calcula desde stock_moves últimos 90d.';
 
 -- ─── 3. automatizaciones_log ───────────────────────────────────
-CREATE TYPE tipo_automatizacion AS ENUM (
-    'orden_compra_creada',
-    'email_proveedor_enviado',
-    'orden_fabricacion_creada',
-    'orden_envasado_creada',
-    'lote_aprobado_qc',
-    'duplicado_evitado',
-    'error'
-);
+-- ENUMs envueltos en DO/EXCEPTION → idempotentes para re-runs.
+DO $$ BEGIN
+  CREATE TYPE tipo_automatizacion AS ENUM (
+      'orden_compra_creada',
+      'email_proveedor_enviado',
+      'orden_fabricacion_creada',
+      'orden_envasado_creada',
+      'lote_aprobado_qc',
+      'duplicado_evitado',
+      'error'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE resultado_automatizacion AS ENUM (
-    'exito',
-    'pendiente_reintento',
-    'fallo_definitivo',
-    'omitido'
-);
+DO $$ BEGIN
+  CREATE TYPE resultado_automatizacion AS ENUM (
+      'exito',
+      'pendiente_reintento',
+      'fallo_definitivo',
+      'omitido'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS automatizaciones_log (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
