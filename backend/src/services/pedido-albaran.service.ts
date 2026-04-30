@@ -168,11 +168,19 @@ class PedidoAlbaranService {
   }
 
   private async fetchPdfInterno(pathUrl: string): Promise<Buffer> {
+    // Whitelist estricta de paths internos permitidos (anti-SSRF). Cualquier
+    // ruta fuera del patrón se rechaza antes de abrir el socket. Si en el
+    // futuro se añaden nuevos PDFs internos, ampliar la lista aquí.
+    const ALLOWED_PDF = /^\/api\/(pedidos|produccion)\/[A-Za-z0-9-]+\/(albaran|trazabilidad)\.pdf(\?.*)?$/;
+    if (!ALLOWED_PDF.test(pathUrl)) {
+      throw new Error(`PDF_PATH_NO_PERMITIDO:${pathUrl.slice(0, 80)}`);
+    }
     const secret = process.env.JWT_SECRET;
     if (!secret) throw new Error('JWT_SECRET_MISSING');
     const adminId = (await this.resolveAdminId()) ?? '00000000-0000-0000-0000-000000000000';
     // Token de sistema con TTL muy corto (60s) firmado con el mismo JWT_SECRET
-    const token = jwt.sign({ id: adminId, rol: 'admin', sistema: true }, secret, { expiresIn: '60s' });
+    // y algoritmo pinneado a HS256 (anti-downgrade alg=none).
+    const token = jwt.sign({ id: adminId, rol: 'admin', sistema: true }, secret, { expiresIn: '60s', algorithm: 'HS256' });
     const port = process.env.PORT ?? 3001;
     return new Promise<Buffer>((resolve, reject) => {
       const req = http.get({

@@ -180,15 +180,17 @@ router.post('/refresh', async (req, res) => {
 
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET ?? '';
+    const JWT_VERIFY_OPTS = { algorithms: ['HS256' as const] };
     let decoded: { id: string; rol: string; iat?: number; exp?: number };
     try {
-      decoded = jwt.verify(auth, JWT_SECRET) as typeof decoded;
+      decoded = jwt.verify(auth, JWT_SECRET, JWT_VERIFY_OPTS) as typeof decoded;
     } catch (err: unknown) {
-      // Token expirado: aceptarlo si la expiración fue hace <30 días
+      // Token expirado: aceptarlo solo si la expiración fue hace <24h.
+      // (Antes 30 días — ventana excesiva para tokens robados.)
       if (err instanceof Error && err.name === 'TokenExpiredError') {
-        const payload = jwt.verify(auth, JWT_SECRET, { ignoreExpiration: true }) as typeof decoded;
+        const payload = jwt.verify(auth, JWT_SECRET, { ...JWT_VERIFY_OPTS, ignoreExpiration: true }) as typeof decoded;
         const ageS = Date.now() / 1000 - (payload.exp ?? 0);
-        if (ageS > 30 * 86400) return res.status(401).json({ error: 'Sesion expirada' });
+        if (ageS > 86400) return res.status(401).json({ error: 'Sesion expirada' });
         decoded = payload;
       } else {
         return res.status(401).json({ error: 'Token invalido' });

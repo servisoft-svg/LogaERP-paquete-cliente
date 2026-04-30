@@ -18,7 +18,7 @@ import pedidosRoutes, { webhookHandler } from './routes/pedidos.routes';
 import configuracionRoutes    from './routes/configuracion.routes';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
-import { authMiddleware, adminOnly } from './middleware/auth';
+import { authMiddleware, adminOnly, verifyToken } from './middleware/auth';
 import { traceIdMiddleware } from './middleware/traceId';
 import { auditoriaMiddleware } from './middleware/auditoria';
 import { pool }          from './db/pool';
@@ -91,20 +91,10 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(auditoriaMiddleware);
-// Uploads protected: require auth token in query or header
-import jwt from 'jsonwebtoken';
-app.use('/uploads', (req, res, next) => {
-  const rawToken = req.query.token;
-  const token = (typeof rawToken === 'string' ? rawToken : '') ||
-    req.headers.authorization?.replace('Bearer ', '') || '';
-  if (!token) return res.status(401).json({ error: 'No autorizado' });
-  try {
-    jwt.verify(token, process.env.JWT_SECRET as string);
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Token invalido' });
-  }
-}, express.static(path.join(process.cwd(), 'uploads')));
+// Uploads protegidos por token (JWT con algoritmo pinneado vía verifyToken).
+// La validación de ownership real se hace en uploadsAuthMiddleware (Fix #6).
+import { uploadsAuthMiddleware } from './middleware/uploadsAuth';
+app.use('/uploads', uploadsAuthMiddleware, express.static(path.join(process.cwd(), 'uploads')));
 
 app.get('/health', async (_req, res) => {
   try {
