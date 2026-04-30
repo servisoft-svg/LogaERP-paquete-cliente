@@ -124,7 +124,7 @@ router.get('/:id', async (req, res) => {
               -- restando reservas activas. Es lo que la fabricación puede consumir.
               COALESCE((
                 SELECT SUM(GREATEST(0, l.cantidad_actual
-                       - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id), 0)))
+                       - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.estado = 'activa'), 0)))
                 FROM lotes l
                 WHERE l.producto_id = p.id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
               ), 0) AS stock_disponible

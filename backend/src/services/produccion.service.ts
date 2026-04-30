@@ -132,7 +132,7 @@ class ProduccionService {
         // Lotes disponibles FIFO (excluir cantidades reservadas)
         const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(
           `SELECT l.id, l.cantidad_actual, l.precio_compra,
-             l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS cantidad_disponible,
+             l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS cantidad_disponible,
              l.fecha_caducidad, l.fecha_entrada
            FROM lotes l
            WHERE l.producto_id = $1

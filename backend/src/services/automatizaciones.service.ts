@@ -765,16 +765,16 @@ class AutomatizacionesService {
           `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre,
                   COALESCE((
                     SELECT SUM(rs.cantidad) FROM reservas_stock rs
-                    WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id
+                    WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id AND rs.estado = 'activa'
                   ), 0) AS reservado,
                   COALESCE((
                     SELECT SUM(GREATEST(0, l.cantidad_actual
-                           - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1), 0)))
+                           - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1 AND rs.estado = 'activa'), 0)))
                     FROM lotes l WHERE l.producto_id = lp.producto_id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
                   ), 0) AS libre,
                   (SELECT string_agg(DISTINCT pp.numero_pedido, ', ')
                    FROM reservas_stock rs2 JOIN pedidos pp ON pp.id = rs2.pedido_id
-                   WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1) AS bloqueado_por
+                   WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1 AND rs2.estado = 'activa') AS bloqueado_por
            FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
            WHERE lp.pedido_id = $1`,
           [pedidoId]
@@ -815,7 +815,7 @@ class AutomatizacionesService {
             id: string; cantidad_actual: string; disponible: string;
           }>(
             `SELECT l.id, l.cantidad_actual,
-                    l.cantidad_actual - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $2), 0) AS disponible
+                    l.cantidad_actual - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $2 AND rs.estado = 'activa'), 0) AS disponible
              FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
              ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC FOR UPDATE`,
             [item.producto_id, pedidoId]
@@ -848,7 +848,7 @@ class AutomatizacionesService {
         }
 
         // 4) Cerrar pedido
-        await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [pedidoId]);
+        await client.query(`UPDATE reservas_stock SET estado = 'consumida' WHERE pedido_id = $1 AND estado = 'activa'`, [pedidoId]);
         await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [pedidoId]);
         await client.query('COMMIT');
       } catch (err) {

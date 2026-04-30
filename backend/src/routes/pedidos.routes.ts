@@ -158,7 +158,7 @@ router.post('/', async (req, res) => {
           for (const item of itemsToReserve) {
             const { rows: lotes } = await client.query(
               `SELECT l.id,
-                      l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
+                      l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS disponible
                FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
                ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
                FOR UPDATE`,
@@ -245,7 +245,7 @@ router.put('/:id', async (req, res) => {
           try {
             await resClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
             const { rows: lotes } = await resClient.query(
-              `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
+              `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS disponible
                FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
                ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
                FOR UPDATE`,
@@ -572,8 +572,10 @@ router.post('/:id/consumir', async (req, res) => {
       consumidos.push(`${item.nombre}: ${item.cantidad} ${item.unidad}`);
     }
 
-    // Release reservas + set estado completado
-    await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [id]);
+    // Marcar reservas del pedido como consumidas (preserva auditoría +
+    // mantiene visibilidad coherente del cálculo de stock disponible
+    // hasta que la transacción haga COMMIT). Antes era DELETE.
+    await client.query(`UPDATE reservas_stock SET estado = 'consumida' WHERE pedido_id = $1 AND estado = 'activa'`, [id]);
     await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [id]);
     await client.query('COMMIT');
     invalidarCacheFinanzas();

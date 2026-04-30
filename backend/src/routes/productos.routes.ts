@@ -51,7 +51,7 @@ router.get('/', async (req, res) => {
     let sql = `
       SELECT p.*, pv.nombre AS proveedor_nombre, pv.email AS proveedor_email,
         pg.nombre AS granel_nombre, pg.stock_actual AS granel_stock, pg.unidad_medida AS granel_unidad,
-        p.stock_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.producto_id = p.id), 0) AS stock_disponible,
+        p.stock_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.producto_id = p.id AND r.estado = 'activa'), 0) AS stock_disponible,
         CASE WHEN p.stock_minimo > 0 AND p.stock_actual <= p.stock_minimo THEN TRUE ELSE FALSE END AS alerta_activa,
         CASE
           WHEN p.stock_minimo > 0 AND p.stock_actual <= p.stock_minimo THEN 'rojo'
