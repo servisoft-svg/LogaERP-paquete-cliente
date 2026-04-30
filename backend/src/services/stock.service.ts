@@ -1,4 +1,4 @@
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import { toNum } from '../types';
 
 class StockService {
@@ -59,12 +59,24 @@ class StockService {
     const client = await pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+      // Advisory lock por producto: serializa con /consumir, producción y automatizaciones.
+      await acquireProductLocks(client, [payload.producto_id]);
 
       const { rows: [prod] } = await client.query<{ stock_actual: string }>(
         `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`,
         [payload.producto_id]
       );
       if (!prod) throw new Error('PRODUCTO_NO_ENCONTRADO');
+
+      // Validar que el lote pertenece al producto antes de tocarlo (evita corrupción cruzada).
+      if (payload.lote_id) {
+        const { rows: [lote] } = await client.query<{ producto_id: string }>(
+          `SELECT producto_id FROM lotes WHERE id = $1 FOR UPDATE`,
+          [payload.lote_id]
+        );
+        if (!lote) throw new Error('LOTE_NO_ENCONTRADO');
+        if (lote.producto_id !== payload.producto_id) throw new Error('LOTE_NO_PERTENECE_AL_PRODUCTO');
+      }
 
       const antes   = toNum(prod.stock_actual);
       const despues = antes + payload.cantidad;

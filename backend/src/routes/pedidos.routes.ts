@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
@@ -439,6 +439,8 @@ router.post('/:id/consumir', async (req, res) => {
     // entre filas distintas de la misma transacción)
     const productoIds = items.filter(i => i.cantidad > 0).map(i => i.producto_id);
     if (productoIds.length > 0) {
+      // Advisory lock por producto: serializa con producción/ajustes/automatizaciones.
+      await acquireProductLocks(client, productoIds);
       const { rows: prodRows } = await client.query<{
         id: string; stock_actual: string; nombre: string; unidad_medida: string;
       }>(
@@ -496,9 +498,8 @@ router.post('/:id/consumir', async (req, res) => {
       }
 
       let restante = item.cantidad;
-      // Refetch actual stock inside transaction for accurate stock_moves
-      const { rows: [freshStock] } = await client.query(`SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [item.producto_id]);
-      let stockAntes = parseFloat(freshStock?.stock_actual ?? '0');
+      // Stock ya bloqueado y validado arriba con FOR UPDATE — usar item.stock como punto de partida.
+      let stockAntes = item.stock;
       for (const lote of lotes) {
         if (restante <= 0) break;
         const disponible = parseFloat(lote.cantidad_actual);

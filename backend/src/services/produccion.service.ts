@@ -12,7 +12,7 @@
  */
 
 import { PoolClient } from 'pg';
-import { pool, withSerializableTransaction } from '../db/pool';
+import { pool, withSerializableTransaction, acquireProductLocks } from '../db/pool';
 import { toNum }  from '../types';
 import { alertaService } from './alerta.service';
 import { automatizacionesService } from './automatizaciones.service';
@@ -116,6 +116,9 @@ class ProduccionService {
 
       // Pre-fetch: lock all ingredient products for stock update (avoids N+1 per lote)
       const ingProductIds = ingredientes.map(i => i.materia_prima_id);
+      // Advisory lock por producto: serializa con /consumir y otros mutadores de stock.
+      // Producto terminado también incluido (se crea lote PT abajo).
+      await acquireProductLocks(client, [...ingProductIds, receta.producto_id]);
       const { rows: stockRows } = await client.query<{ id: string; stock_actual: string }>(
         `SELECT id, stock_actual FROM productos WHERE id = ANY($1) FOR UPDATE`,
         [ingProductIds]
