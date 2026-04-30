@@ -1017,13 +1017,18 @@ class AutomatizacionesService {
         const cantidadFinal = Math.max(rendimiento, cantidadKg);
         const fecha = pedido.fecha_entrega ?? new Date(Date.now() + (cfg.dias_anticipacion_default ?? 2) * 86_400_000).toISOString().slice(0, 10);
 
+        // Crear orden en estado 'borrador'. NUNCA en 'confirmada' desde aquí:
+        // confirmar = descontar stock real, y eso debe ser una acción explícita
+        // (operario o llamada directa a produccionService.confirmarOrden), no
+        // un side-effect implícito de un trigger automático. Crear en borrador
+        // garantiza que no hay descuento doble si esta función se reentra.
         const { rows: [orden] } = await pool.query<{ id: string; numero_orden: string }>(
           `INSERT INTO ordenes_produccion
              (numero_orden, receta_id, cantidad_planificada, fecha_planificada, estado, tipo_orden,
               cliente, cliente_id, notas)
            VALUES (
              'OP-AUTO-' || to_char(NOW(), 'YYYYMMDD-HH24MISS'),
-             $1, $2::NUMERIC, $3::DATE, 'confirmada', 'fabricacion',
+             $1, $2::NUMERIC, $3::DATE, 'borrador', 'fabricacion',
              $4, $5, $6
            )
            RETURNING id, numero_orden`,
@@ -1034,7 +1039,10 @@ class AutomatizacionesService {
           ]
         );
 
-        // Linkar pedido + cambiar estado
+        // Linkar pedido + cambiar estado.
+        // Pedido pasa a 'en_produccion' aunque la orden esté en borrador: el
+        // operario debe revisar/confirmar la orden. orden_produccion_id ya
+        // linkado evita re-creación si autoFabricarPedido se reentra.
         await pool.query(
           `UPDATE pedidos SET orden_produccion_id = $1, estado = 'en_produccion' WHERE id = $2`,
           [orden.id, pedidoId]
