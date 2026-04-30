@@ -4,15 +4,46 @@ import { invalidarCacheFinanzas } from './finanzas.routes';
 
 const router = Router();
 
+// Validaciones reusables (Fix #24) — POST y bulk import.
+const TIPOS_VALIDOS = new Set(['materia_prima', 'producto_fabricado', 'producto_envasado', 'material_embalaje']);
+const UNIDADES_VALIDAS = new Set(['kg', 'g', 'l', 'ml', 'unidad', 'm', 'cm', 'caja', 'rollo']);
+function validarProductoPayload(p: any): string | null {
+  if (!p || typeof p !== 'object') return 'payload vacío';
+  if (!p.nombre || typeof p.nombre !== 'string' || p.nombre.trim().length === 0) return 'nombre obligatorio';
+  if (p.nombre.length > 200) return 'nombre máximo 200 caracteres';
+  if (!p.tipo || !TIPOS_VALIDOS.has(p.tipo)) return `tipo debe ser uno de: ${[...TIPOS_VALIDOS].join(', ')}`;
+  if (p.unidad_medida && !UNIDADES_VALIDAS.has(p.unidad_medida)) return `unidad_medida no válida: ${p.unidad_medida}`;
+  if (p.codigo && (typeof p.codigo !== 'string' || p.codigo.length > 50)) return 'codigo máximo 50 caracteres';
+  if (p.descripcion && (typeof p.descripcion !== 'string' || p.descripcion.length > 2000)) return 'descripcion máximo 2000 caracteres';
+  for (const f of ['stock_minimo', 'stock_maximo', 'precio_unitario', 'precio_venta'] as const) {
+    if (p[f] != null) {
+      const n = Number(p[f]);
+      if (!Number.isFinite(n)) return `${f} debe ser un número finito`;
+      if (n < 0) return `${f} no puede ser negativo`;
+      if (n > 1e9) return `${f} excede el máximo permitido (1e9)`;
+    }
+  }
+  if (p.stock_minimo != null && p.stock_maximo != null && Number(p.stock_minimo) > Number(p.stock_maximo)) {
+    return 'stock_minimo no puede ser mayor que stock_maximo';
+  }
+  return null;
+}
+
 // POST /api/productos/importar
 router.post('/importar', async (req, res) => {
   try {
     const { productos } = req.body;
     if (!Array.isArray(productos)) return res.status(400).json({ error: 'productos debe ser un array' });
+    if (productos.length > 1000) return res.status(400).json({ error: 'Máximo 1000 productos por import' });
 
     let creados = 0;
-    for (const p of productos) {
-      if (!p.nombre || !p.tipo) continue;
+    const errores: string[] = [];
+    for (const [i, p] of productos.entries()) {
+      const validationErr = validarProductoPayload(p);
+      if (validationErr) {
+        errores.push(`fila ${i}: ${validationErr}`);
+        continue;
+      }
       // Auto-generate code if missing
       let codigo = p.codigo;
       if (!codigo) {
@@ -38,7 +69,7 @@ router.post('/importar', async (req, res) => {
       );
       creados++;
     }
-    res.json({ ok: true, creados });
+    res.json({ ok: true, creados, ...(errores.length > 0 ? { errores } : {}) });
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
@@ -105,18 +136,14 @@ router.get('/:id', async (req, res) => {
 // POST /api/productos
 router.post('/', async (req, res) => {
   try {
+    const validationErr = validarProductoPayload(req.body);
+    if (validationErr) return res.status(400).json({ error: validationErr });
+
     let { codigo } = req.body;
     const {
       nombre, descripcion, tipo, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
     } = req.body;
-
-    if (!nombre || !tipo) {
-      return res.status(400).json({ error: 'nombre y tipo son obligatorios' });
-    }
-    if (stock_minimo != null && stock_maximo != null && Number(stock_minimo) > Number(stock_maximo)) {
-      return res.status(400).json({ error: 'stock_minimo no puede ser mayor que stock_maximo' });
-    }
 
     // Auto-generar codigo si no viene
     if (!codigo) {

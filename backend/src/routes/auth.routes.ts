@@ -151,13 +151,12 @@ router.get('/login-logs', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // GET /api/auth/me — verify token
-router.get('/me', async (req, res) => {
+// authMiddleware ya valida el JWT (con algoritmo HS256 pinneado vía verifyToken).
+// Antes hacía la validación inline; centralizado para consistencia (Fix #23).
+router.get('/me', authMiddleware, async (req, res) => {
   try {
-    const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (!auth) return res.status(401).json({ error: 'No autorizado' });
-
-    const decoded = verifyToken(auth);
-    const [userId] = [decoded.id];
+    const userId = (req as any).user?.id;
+    if (!userId) return res.status(401).json({ error: 'No autorizado' });
 
     const { rows: [user] } = await pool.query(
       `SELECT id, nombre, email, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
@@ -167,7 +166,7 @@ router.get('/me', async (req, res) => {
 
     return res.json(user);
   } catch {
-    return res.status(401).json({ error: 'Token invalido' });
+    return res.status(500).json({ error: 'Error interno' });
   }
 });
 

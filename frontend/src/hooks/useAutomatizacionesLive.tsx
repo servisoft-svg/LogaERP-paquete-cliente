@@ -102,10 +102,30 @@ export function useAutomatizacionesLive() {
       })
       .catch(() => {});
 
-    intervalRef.current = window.setInterval(tick, 30_000);
+    // Pausar polling cuando la pestaña está oculta (Fix #22) — evita
+    // requests inútiles + reduces dedup effort al volver. También evita
+    // doble interval en StrictMode dev mode (cleanup limpia siempre).
+    const startInterval = () => {
+      if (intervalRef.current) return; // ya activo
+      intervalRef.current = window.setInterval(tick, 30_000);
+    };
+    const stopInterval = () => {
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) stopInterval();
+      else { startInterval(); tick(); /* refresca al volver para sincronizar */ }
+    };
+    if (!document.hidden) startInterval();
+    document.addEventListener('visibilitychange', onVisibility);
+
     return () => {
       mounted = false;
-      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      stopInterval();
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [navigate]);
 }

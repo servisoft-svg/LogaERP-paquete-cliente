@@ -68,18 +68,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Auto-refresh proactivo cada 6h: token TTL 7d, refresca pronto para no
   // depender del 401 catch. También refresca al volver a la pestaña tras
-  // estar inactivo.
+  // estar inactivo, con cooldown de 60s para evitar spam si el usuario
+  // alterna pestañas rápido (Fix #21).
   useEffect(() => {
     if (!user) return;
     let mounted = true;
+    let lastRefresh = 0;
+    let inFlight: Promise<void> | null = null;
+    const COOLDOWN_MS = 60 * 1000;
+
     const refrescar = async () => {
-      try {
-        const { data } = await api.post('/auth/refresh');
-        const { token } = data as { token: string };
-        const storage = localStorage.getItem('loga_token') ? localStorage : sessionStorage;
-        storage.setItem('loga_token', token);
-        api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      } catch { /* el interceptor maneja logout si es definitivo */ }
+      // Dedup: si hay otro refresh en vuelo, espera a su resultado.
+      if (inFlight) return inFlight;
+      // Cooldown: no refrescar si hace menos de 60s
+      if (Date.now() - lastRefresh < COOLDOWN_MS) return;
+      lastRefresh = Date.now();
+      inFlight = (async () => {
+        try {
+          const { data } = await api.post('/auth/refresh');
+          const { token } = data as { token: string };
+          const storage = localStorage.getItem('loga_token') ? localStorage : sessionStorage;
+          storage.setItem('loga_token', token);
+          api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+        } catch { /* el interceptor maneja logout si es definitivo */ }
+        finally { inFlight = null; }
+      })();
+      return inFlight;
     };
     const interval = setInterval(refrescar, 6 * 60 * 60 * 1000); // 6 horas
     const onVisible = () => { if (mounted && document.visibilityState === 'visible') refrescar(); };

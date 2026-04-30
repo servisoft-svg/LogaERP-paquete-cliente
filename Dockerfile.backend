@@ -1,22 +1,48 @@
-FROM node:20-alpine
+# =============================================================
+# Dockerfile.backend — multi-stage (Fix #25)
+#   Stage 1 (build): instala devDeps, compila TS → JS
+#   Stage 2 (runtime): solo prod deps + dist compilado, USER node
+#
+# Beneficios:
+#   - Imagen final ~150MB menor (sin TypeScript, tsx, devDeps)
+#   - Sin tsx en runtime (un proceso menos, arranque más rápido)
+#   - Reproducible (npm ci + lockfile estricto)
+# =============================================================
+
+# ── Stage 1: build ───────────────────────────────────────────
+FROM node:20-alpine AS build
+
+WORKDIR /build
+
+# Copiar manifest + lockfile y instalar TODO (incl. devDeps)
+COPY backend/package*.json ./
+RUN npm ci --no-audit --no-fund
+
+# Copiar source y compilar
+COPY backend/tsconfig.json ./
+COPY backend/src ./src
+RUN npx tsc
+
+# ── Stage 2: runtime ─────────────────────────────────────────
+FROM node:20-alpine AS runtime
 
 WORKDIR /app
 
-# Tini para reaping de procesos zombie + manejo de señales
+# tini para reaping zombie + manejo SIGTERM, wget para healthcheck
 RUN apk add --no-cache tini wget
 
-# Copiar lockfile + manifest primero para cachear capa de deps
+# Solo manifest + lockfile, instalar prod deps únicamente
 COPY backend/package*.json ./
-
-# npm ci usa package-lock.json exacto (reproducible) y falla si no coincide.
-# Más seguro que npm install para builds de producción.
 RUN npm ci --omit=dev --no-audit --no-fund \
- && npm install --no-save tsx typescript \
  && npm cache clean --force
 
-COPY backend/ ./
+# Copiar el código compilado desde la stage de build
+COPY --from=build /build/dist ./dist
 
-# Crear directorios runtime con permisos para el usuario node (uid 1000)
+# Copiar assets necesarios en runtime (PDFs, plantillas, etc.)
+COPY backend/assets ./assets
+
+# Crear directorios runtime con ownership correcto
 RUN mkdir -p uploads backups logs \
  && chown -R node:node /app
 
@@ -24,10 +50,8 @@ USER node
 
 EXPOSE 3001
 
-# Healthcheck: el contenedor se marca unhealthy si /api/health no responde 200
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD wget -qO- http://127.0.0.1:3001/api/health || exit 1
 
-# Tini como init: maneja SIGTERM correctamente y reaps procesos huérfanos
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["npx", "tsx", "src/index.ts"]
+CMD ["node", "dist/index.js"]

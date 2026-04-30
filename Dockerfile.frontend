@@ -24,10 +24,8 @@ RUN chown -R nginx:nginx /var/cache/nginx /var/run /var/log/nginx \
  && touch /var/run/nginx.pid \
  && chown nginx:nginx /var/run/nginx.pid
 
-# nginx oficial corre como root para bind en :80; movemos a :8080 + USER nginx
-# para drop de privilegios. El reverse proxy / docker-compose mapea 80→8080.
-RUN sed -i 's/listen[[:space:]]\+80;/listen 8080;/' /etc/nginx/conf.d/default.conf
-
+# nginx oficial corre como root para bind en :80; nginx.conf ya define
+# listen 8080 (ver nginx.conf). docker-compose mapea host:80 → container:8080.
 USER nginx
 
 EXPOSE 8080
