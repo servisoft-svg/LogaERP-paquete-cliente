@@ -17,7 +17,7 @@
  * resultado='fallo_definitivo' para no romper la respuesta HTTP del caller.
  */
 
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import { emailService } from './email.service';
 
 interface ConfigAuto {
@@ -706,95 +706,109 @@ class AutomatizacionesService {
    * producto envasado, ejecuta el consumo FEFO y deja el pedido en 'completado'.
    */
   async autoCompletarPedido(pedidoId: string): Promise<void> {
+    let pedidoNumero: string | null = null;
     try {
       const cfg = await this.getConfig();
       if (!cfg.auto_completar_pedidos_con_stock) return;
 
-      // Lock pre-emptivo (NOWAIT) para evitar carrera entre hook POST/PUT y sweep cron.
-      // Si otro proceso ya tiene la fila bloqueada → 55P03 → salimos sin ruido.
-      const lockClient = await pool.connect();
-      try {
-        await lockClient.query('BEGIN');
-        const { rows: [locked] } = await lockClient.query<{
-          id: string; estado: string;
-        }>(
-          `SELECT id, estado FROM pedidos WHERE id = $1 FOR UPDATE NOWAIT`,
-          [pedidoId]
-        );
-        await lockClient.query('COMMIT');
-        if (!locked || !['confirmado', 'fabricado', 'envasado'].includes(locked.estado)) return;
-      } catch (lockErr: unknown) {
-        await lockClient.query('ROLLBACK').catch(rbErr => console.error('[autoCompletarPedido] ROLLBACK lock fallo', rbErr));
-        const code = (lockErr as { code?: string })?.code;
-        if (code === '55P03') return; // lock_not_available — otro proceso ya lo está tratando
-        throw lockErr;
-      } finally {
-        lockClient.release();
-      }
-
-      const { rows: [pedido] } = await pool.query<{
-        id: string; estado: string; cliente_email: string | null; numero_pedido: string;
-      }>(
-        `SELECT p.id, p.estado, p.numero_pedido,
-                COALESCE(p.cliente_email, c.email) AS cliente_email
-         FROM pedidos p
-         LEFT JOIN clientes c ON c.id = p.cliente_id
-         WHERE p.id = $1`,
-        [pedidoId]
-      );
-      if (!pedido || !['confirmado', 'fabricado', 'envasado'].includes(pedido.estado)) return;
-
-      // Una línea es completable si sus reservas propias cubren la cantidad
-      // O hay stock libre suficiente en lotes aprobados (no reservado por otros).
-      const { rows: lineas } = await pool.query<{
-        producto_id: string; cantidad: string; reservado: string; libre: string;
-        producto_nombre: string; bloqueado_por: string | null;
-      }>(
-        `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre,
-                COALESCE((
-                  SELECT SUM(rs.cantidad) FROM reservas_stock rs
-                  WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id
-                ), 0) AS reservado,
-                COALESCE((
-                  SELECT SUM(GREATEST(0, l.cantidad_actual
-                         - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1), 0)))
-                  FROM lotes l WHERE l.producto_id = lp.producto_id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-                ), 0) AS libre,
-                (SELECT string_agg(DISTINCT pp.numero_pedido, ', ')
-                 FROM reservas_stock rs2 JOIN pedidos pp ON pp.id = rs2.pedido_id
-                 WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1) AS bloqueado_por
-         FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
-         WHERE lp.pedido_id = $1`,
-        [pedidoId]
-      );
-      const insuficiente = lineas.find(l => {
-        const cantidad = parseFloat(l.cantidad);
-        const reservado = parseFloat(l.reservado);
-        const libre = parseFloat(l.libre);
-        return reservado < cantidad - 0.001 && libre < cantidad - 0.001;
-      });
-      if (insuficiente) {
-        await this.log({
-          tipo: 'duplicado_evitado',
-          resultado: 'omitido',
-          detalle: {
-            motivo: 'stock_bloqueado_por_otros_pedidos',
-            pedido: pedido.numero_pedido,
-            producto: insuficiente.producto_nombre,
-            necesario: insuficiente.cantidad,
-            reservado_propio: insuficiente.reservado,
-            libre_no_reservado: insuficiente.libre,
-            bloqueado_por: insuficiente.bloqueado_por,
-          },
-        });
-        return;
-      }
-
-      // Llamar al endpoint /consumir directamente vía HTTP interno o reproducir lógica.
-      // Reproducimos la lógica esencial aquí para mantener atomicidad.
+      // Toda la operación en UNA SOLA transacción SERIALIZABLE:
+      //   1. Lock pedido (NOWAIT) — si otro proceso lo tiene, salir sin ruido
+      //   2. Validar estado y stock disponible
+      //   3. Consumir FIFO + actualizar stock
+      //   4. Borrar reservas + estado='completado'
+      //   5. COMMIT (libera lock atómicamente)
+      //
+      // Antes (Fix #11): se hacía COMMIT inmediato después del lock pre-emptivo
+      // y luego se abría una nueva transacción para el consumo. Eso dejaba una
+      // ventana en la que otro proceso podía cancelar el pedido o modificarlo
+      // entre lock y consumo → consumición sobre pedido cancelado.
       const client = await pool.connect();
       try {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+
+        // 1) Lock pedido + estado
+        let pedido: { id: string; estado: string; numero_pedido: string; cliente_email: string | null } | undefined;
+        try {
+          const { rows } = await client.query<{
+            id: string; estado: string; numero_pedido: string; cliente_email: string | null;
+          }>(
+            `SELECT p.id, p.estado, p.numero_pedido,
+                    COALESCE(p.cliente_email, c.email) AS cliente_email
+             FROM pedidos p
+             LEFT JOIN clientes c ON c.id = p.cliente_id
+             WHERE p.id = $1
+             FOR UPDATE OF p NOWAIT`,
+            [pedidoId]
+          );
+          pedido = rows[0];
+        } catch (lockErr: unknown) {
+          const code = (lockErr as { code?: string })?.code;
+          if (code === '55P03') {
+            // lock_not_available — otro proceso ya lo está tratando, salir limpio
+            await client.query('ROLLBACK').catch(() => {});
+            return;
+          }
+          throw lockErr;
+        }
+
+        if (!pedido || !['confirmado', 'fabricado', 'envasado'].includes(pedido.estado)) {
+          await client.query('ROLLBACK');
+          return;
+        }
+        pedidoNumero = pedido.numero_pedido;
+
+        // 2) Cargar líneas + advisory locks por producto + validación stock
+        const { rows: lineas } = await client.query<{
+          producto_id: string; cantidad: string; reservado: string; libre: string;
+          producto_nombre: string; bloqueado_por: string | null;
+        }>(
+          `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre,
+                  COALESCE((
+                    SELECT SUM(rs.cantidad) FROM reservas_stock rs
+                    WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id
+                  ), 0) AS reservado,
+                  COALESCE((
+                    SELECT SUM(GREATEST(0, l.cantidad_actual
+                           - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1), 0)))
+                    FROM lotes l WHERE l.producto_id = lp.producto_id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+                  ), 0) AS libre,
+                  (SELECT string_agg(DISTINCT pp.numero_pedido, ', ')
+                   FROM reservas_stock rs2 JOIN pedidos pp ON pp.id = rs2.pedido_id
+                   WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1) AS bloqueado_por
+           FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
+           WHERE lp.pedido_id = $1`,
+          [pedidoId]
+        );
+
+        if (lineas.length > 0) {
+          await acquireProductLocks(client, lineas.map(l => l.producto_id));
+        }
+
+        const insuficiente = lineas.find(l => {
+          const cantidad = parseFloat(l.cantidad);
+          const reservado = parseFloat(l.reservado);
+          const libre = parseFloat(l.libre);
+          return reservado < cantidad - 0.001 && libre < cantidad - 0.001;
+        });
+        if (insuficiente) {
+          await client.query('ROLLBACK');
+          await this.log({
+            tipo: 'duplicado_evitado',
+            resultado: 'omitido',
+            detalle: {
+              motivo: 'stock_bloqueado_por_otros_pedidos',
+              pedido: pedido.numero_pedido,
+              producto: insuficiente.producto_nombre,
+              necesario: insuficiente.cantidad,
+              reservado_propio: insuficiente.reservado,
+              libre_no_reservado: insuficiente.libre,
+              bloqueado_por: insuficiente.bloqueado_por,
+            },
+          });
+          return;
+        }
+
+        // 3) Consumir FIFO + actualizar stock por decremento atómico
         for (const item of lineas) {
           let restante = parseFloat(item.cantidad);
           const { rows: lotes } = await client.query<{
@@ -826,14 +840,14 @@ class AutomatizacionesService {
             restante -= consumir;
           }
           if (restante > 0.001) throw new Error(`STOCK_AGOTADO_DURANTE_AUTO:${item.producto_nombre}`);
+          // Decremento atómico (no recálculo desde lotes) — evita race con consumos concurrentes
           await client.query(
-            `UPDATE productos SET stock_actual = (
-               SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes
-               WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-             ) WHERE id = $1`,
-            [item.producto_id]
+            `UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
+            [parseFloat(item.cantidad).toFixed(6), item.producto_id]
           );
         }
+
+        // 4) Cerrar pedido
         await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [pedidoId]);
         await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [pedidoId]);
         await client.query('COMMIT');
@@ -847,7 +861,7 @@ class AutomatizacionesService {
       await this.log({
         tipo: 'pedido_auto_completado',
         resultado: 'exito',
-        detalle: { accion: 'auto_completar_pedido', pedido: pedido.numero_pedido },
+        detalle: { accion: 'auto_completar_pedido', pedido: pedidoNumero ?? pedidoId },
       });
 
       // Enviar albarán automáticamente si toggle ON

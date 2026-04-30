@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { produccionService } from '../services/produccion.service';
-import { pool }              from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import PDFDocument           from 'pdfkit';
 import nodemailer            from 'nodemailer';
 import fs                    from 'fs';
@@ -887,58 +887,105 @@ export const produccionController = {
         return res.json({ ok: true, revertido: false });
       }
 
-      // Completada → revertir stock_moves de produccion_consumo y produccion_salida
-      const { rows: moves } = await client.query(
-        `SELECT sm.*, p.stock_actual AS stock_ahora
+      // Completada → revertir stock_moves de produccion_consumo y produccion_salida.
+      // Estrategia O(1) en queries (antes era N+1 con timeout en órdenes grandes):
+      //   1. Cargar todos los moves de la orden
+      //   2. Pre-validar batch: ningún producto puede quedar negativo
+      //   3. Aplicar UPDATE agregados (producto delta, lote delta) en lote
+      //   4. INSERT stock_moves de reversión en batch (multi-VALUES)
+      const { rows: moves } = await client.query<{
+        id: string; producto_id: string; lote_id: string | null;
+        cantidad: string; producto_nombre?: string;
+      }>(
+        `SELECT sm.id, sm.producto_id, sm.lote_id, sm.cantidad, p.nombre AS producto_nombre
          FROM stock_moves sm
          JOIN productos p ON p.id = sm.producto_id
          WHERE sm.orden_id = $1`,
         [id]
       );
 
-      for (const mv of moves) {
-        const cantidadRevertida = -parseFloat(mv.cantidad); // invertir signo
-        const stockAhora = parseFloat(mv.stock_ahora);
-        const stockNuevo = stockAhora + cantidadRevertida;
+      if (moves.length > 0) {
+        // Bloquear todos los productos involucrados para evitar race
+        const productoIds = [...new Set(moves.map(m => m.producto_id))];
+        await acquireProductLocks(client, productoIds);
 
-        if (stockNuevo < 0) {
-          await client.query('ROLLBACK');
-          return res.status(422).json({
-            error: `REVERSION_IMPOSIBLE`,
-            mensaje: `Revertir consumo de "${mv.producto_nombre ?? mv.producto_id}" dejaría el stock en negativo (${stockNuevo.toFixed(3)}). El stock ya fue consumido en otra operación.`,
-          });
+        // Delta neto por producto (suma de cantidades a revertir = suma con signo invertido)
+        const deltaPorProducto = new Map<string, number>();
+        for (const mv of moves) {
+          const delta = -parseFloat(mv.cantidad);
+          deltaPorProducto.set(mv.producto_id, (deltaPorProducto.get(mv.producto_id) ?? 0) + delta);
         }
 
-        // Actualizar stock producto
-        await client.query(
-          `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
-          [stockNuevo.toFixed(6), mv.producto_id]
+        // Pre-check: ningún producto cae en negativo tras reversión
+        const { rows: stocks } = await client.query<{ id: string; stock_actual: string; nombre: string }>(
+          `SELECT id, stock_actual, nombre FROM productos WHERE id = ANY($1::uuid[]) FOR UPDATE`,
+          [productoIds]
         );
+        const stockMap = new Map(stocks.map(s => [s.id, { antes: parseFloat(s.stock_actual), nombre: s.nombre }]));
+        for (const [pid, delta] of deltaPorProducto) {
+          const cur = stockMap.get(pid);
+          if (!cur) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: `Producto ${pid} no encontrado` });
+          }
+          if (cur.antes + delta < 0) {
+            await client.query('ROLLBACK');
+            return res.status(422).json({
+              error: 'REVERSION_IMPOSIBLE',
+              mensaje: `Revertir consumo de "${cur.nombre}" dejaría el stock en negativo (${(cur.antes + delta).toFixed(3)}). El stock ya fue consumido en otra operación.`,
+            });
+          }
+        }
 
-        // Revertir lote si aplica
-        if (mv.lote_id) {
-          const delta = -parseFloat(mv.cantidad);
+        // Aplicar deltas a productos (decremento atómico per id)
+        for (const [pid, delta] of deltaPorProducto) {
           await client.query(
-            `UPDATE lotes SET cantidad_actual = GREATEST(0, cantidad_actual + $1::NUMERIC) WHERE id = $2`,
-            [delta.toFixed(6), mv.lote_id]
+            `UPDATE productos SET stock_actual = stock_actual + $1::NUMERIC WHERE id = $2`,
+            [delta.toFixed(6), pid]
           );
         }
 
-        // Registrar stock_move de reversión (tipo ajuste)
-        await client.query(
-          `INSERT INTO stock_moves
-             (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, motivo)
-           VALUES ($1, $2, 'ajuste', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
-          [
-            mv.producto_id,
-            mv.lote_id ?? null,
-            cantidadRevertida.toFixed(6),
-            stockAhora.toFixed(6),
-            stockNuevo.toFixed(6),
-            id,
-            `Reversión por cancelación orden ${orden.numero_orden}`,
-          ]
-        );
+        // Aplicar deltas a lotes (un UPDATE por mv con lote_id, batch via VALUES)
+        const lotesDelta = new Map<string, number>();
+        for (const mv of moves) {
+          if (!mv.lote_id) continue;
+          const delta = -parseFloat(mv.cantidad);
+          lotesDelta.set(mv.lote_id, (lotesDelta.get(mv.lote_id) ?? 0) + delta);
+        }
+        for (const [lid, delta] of lotesDelta) {
+          await client.query(
+            `UPDATE lotes SET cantidad_actual = GREATEST(0, cantidad_actual + $1::NUMERIC) WHERE id = $2`,
+            [delta.toFixed(6), lid]
+          );
+        }
+
+        // INSERT stock_moves de reversión en batch (multi-VALUES)
+        const insertRows: string[] = [];
+        const insertParams: unknown[] = [];
+        let pIdx = 1;
+        for (const mv of moves) {
+          const delta = -parseFloat(mv.cantidad);
+          const cur = stockMap.get(mv.producto_id);
+          if (!cur) continue;
+          const antes = cur.antes;
+          const despues = antes + delta;
+          // Actualizar mapa para que siguientes moves del mismo producto tengan referencia correcta
+          stockMap.set(mv.producto_id, { antes: despues, nombre: cur.nombre });
+          insertRows.push(`($${pIdx++}, $${pIdx++}, 'ajuste', $${pIdx++}::NUMERIC, $${pIdx++}::NUMERIC, $${pIdx++}::NUMERIC, $${pIdx++}, $${pIdx++})`);
+          insertParams.push(
+            mv.producto_id, mv.lote_id ?? null,
+            delta.toFixed(6), antes.toFixed(6), despues.toFixed(6),
+            id, `Reversión por cancelación orden ${orden.numero_orden}`
+          );
+        }
+        if (insertRows.length > 0) {
+          await client.query(
+            `INSERT INTO stock_moves
+               (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, motivo)
+             VALUES ${insertRows.join(', ')}`,
+            insertParams
+          );
+        }
       }
 
       // Deslinkar pedidos que referencian esta orden

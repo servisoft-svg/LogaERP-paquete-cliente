@@ -118,9 +118,28 @@ app.get('/api/health', async (_req, res) => {
 // Public routes (no auth)
 app.use('/api/auth', authRoutes);
 
-// Public webhook (before auth middleware) — with dedicated rate limit
-const webhookLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: 'Too many webhook requests' } });
-app.post('/api/pedidos/webhook', webhookLimiter, webhookHandler);
+// Public webhook (before auth middleware) — rate limit por cliente_email,
+// con fallback a IP. Antes el límite era 30/min por IP (43k pedidos/día con
+// un único token comprometido). Ahora 5/min por email + 60/min global por IP.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Demasiadas peticiones webhook para este email. Espera 1 min.' },
+  keyGenerator: (req) => {
+    const email = (req.body?.cliente_email || req.body?.email || '').toString().toLowerCase().trim();
+    return email || req.ip || 'unknown';
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const webhookGlobalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Webhook saturado. Reintenta en 1 min.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.post('/api/pedidos/webhook', webhookGlobalLimiter, webhookLimiter, webhookHandler);
 
 // Protected routes (need token)
 app.use('/api/productos',     authMiddleware, productosRoutes);
