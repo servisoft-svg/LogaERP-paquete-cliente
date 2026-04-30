@@ -1,0 +1,65 @@
+# =============================================================
+# .dockerignore — evitar copiar al contexto Docker:
+#   - secretos (.env, credenciales)
+#   - artefactos de build locales (node_modules, dist)
+#   - datos persistentes (uploads, backups, logs)
+#   - metadata git, IDE
+# =============================================================
+
+# Dependencias y artefactos (se reinstalan dentro del Dockerfile)
+**/node_modules
+**/dist
+**/build
+**/.next
+**/coverage
+**/.turbo
+**/.cache
+
+# Secretos — NUNCA dentro de la imagen
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Datos persistentes — se montan como volumen, no se copian
+backups/
+backend/uploads/
+backend/backups/
+backend/logs/
+logs/
+*.enc
+
+# Git / VCS
+.git
+.gitignore
+.gitattributes
+
+# IDE / SO
+.vscode
+.idea
+.DS_Store
+*.swp
+*.swo
+
+# Tests / docs (no se necesitan en runtime)
+**/tests
+**/test
+**/*.test.ts
+**/*.test.js
+**/*.spec.ts
+**/*.spec.js
+**/__tests__
+**/*.md
+!README.md
+
+# Logs runtime
+*.log
+.pm2/
+
+# Docker / CI metadata
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+.github/

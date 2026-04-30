@@ -2,11 +2,32 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Tini para reaping de procesos zombie + manejo de señales
+RUN apk add --no-cache tini wget
+
+# Copiar lockfile + manifest primero para cachear capa de deps
 COPY backend/package*.json ./
-RUN npm install
+
+# npm ci usa package-lock.json exacto (reproducible) y falla si no coincide.
+# Más seguro que npm install para builds de producción.
+RUN npm ci --omit=dev --no-audit --no-fund \
+ && npm install --no-save tsx typescript \
+ && npm cache clean --force
 
 COPY backend/ ./
 
+# Crear directorios runtime con permisos para el usuario node (uid 1000)
+RUN mkdir -p uploads backups logs \
+ && chown -R node:node /app
+
+USER node
+
 EXPOSE 3001
 
+# Healthcheck: el contenedor se marca unhealthy si /api/health no responde 200
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3001/api/health || exit 1
+
+# Tini como init: maneja SIGTERM correctamente y reaps procesos huérfanos
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["npx", "tsx", "src/index.ts"]
