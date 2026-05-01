@@ -64,15 +64,20 @@ export async function ejecutarBackup(): Promise<BackupResult> {
   const cwdQuoted = JSON.stringify(process.cwd());
   const filepathQuoted = JSON.stringify(filepath);
 
+  // Timeout configurable: default 10 min para BD grandes con muchos uploads.
+  // Antes hardcoded 120s/60s — backup de BD >2GB se cortaba a la mitad
+  // dejando .enc corrupto. Override con BACKUP_TIMEOUT_MS env si necesario.
+  const backupTimeout = Math.max(60_000, Number(process.env.BACKUP_TIMEOUT_MS) || 600_000);
+
   if (hasUploads) {
     execSync(
       `(pg_dump loga_erp && echo "---UPLOADS_SEPARATOR---" && tar cf - -C ${cwdQuoted} uploads 2>/dev/null | base64) | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 ${opensslPass} -out ${filepathQuoted}`,
-      { timeout: 120000, shell: '/bin/bash', env }
+      { timeout: backupTimeout, shell: '/bin/bash', env }
     );
   } else {
     execSync(
       `pg_dump loga_erp | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 ${opensslPass} -out ${filepathQuoted}`,
-      { timeout: 60000, shell: '/bin/bash', env }
+      { timeout: backupTimeout, shell: '/bin/bash', env }
     );
   }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -201,9 +201,12 @@ export default function OrdenesFabricacion() {
     } catch { /* no recipe found, use granel_id only */ }
   };
 
-  const productosEnvasados = productos.filter(p => p.tipo === 'producto_envasado');
-  const colasDisponibles = productos.filter(p => p.tipo === 'producto_fabricado');
-  const envasesDisponibles = productos.filter(p => p.tipo === 'material_embalaje');
+  // Memoizar filtros sobre `productos` para evitar recrear arrays en cada render.
+  // Sin memo, cada renderizado recreaba 3 arrays nuevos → re-render de cualquier
+  // hijo que reciba estas props como referencia.
+  const productosEnvasados   = useMemo(() => productos.filter(p => p.tipo === 'producto_envasado'),   [productos]);
+  const colasDisponibles     = useMemo(() => productos.filter(p => p.tipo === 'producto_fabricado'),  [productos]);
+  const envasesDisponibles   = useMemo(() => productos.filter(p => p.tipo === 'material_embalaje'),   [productos]);
   const prodFinalSel = productos.find(p => p.id === envForm.producto_final_id);
   const colaSelEnv = productos.find(p => p.id === envForm.cola_id);
   const envaseSelEnv = productos.find(p => p.id === envForm.envase_id);

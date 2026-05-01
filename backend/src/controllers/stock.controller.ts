@@ -9,11 +9,13 @@ import { invalidarCacheFinanzas } from '../routes/finanzas.routes';
 export const stockController = {
   async listarProductos(req: Request, res: Response) {
     try {
-      const { tipo, solo_bajos, busqueda } = req.query;
+      const { tipo, solo_bajos, busqueda, limit, offset } = req.query;
       const productos = await stockService.listarProductos({
         tipo:       tipo ? String(tipo) : undefined,
         solo_bajos: solo_bajos === 'true',
         busqueda:   busqueda ? String(busqueda) : undefined,
+        limit:      limit ? Number(limit) : undefined,
+        offset:     offset ? Number(offset) : undefined,
       });
       return res.json(productos);
     } catch (err: unknown) {

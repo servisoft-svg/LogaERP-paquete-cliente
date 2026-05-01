@@ -85,8 +85,21 @@ if (!corsOrigin && process.env.NODE_ENV === 'production') {
   console.error('CORS_ORIGIN must be set in production');
   process.exit(1);
 }
+// Validar formato URL de CORS_ORIGIN si está definido (anti typo
+// silencioso). Acepta listado separado por comas para múltiples orígenes.
+if (corsOrigin) {
+  const origins = corsOrigin.split(',').map(s => s.trim()).filter(Boolean);
+  for (const o of origins) {
+    if (!/^https?:\/\/[^\s/$.?#].[^\s]*$/.test(o)) {
+      console.error(`CORS_ORIGIN inválido: "${o}" — debe ser una URL http(s)://`);
+      process.exit(1);
+    }
+  }
+}
 app.use(cors({
-  origin: corsOrigin || 'http://localhost:5173',
+  origin: corsOrigin
+    ? corsOrigin.split(',').map(s => s.trim()).filter(Boolean)
+    : 'http://localhost:5173',
   credentials: true,
 }));
 app.use(express.json({ limit: '1mb' }));

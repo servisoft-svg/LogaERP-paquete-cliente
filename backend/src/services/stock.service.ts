@@ -6,6 +6,8 @@ class StockService {
     tipo?: string;
     solo_bajos?: boolean;
     busqueda?: string;
+    limit?: number;
+    offset?: number;
   }): Promise<unknown[]> {
     let sql = `
       SELECT
@@ -27,7 +29,7 @@ class StockService {
       LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
       WHERE p.activo = TRUE
     `;
-    const params: (string | boolean)[] = [];
+    const params: (string | boolean | number)[] = [];
     let idx = 1;
 
     if (filtros?.tipo) {
@@ -39,11 +41,18 @@ class StockService {
     }
     if (filtros?.busqueda) {
       sql += ` AND (p.nombre ILIKE $${idx} OR p.codigo ILIKE $${idx})`;
-      params.push(`%${filtros.busqueda}%`);
+      // Escapar % y _ para evitar wildcard injection / ReDoS via input usuario
+      const safeBusqueda = filtros.busqueda.replace(/[\\%_]/g, m => '\\' + m);
+      params.push(`%${safeBusqueda}%`);
       idx++;
     }
 
-    sql += ` ORDER BY alerta_activa DESC, p.nombre ASC LIMIT 1000`;
+    // Paginación con cap defensivo (default 200, max 1000).
+    const limit = Math.min(1000, Math.max(1, Number(filtros?.limit) || 200));
+    const offset = Math.max(0, Number(filtros?.offset) || 0);
+    sql += ` ORDER BY alerta_activa DESC, p.nombre ASC LIMIT $${idx++} OFFSET $${idx++}`;
+    params.push(limit, offset);
+
     const { rows } = await pool.query(sql, params);
     return rows;
   }

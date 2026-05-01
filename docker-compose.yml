@@ -10,13 +10,24 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backend/database/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
-      - ./backend/database/migrations/002_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+      # Montar TODO el directorio de migraciones — postgres ejecuta los .sql
+      # en orden alfabético (001, 002, ..., 021) en primer arranque.
+      # Si en el futuro se añaden 022, 023, etc., se aplican automáticamente.
+      # SOLO se ejecutan en primer init (cuando pgdata está vacío).
+      - ./backend/database/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loga} -d ${POSTGRES_DB:-loga_erp}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
   backend:
     build:
@@ -42,6 +53,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
   frontend:
     build:
@@ -55,6 +74,14 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 32M
 
 volumes:
   pgdata:

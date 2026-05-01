@@ -999,12 +999,15 @@ class AutomatizacionesService {
         if (l.producto_tipo !== 'producto_fabricado') continue;
         if (parseFloat(granel.stock_actual) >= cantidadKg) continue; // hay stock suficiente
 
-        // Anti-dupe: no crear si ya hay orden borrador/confirmada/en_proceso de este granel <5 días
+        // Anti-dupe: no crear si ya hay orden borrador/confirmada/en_proceso de este granel
+        // dentro de la ventana configurada (cfg.ventana_antiduplicado_dias). Antes
+        // hardcoded 5 días — ahora consistente con el resto de acciones automáticas.
+        const ventanaDias = Math.max(1, Number(cfg.ventana_antiduplicado_dias) || 5);
         const { rows: dup } = await pool.query(
           `SELECT 1 FROM ordenes_produccion op JOIN recetas r ON r.id = op.receta_id
            WHERE r.producto_id = $1 AND op.estado IN ('borrador','confirmada','en_proceso')
-             AND op.created_at >= NOW() - interval '5 days' LIMIT 1`,
-          [granelId]
+             AND op.created_at >= NOW() - ($2 || ' days')::interval LIMIT 1`,
+          [granelId, ventanaDias]
         );
         if (dup.length > 0) {
           await this.log({
