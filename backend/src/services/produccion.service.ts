@@ -60,7 +60,10 @@ class ProduccionService {
     let prodFinalId: string | null = null;
     let lotePTId: string | null = null;
     const consumedProductIds: string[] = [];
-    const qcOk = !(extra?.qc_fuera_de_rango ?? false);
+    // qcOk se decide DENTRO de la transacción tras validar server-side (Fix C-3).
+    // Inicialmente true; se invalida si algún parámetro está fuera de rango.
+    let qcOk = true;
+    const desviacionesQC: string[] = [];
 
     const result = await withSerializableTransaction(async (client) => {
       // ── 1. Cargar orden ────────────────────────────────────────────────
@@ -80,17 +83,52 @@ class ProduccionService {
 
       const cantidadPlanificada = toNum(orden.cantidad_planificada);
 
-      // ── 2. Cargar receta + ingredientes ───────────────────────────────
+      // ── 2. Cargar receta + ingredientes + RANGOS QC (Fix C-3) ─────────
       const { rows: [receta] } = await client.query<{
         id: string; rendimiento: string; producto_id: string; nombre: string;
+        ph_min: string | null; ph_max: string | null;
+        solidos_min: string | null; solidos_max: string | null;
+        viscosidad_min: string | null; viscosidad_max: string | null;
       }>(
-        `SELECT r.id, r.rendimiento, r.producto_id, p.nombre
+        `SELECT r.id, r.rendimiento, r.producto_id, p.nombre,
+                r.ph_min, r.ph_max, r.solidos_min, r.solidos_max,
+                r.viscosidad_min, r.viscosidad_max
          FROM recetas r JOIN productos p ON p.id = r.producto_id
          WHERE r.id = $1`,
         [orden.receta_id]
       );
 
       if (!receta) throw new Error('RECETA_NO_ENCONTRADA');
+
+      // ── Validación QC server-side (Fix C-3) ────────────────────────────
+      // ANTES: qcOk se decidía con un boolean del frontend (extra.qc_fuera_de_rango).
+      // Cualquier bug FE o payload manipulado podía meter en 'aprobado' un lote
+      // fuera de spec. AHORA: backend compara los valores medidos contra los
+      // rangos definidos en la receta. El flag del cliente queda solo como
+      // hint informativo si el frontend ya lo había detectado primero.
+      function fueraDeRango(valor: number | undefined, min: string | null, max: string | null, label: string): void {
+        if (valor === undefined || valor === null || !Number.isFinite(valor)) return; // sin medición → no se valida
+        const minN = min !== null ? parseFloat(min) : null;
+        const maxN = max !== null ? parseFloat(max) : null;
+        if (minN !== null && valor < minN) {
+          qcOk = false;
+          desviacionesQC.push(`${label}=${valor} < min=${minN}`);
+        }
+        if (maxN !== null && valor > maxN) {
+          qcOk = false;
+          desviacionesQC.push(`${label}=${valor} > max=${maxN}`);
+        }
+      }
+      fueraDeRango(extra?.ph,         receta.ph_min,         receta.ph_max,         'pH');
+      fueraDeRango(extra?.solidos,    receta.solidos_min,    receta.solidos_max,    'sólidos');
+      fueraDeRango(extra?.viscosidad, receta.viscosidad_min, receta.viscosidad_max, 'viscosidad');
+      // Si el frontend ya marcó fuera de rango pero los valores medidos no
+      // se enviaron (operario marcó manualmente "fuera de rango"), respetar
+      // esa decisión también.
+      if (extra?.qc_fuera_de_rango === true && qcOk) {
+        qcOk = false;
+        desviacionesQC.push('marcado_manualmente_por_operario');
+      }
 
       const rendimiento = toNum(receta.rendimiento);
       const multiplicador = cantidadPlanificada / rendimiento;
@@ -227,8 +265,10 @@ class ProduccionService {
       // Calculate cost from consumed ingredients
       const costePorUd = cantidadReal > 0 ? costeConsumos / cantidadReal : 0;
 
-      // If QC is out of range, lot goes to cuarentena instead of aprobado
-      const loteEstado = extra?.qc_fuera_de_rango ? 'cuarentena' : 'aprobado';
+      // Estado del lote según validación QC server-side (Fix C-3).
+      // qcOk se decidió arriba comparando valores medidos contra rangos
+      // de la receta. NO se confía en el flag del cliente.
+      const loteEstado = qcOk ? 'aprobado' : 'cuarentena';
 
       const { rows: [lotePT] } = await client.query<{ id: string }>(
         `INSERT INTO lotes
@@ -306,6 +346,15 @@ class ProduccionService {
       );
 
       // ── 7. QC annotation (inside transaction) ────────────────────────
+      // Nota automática del backend si hay desviaciones detectadas server-side
+      // (Fix C-3). La nota_qc del operario se concatena además.
+      if (!qcOk && desviacionesQC.length > 0) {
+        const notaAuto = `[QC server-side] Lote en cuarentena. Desviaciones: ${desviacionesQC.join('; ')}`;
+        await client.query(
+          `UPDATE ordenes_produccion SET notas = COALESCE(notas, '') || E'\n' || $1 WHERE id = $2`,
+          [notaAuto, ordenId]
+        );
+      }
       if (extra?.nota_qc) {
         await client.query(
           `UPDATE ordenes_produccion SET notas = COALESCE(notas, '') || E'\n' || $1 WHERE id = $2`,
