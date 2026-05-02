@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks, withSerializableTransaction } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
@@ -58,101 +58,140 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/pedidos - create directly as 'confirmado' with auto stock reservation
+// POST /api/pedidos — crea pedido + líneas + reservas FIFO en UNA transacción
+// SERIALIZABLE. Si la reserva falla, ROLLBACK total → no queda pedido huérfano.
+// Adicionalmente valida totales calculados (no acepta Infinity/NaN).
 router.post('/', async (req, res) => {
   try {
-    const { cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, lineas, subtotal, portes, iva_porcentaje, total } = req.body;
+    const { cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, lineas, subtotal, portes, iva_porcentaje } = req.body;
 
-    // Server-side validation: recalculate totals from lineas
-    const portesNum = parseFloat(portes ?? 0);
-    const ivaPctNum = parseFloat(iva_porcentaje ?? 21);
-    let subtotalCalc = parseFloat(subtotal ?? 0);
+    // Server-side validation: recalculate totals from lineas + sanidad numérica
+    const portesNum = Number(portes ?? 0);
+    const ivaPctNum = Number(iva_porcentaje ?? 21);
+    let subtotalCalc = Number(subtotal ?? 0);
     if (Array.isArray(lineas) && lineas.length > 0) {
-      subtotalCalc = lineas.reduce((s: number, l: any) => s + (parseFloat(l.cantidad ?? 0) * parseFloat(l.precio_unitario ?? 0)), 0);
+      subtotalCalc = lineas.reduce((s: number, l: any) => {
+        const q = Number(l.cantidad ?? 0);
+        const p = Number(l.precio_unitario ?? 0);
+        return s + (Number.isFinite(q) && Number.isFinite(p) ? q * p : 0);
+      }, 0);
     }
     const ivaCalc = (subtotalCalc + portesNum) * ivaPctNum / 100;
     const totalCalc = subtotalCalc + portesNum + ivaCalc;
 
-    const { rows: [pedido] } = await pool.query(
-      `INSERT INTO pedidos (cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, origen, estado, subtotal, portes, iva_porcentaje, total)
-       VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, 'manual', 'confirmado', $7::NUMERIC, $8::NUMERIC, $9::NUMERIC, $10::NUMERIC)
-       RETURNING *`,
-      [cliente_id ?? null, cliente_nombre ?? null, producto_id ?? null, cantidad ?? null, fecha_entrega ?? null, notas ?? null,
-       subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2)]
-    );
+    // Anti-NaN/Infinity: cualquier número inválido aborta con 400 (mejor que
+    // dejar 'NaN' guardado en BD y descubrirlo cuando una factura imprima 'NaN€')
+    for (const [name, val] of [['subtotal', subtotalCalc], ['portes', portesNum], ['iva', ivaPctNum], ['total', totalCalc]] as const) {
+      if (!Number.isFinite(val) || Math.abs(val) > 1e9) {
+        return res.status(400).json({ error: `Valor numérico inválido en ${name}: ${val}` });
+      }
+    }
 
-    // Insert lineas if provided (max 100)
     if (Array.isArray(lineas) && lineas.length > 100) {
       return res.status(400).json({ error: 'Maximo 100 lineas por pedido.' });
     }
-    // Batch insert lineas (1 sola query VALUES ($1...), ($N...))
-    const lineasValidas = Array.isArray(lineas)
-      ? lineas.filter((l: { producto_id?: string; producto_nombre?: string }) => l.producto_id || l.producto_nombre)
-      : [];
-    if (lineasValidas.length > 0) {
-      const placeholders: string[] = [];
-      const params: unknown[] = [];
-      let idx = 1;
-      for (const l of lineasValidas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; notas?: string; precio_unitario?: string|number; subtotal?: string|number }[]) {
-        placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
-        params.push(
-          pedido.id, l.producto_id ?? null, l.producto_nombre ?? null,
-          l.cantidad ?? null, l.unidad_medida ?? 'kg', l.notas ?? null,
-          l.precio_unitario ?? null, l.subtotal ?? null,
-        );
-      }
-      await pool.query(
-        `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal)
-         VALUES ${placeholders.join(', ')}`,
-        params
-      );
-    }
 
-    // Auto-reserve stock FIFO — wrapped in SERIALIZABLE to prevent double-booking
-    const itemsToReserve: { producto_id: string; cantidad: number }[] = [];
-    if (Array.isArray(lineas) && lineas.length > 0) {
-      for (const l of lineas) {
-        if (l.producto_id && l.cantidad) itemsToReserve.push({ producto_id: l.producto_id, cantidad: parseFloat(String(l.cantidad)) });
+    const lineasValidas = Array.isArray(lineas)
+      ? (lineas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; notas?: string; precio_unitario?: string|number; subtotal?: string|number }[])
+          .filter(l => l.producto_id || l.producto_nombre)
+      : [];
+
+    type Reserva = { producto_id: string; cantidad: number };
+    const itemsToReserve: Reserva[] = [];
+    if (lineasValidas.length > 0) {
+      for (const l of lineasValidas) {
+        if (l.producto_id && l.cantidad) {
+          const c = Number(l.cantidad);
+          if (Number.isFinite(c) && c > 0) itemsToReserve.push({ producto_id: l.producto_id, cantidad: c });
+        }
       }
     } else if (producto_id && cantidad) {
-      itemsToReserve.push({ producto_id, cantidad: parseFloat(String(cantidad)) });
+      const c = Number(cantidad);
+      if (Number.isFinite(c) && c > 0) itemsToReserve.push({ producto_id, cantidad: c });
     }
 
+    // TODO atómico: pedido + líneas + reservas en una sola SERIALIZABLE.
+    // Si reserva falla → ROLLBACK → no queda pedido huérfano (Fix #14).
     let reservationFailed = false;
-    if (itemsToReserve.length > 0) {
-      const resClient = await pool.connect();
-      try {
-        await resClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
-        for (const item of itemsToReserve) {
-          const { rows: lotes } = await resClient.query(
-            `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
-             FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-             ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
-             FOR UPDATE`,
-            [item.producto_id]
-          );
-          let falta = item.cantidad;
-          for (const l of lotes) {
-            if (falta <= 0) break;
-            const disp = parseFloat(l.disponible);
-            if (disp <= 0) continue;
-            const reservar = Math.min(disp, falta);
-            await resClient.query(
-              `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
-              [pedido.id, item.producto_id, l.id, reservar.toFixed(6)]
-            );
-            falta -= reservar;
-          }
-        }
-        await resClient.query('COMMIT');
-      } catch (resErr) {
-        reservationFailed = true;
-        await resClient.query('ROLLBACK').catch(rbErr => logger.error('[POST pedidos] ROLLBACK reservas fallo', { err: rbErr }));
-        logger.error('[POST pedidos] reserva FIFO fallo — pedido creado sin reservas', { err: resErr, pedido_id: pedido.id });
-      } finally {
-        resClient.release();
+    let reservationError: string | null = null;
+    const pedido = await withSerializableTransaction(async (client) => {
+      // Lock por producto antes de cualquier mutación de stock
+      if (itemsToReserve.length > 0) {
+        await acquireProductLocks(client, itemsToReserve.map(i => i.producto_id));
       }
-    }
+
+      // 1) INSERT pedido
+      const { rows: [p] } = await client.query(
+        `INSERT INTO pedidos (cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, origen, estado, subtotal, portes, iva_porcentaje, total)
+         VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, 'manual', 'confirmado', $7::NUMERIC, $8::NUMERIC, $9::NUMERIC, $10::NUMERIC)
+         RETURNING *`,
+        [cliente_id ?? null, cliente_nombre ?? null, producto_id ?? null, cantidad ?? null, fecha_entrega ?? null, notas ?? null,
+         subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2)]
+      );
+
+      // 2) INSERT líneas (batch)
+      if (lineasValidas.length > 0) {
+        const placeholders: string[] = [];
+        const params: unknown[] = [];
+        let idx = 1;
+        for (const l of lineasValidas) {
+          placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
+          params.push(
+            p.id, l.producto_id ?? null, l.producto_nombre ?? null,
+            l.cantidad ?? null, l.unidad_medida ?? 'kg', l.notas ?? null,
+            l.precio_unitario ?? null, l.subtotal ?? null,
+          );
+        }
+        await client.query(
+          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal)
+           VALUES ${placeholders.join(', ')}`,
+          params
+        );
+      }
+
+      // 3) Reservar stock FIFO. Si falta stock, marca warning pero no aborta
+      //    (la lógica original no abortaba — preservamos comportamiento).
+      //    Sólo fallos REALES de BD (deadlock, etc) propagan el throw que
+      //    aborta toda la transacción.
+      if (itemsToReserve.length > 0) {
+        try {
+          for (const item of itemsToReserve) {
+            const { rows: lotes } = await client.query(
+              `SELECT l.id,
+                      l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS disponible
+               FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+               ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
+               FOR UPDATE`,
+              [item.producto_id]
+            );
+            let falta = item.cantidad;
+            for (const l of lotes) {
+              if (falta <= 0) break;
+              const disp = parseFloat(l.disponible);
+              if (disp <= 0) continue;
+              const reservar = Math.min(disp, falta);
+              await client.query(
+                `INSERT INTO reservas_stock (pedido_id, producto_id, lote_id, cantidad) VALUES ($1, $2, $3, $4)`,
+                [p.id, item.producto_id, l.id, reservar.toFixed(6)]
+              );
+              falta -= reservar;
+            }
+            if (falta > 0.001) {
+              // Stock insuficiente: marcar warning pero NO abortar — el
+              // operario puede confirmar/consumir más tarde cuando llegue stock.
+              reservationFailed = true;
+              reservationError = `stock_insuficiente:${item.producto_id}:falta=${falta.toFixed(3)}`;
+            }
+          }
+        } catch (resErr) {
+          // Error real de BD → propagar para ROLLBACK total
+          logger.error('[POST pedidos] reserva fallo BD', { err: resErr });
+          throw resErr;
+        }
+      }
+
+      return p;
+    });
 
     // Hook automatizaciones: pedido recién creado en 'confirmado' → intentar
     // auto-fabricar (si no hay stock) o auto-completar (si sí lo hay).
@@ -165,7 +204,10 @@ router.post('/', async (req, res) => {
       });
     }
 
-    res.status(201).json({ ...pedido, ...(reservationFailed ? { warning: 'reservation_failed' } : {}) });
+    res.status(201).json({
+      ...pedido,
+      ...(reservationFailed ? { warning: 'reservation_partial', detalle: reservationError } : {}),
+    });
   } catch (err: unknown) {
     logger.error('[POST pedidos]', { err });
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -203,7 +245,7 @@ router.put('/:id', async (req, res) => {
           try {
             await resClient.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
             const { rows: lotes } = await resClient.query(
-              `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id), 0) AS disponible
+              `SELECT l.id, l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS disponible
                FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
                ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC
                FOR UPDATE`,
@@ -439,6 +481,8 @@ router.post('/:id/consumir', async (req, res) => {
     // entre filas distintas de la misma transacción)
     const productoIds = items.filter(i => i.cantidad > 0).map(i => i.producto_id);
     if (productoIds.length > 0) {
+      // Advisory lock por producto: serializa con producción/ajustes/automatizaciones.
+      await acquireProductLocks(client, productoIds);
       const { rows: prodRows } = await client.query<{
         id: string; stock_actual: string; nombre: string; unidad_medida: string;
       }>(
@@ -496,9 +540,8 @@ router.post('/:id/consumir', async (req, res) => {
       }
 
       let restante = item.cantidad;
-      // Refetch actual stock inside transaction for accurate stock_moves
-      const { rows: [freshStock] } = await client.query(`SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [item.producto_id]);
-      let stockAntes = parseFloat(freshStock?.stock_actual ?? '0');
+      // Stock ya bloqueado y validado arriba con FOR UPDATE — usar item.stock como punto de partida.
+      let stockAntes = item.stock;
       for (const lote of lotes) {
         if (restante <= 0) break;
         const disponible = parseFloat(lote.cantidad_actual);
@@ -525,12 +568,16 @@ router.post('/:id/consumir', async (req, res) => {
         });
       }
 
-      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`, [item.cantidad.toFixed(6), item.producto_id]);
+      // [Eliminado tras hot-fix C-5 trigger]: trigger fn_trg_lotes_stock_actual
+      // ya recalculó productos.stock_actual desde lotes al UPDATE lotes anterior.
+      // Restar de nuevo causaba doble descuento → CHECK constraint violation.
       consumidos.push(`${item.nombre}: ${item.cantidad} ${item.unidad}`);
     }
 
-    // Release reservas + set estado completado
-    await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [id]);
+    // Marcar reservas del pedido como consumidas (preserva auditoría +
+    // mantiene visibilidad coherente del cálculo de stock disponible
+    // hasta que la transacción haga COMMIT). Antes era DELETE.
+    await client.query(`UPDATE reservas_stock SET estado = 'consumida' WHERE pedido_id = $1 AND estado = 'activa'`, [id]);
     await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [id]);
     await client.query('COMMIT');
     invalidarCacheFinanzas();

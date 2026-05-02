@@ -17,7 +17,7 @@
  * resultado='fallo_definitivo' para no romper la respuesta HTTP del caller.
  */
 
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import { emailService } from './email.service';
 
 interface ConfigAuto {
@@ -706,102 +706,116 @@ class AutomatizacionesService {
    * producto envasado, ejecuta el consumo FEFO y deja el pedido en 'completado'.
    */
   async autoCompletarPedido(pedidoId: string): Promise<void> {
+    let pedidoNumero: string | null = null;
     try {
       const cfg = await this.getConfig();
       if (!cfg.auto_completar_pedidos_con_stock) return;
 
-      // Lock pre-emptivo (NOWAIT) para evitar carrera entre hook POST/PUT y sweep cron.
-      // Si otro proceso ya tiene la fila bloqueada → 55P03 → salimos sin ruido.
-      const lockClient = await pool.connect();
-      try {
-        await lockClient.query('BEGIN');
-        const { rows: [locked] } = await lockClient.query<{
-          id: string; estado: string;
-        }>(
-          `SELECT id, estado FROM pedidos WHERE id = $1 FOR UPDATE NOWAIT`,
-          [pedidoId]
-        );
-        await lockClient.query('COMMIT');
-        if (!locked || !['confirmado', 'fabricado', 'envasado'].includes(locked.estado)) return;
-      } catch (lockErr: unknown) {
-        await lockClient.query('ROLLBACK').catch(rbErr => console.error('[autoCompletarPedido] ROLLBACK lock fallo', rbErr));
-        const code = (lockErr as { code?: string })?.code;
-        if (code === '55P03') return; // lock_not_available — otro proceso ya lo está tratando
-        throw lockErr;
-      } finally {
-        lockClient.release();
-      }
-
-      const { rows: [pedido] } = await pool.query<{
-        id: string; estado: string; cliente_email: string | null; numero_pedido: string;
-      }>(
-        `SELECT p.id, p.estado, p.numero_pedido,
-                COALESCE(p.cliente_email, c.email) AS cliente_email
-         FROM pedidos p
-         LEFT JOIN clientes c ON c.id = p.cliente_id
-         WHERE p.id = $1`,
-        [pedidoId]
-      );
-      if (!pedido || !['confirmado', 'fabricado', 'envasado'].includes(pedido.estado)) return;
-
-      // Una línea es completable si sus reservas propias cubren la cantidad
-      // O hay stock libre suficiente en lotes aprobados (no reservado por otros).
-      const { rows: lineas } = await pool.query<{
-        producto_id: string; cantidad: string; reservado: string; libre: string;
-        producto_nombre: string; bloqueado_por: string | null;
-      }>(
-        `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre,
-                COALESCE((
-                  SELECT SUM(rs.cantidad) FROM reservas_stock rs
-                  WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id
-                ), 0) AS reservado,
-                COALESCE((
-                  SELECT SUM(GREATEST(0, l.cantidad_actual
-                         - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1), 0)))
-                  FROM lotes l WHERE l.producto_id = lp.producto_id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
-                ), 0) AS libre,
-                (SELECT string_agg(DISTINCT pp.numero_pedido, ', ')
-                 FROM reservas_stock rs2 JOIN pedidos pp ON pp.id = rs2.pedido_id
-                 WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1) AS bloqueado_por
-         FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
-         WHERE lp.pedido_id = $1`,
-        [pedidoId]
-      );
-      const insuficiente = lineas.find(l => {
-        const cantidad = parseFloat(l.cantidad);
-        const reservado = parseFloat(l.reservado);
-        const libre = parseFloat(l.libre);
-        return reservado < cantidad - 0.001 && libre < cantidad - 0.001;
-      });
-      if (insuficiente) {
-        await this.log({
-          tipo: 'duplicado_evitado',
-          resultado: 'omitido',
-          detalle: {
-            motivo: 'stock_bloqueado_por_otros_pedidos',
-            pedido: pedido.numero_pedido,
-            producto: insuficiente.producto_nombre,
-            necesario: insuficiente.cantidad,
-            reservado_propio: insuficiente.reservado,
-            libre_no_reservado: insuficiente.libre,
-            bloqueado_por: insuficiente.bloqueado_por,
-          },
-        });
-        return;
-      }
-
-      // Llamar al endpoint /consumir directamente vía HTTP interno o reproducir lógica.
-      // Reproducimos la lógica esencial aquí para mantener atomicidad.
+      // Toda la operación en UNA SOLA transacción SERIALIZABLE:
+      //   1. Lock pedido (NOWAIT) — si otro proceso lo tiene, salir sin ruido
+      //   2. Validar estado y stock disponible
+      //   3. Consumir FIFO + actualizar stock
+      //   4. Borrar reservas + estado='completado'
+      //   5. COMMIT (libera lock atómicamente)
+      //
+      // Antes (Fix #11): se hacía COMMIT inmediato después del lock pre-emptivo
+      // y luego se abría una nueva transacción para el consumo. Eso dejaba una
+      // ventana en la que otro proceso podía cancelar el pedido o modificarlo
+      // entre lock y consumo → consumición sobre pedido cancelado.
       const client = await pool.connect();
       try {
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+
+        // 1) Lock pedido + estado
+        let pedido: { id: string; estado: string; numero_pedido: string; cliente_email: string | null } | undefined;
+        try {
+          const { rows } = await client.query<{
+            id: string; estado: string; numero_pedido: string; cliente_email: string | null;
+          }>(
+            `SELECT p.id, p.estado, p.numero_pedido,
+                    COALESCE(p.cliente_email, c.email) AS cliente_email
+             FROM pedidos p
+             LEFT JOIN clientes c ON c.id = p.cliente_id
+             WHERE p.id = $1
+             FOR UPDATE OF p NOWAIT`,
+            [pedidoId]
+          );
+          pedido = rows[0];
+        } catch (lockErr: unknown) {
+          const code = (lockErr as { code?: string })?.code;
+          if (code === '55P03') {
+            // lock_not_available — otro proceso ya lo está tratando, salir limpio
+            await client.query('ROLLBACK').catch(() => {});
+            return;
+          }
+          throw lockErr;
+        }
+
+        if (!pedido || !['confirmado', 'fabricado', 'envasado'].includes(pedido.estado)) {
+          await client.query('ROLLBACK');
+          return;
+        }
+        pedidoNumero = pedido.numero_pedido;
+
+        // 2) Cargar líneas + advisory locks por producto + validación stock
+        const { rows: lineas } = await client.query<{
+          producto_id: string; cantidad: string; reservado: string; libre: string;
+          producto_nombre: string; bloqueado_por: string | null;
+        }>(
+          `SELECT lp.producto_id, lp.cantidad, p.nombre AS producto_nombre,
+                  COALESCE((
+                    SELECT SUM(rs.cantidad) FROM reservas_stock rs
+                    WHERE rs.pedido_id = $1 AND rs.producto_id = lp.producto_id AND rs.estado = 'activa'
+                  ), 0) AS reservado,
+                  COALESCE((
+                    SELECT SUM(GREATEST(0, l.cantidad_actual
+                           - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $1 AND rs.estado = 'activa'), 0)))
+                    FROM lotes l WHERE l.producto_id = lp.producto_id AND l.estado = 'aprobado' AND l.cantidad_actual > 0
+                  ), 0) AS libre,
+                  (SELECT string_agg(DISTINCT pp.numero_pedido, ', ')
+                   FROM reservas_stock rs2 JOIN pedidos pp ON pp.id = rs2.pedido_id
+                   WHERE rs2.producto_id = lp.producto_id AND rs2.pedido_id <> $1 AND rs2.estado = 'activa') AS bloqueado_por
+           FROM lineas_pedido lp JOIN productos p ON p.id = lp.producto_id
+           WHERE lp.pedido_id = $1`,
+          [pedidoId]
+        );
+
+        if (lineas.length > 0) {
+          await acquireProductLocks(client, lineas.map(l => l.producto_id));
+        }
+
+        const insuficiente = lineas.find(l => {
+          const cantidad = parseFloat(l.cantidad);
+          const reservado = parseFloat(l.reservado);
+          const libre = parseFloat(l.libre);
+          return reservado < cantidad - 0.001 && libre < cantidad - 0.001;
+        });
+        if (insuficiente) {
+          await client.query('ROLLBACK');
+          await this.log({
+            tipo: 'duplicado_evitado',
+            resultado: 'omitido',
+            detalle: {
+              motivo: 'stock_bloqueado_por_otros_pedidos',
+              pedido: pedido.numero_pedido,
+              producto: insuficiente.producto_nombre,
+              necesario: insuficiente.cantidad,
+              reservado_propio: insuficiente.reservado,
+              libre_no_reservado: insuficiente.libre,
+              bloqueado_por: insuficiente.bloqueado_por,
+            },
+          });
+          return;
+        }
+
+        // 3) Consumir FIFO + actualizar stock por decremento atómico
         for (const item of lineas) {
           let restante = parseFloat(item.cantidad);
           const { rows: lotes } = await client.query<{
             id: string; cantidad_actual: string; disponible: string;
           }>(
             `SELECT l.id, l.cantidad_actual,
-                    l.cantidad_actual - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $2), 0) AS disponible
+                    l.cantidad_actual - COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs WHERE rs.lote_id = l.id AND rs.pedido_id <> $2 AND rs.estado = 'activa'), 0) AS disponible
              FROM lotes l WHERE l.producto_id = $1 AND l.estado = 'aprobado' AND l.cantidad_actual > 0
              ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC FOR UPDATE`,
             [item.producto_id, pedidoId]
@@ -826,15 +840,14 @@ class AutomatizacionesService {
             restante -= consumir;
           }
           if (restante > 0.001) throw new Error(`STOCK_AGOTADO_DURANTE_AUTO:${item.producto_nombre}`);
-          await client.query(
-            `UPDATE productos SET stock_actual = (
-               SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes
-               WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-             ) WHERE id = $1`,
-            [item.producto_id]
-          );
+          // [Eliminado tras hot-fix C-5 trigger]: el UPDATE lotes anterior
+          // ya disparó fn_trg_lotes_stock_actual que recalculó productos.stock_actual.
+          // Restar de nuevo causaba doble descuento → CHECK violation visto en
+          // pedido PED-2026-01344 con error "stock_actual_check".
         }
-        await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [pedidoId]);
+
+        // 4) Cerrar pedido
+        await client.query(`UPDATE reservas_stock SET estado = 'consumida' WHERE pedido_id = $1 AND estado = 'activa'`, [pedidoId]);
         await client.query(`UPDATE pedidos SET estado = 'completado' WHERE id = $1`, [pedidoId]);
         await client.query('COMMIT');
       } catch (err) {
@@ -847,7 +860,7 @@ class AutomatizacionesService {
       await this.log({
         tipo: 'pedido_auto_completado',
         resultado: 'exito',
-        detalle: { accion: 'auto_completar_pedido', pedido: pedido.numero_pedido },
+        detalle: { accion: 'auto_completar_pedido', pedido: pedidoNumero ?? pedidoId },
       });
 
       // Enviar albarán automáticamente si toggle ON
@@ -985,12 +998,15 @@ class AutomatizacionesService {
         if (l.producto_tipo !== 'producto_fabricado') continue;
         if (parseFloat(granel.stock_actual) >= cantidadKg) continue; // hay stock suficiente
 
-        // Anti-dupe: no crear si ya hay orden borrador/confirmada/en_proceso de este granel <5 días
+        // Anti-dupe: no crear si ya hay orden borrador/confirmada/en_proceso de este granel
+        // dentro de la ventana configurada (cfg.ventana_antiduplicado_dias). Antes
+        // hardcoded 5 días — ahora consistente con el resto de acciones automáticas.
+        const ventanaDias = Math.max(1, Number(cfg.ventana_antiduplicado_dias) || 5);
         const { rows: dup } = await pool.query(
           `SELECT 1 FROM ordenes_produccion op JOIN recetas r ON r.id = op.receta_id
            WHERE r.producto_id = $1 AND op.estado IN ('borrador','confirmada','en_proceso')
-             AND op.created_at >= NOW() - interval '5 days' LIMIT 1`,
-          [granelId]
+             AND op.created_at >= NOW() - ($2 || ' days')::interval LIMIT 1`,
+          [granelId, ventanaDias]
         );
         if (dup.length > 0) {
           await this.log({
@@ -1017,13 +1033,18 @@ class AutomatizacionesService {
         const cantidadFinal = Math.max(rendimiento, cantidadKg);
         const fecha = pedido.fecha_entrega ?? new Date(Date.now() + (cfg.dias_anticipacion_default ?? 2) * 86_400_000).toISOString().slice(0, 10);
 
+        // Crear orden en estado 'borrador'. NUNCA en 'confirmada' desde aquí:
+        // confirmar = descontar stock real, y eso debe ser una acción explícita
+        // (operario o llamada directa a produccionService.confirmarOrden), no
+        // un side-effect implícito de un trigger automático. Crear en borrador
+        // garantiza que no hay descuento doble si esta función se reentra.
         const { rows: [orden] } = await pool.query<{ id: string; numero_orden: string }>(
           `INSERT INTO ordenes_produccion
              (numero_orden, receta_id, cantidad_planificada, fecha_planificada, estado, tipo_orden,
               cliente, cliente_id, notas)
            VALUES (
              'OP-AUTO-' || to_char(NOW(), 'YYYYMMDD-HH24MISS'),
-             $1, $2::NUMERIC, $3::DATE, 'confirmada', 'fabricacion',
+             $1, $2::NUMERIC, $3::DATE, 'borrador', 'fabricacion',
              $4, $5, $6
            )
            RETURNING id, numero_orden`,
@@ -1034,7 +1055,10 @@ class AutomatizacionesService {
           ]
         );
 
-        // Linkar pedido + cambiar estado
+        // Linkar pedido + cambiar estado.
+        // Pedido pasa a 'en_produccion' aunque la orden esté en borrador: el
+        // operario debe revisar/confirmar la orden. orden_produccion_id ya
+        // linkado evita re-creación si autoFabricarPedido se reentra.
         await pool.query(
           `UPDATE pedidos SET orden_produccion_id = $1, estado = 'en_produccion' WHERE id = $2`,
           [orden.id, pedidoId]

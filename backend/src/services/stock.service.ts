@@ -1,4 +1,4 @@
-import { pool } from '../db/pool';
+import { pool, acquireProductLocks } from '../db/pool';
 import { toNum } from '../types';
 
 class StockService {
@@ -6,6 +6,8 @@ class StockService {
     tipo?: string;
     solo_bajos?: boolean;
     busqueda?: string;
+    limit?: number;
+    offset?: number;
   }): Promise<unknown[]> {
     let sql = `
       SELECT
@@ -27,7 +29,7 @@ class StockService {
       LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
       WHERE p.activo = TRUE
     `;
-    const params: (string | boolean)[] = [];
+    const params: (string | boolean | number)[] = [];
     let idx = 1;
 
     if (filtros?.tipo) {
@@ -39,11 +41,18 @@ class StockService {
     }
     if (filtros?.busqueda) {
       sql += ` AND (p.nombre ILIKE $${idx} OR p.codigo ILIKE $${idx})`;
-      params.push(`%${filtros.busqueda}%`);
+      // Escapar % y _ para evitar wildcard injection / ReDoS via input usuario
+      const safeBusqueda = filtros.busqueda.replace(/[\\%_]/g, m => '\\' + m);
+      params.push(`%${safeBusqueda}%`);
       idx++;
     }
 
-    sql += ` ORDER BY alerta_activa DESC, p.nombre ASC LIMIT 1000`;
+    // Paginación con cap defensivo (default 200, max 1000).
+    const limit = Math.min(1000, Math.max(1, Number(filtros?.limit) || 200));
+    const offset = Math.max(0, Number(filtros?.offset) || 0);
+    sql += ` ORDER BY alerta_activa DESC, p.nombre ASC LIMIT $${idx++} OFFSET $${idx++}`;
+    params.push(limit, offset);
+
     const { rows } = await pool.query(sql, params);
     return rows;
   }
@@ -59,12 +68,24 @@ class StockService {
     const client = await pool.connect();
     try {
       await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+      // Advisory lock por producto: serializa con /consumir, producción y automatizaciones.
+      await acquireProductLocks(client, [payload.producto_id]);
 
       const { rows: [prod] } = await client.query<{ stock_actual: string }>(
         `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`,
         [payload.producto_id]
       );
       if (!prod) throw new Error('PRODUCTO_NO_ENCONTRADO');
+
+      // Validar que el lote pertenece al producto antes de tocarlo (evita corrupción cruzada).
+      if (payload.lote_id) {
+        const { rows: [lote] } = await client.query<{ producto_id: string }>(
+          `SELECT producto_id FROM lotes WHERE id = $1 FOR UPDATE`,
+          [payload.lote_id]
+        );
+        if (!lote) throw new Error('LOTE_NO_ENCONTRADO');
+        if (lote.producto_id !== payload.producto_id) throw new Error('LOTE_NO_PERTENECE_AL_PRODUCTO');
+      }
 
       const antes   = toNum(prod.stock_actual);
       const despues = antes + payload.cantidad;

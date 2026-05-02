@@ -1,12 +1,57 @@
-FROM node:20-alpine
+# =============================================================
+# Dockerfile.backend — multi-stage (Fix #25)
+#   Stage 1 (build): instala devDeps, compila TS → JS
+#   Stage 2 (runtime): solo prod deps + dist compilado, USER node
+#
+# Beneficios:
+#   - Imagen final ~150MB menor (sin TypeScript, tsx, devDeps)
+#   - Sin tsx en runtime (un proceso menos, arranque más rápido)
+#   - Reproducible (npm ci + lockfile estricto)
+# =============================================================
+
+# ── Stage 1: build ───────────────────────────────────────────
+FROM node:20-alpine AS build
+
+WORKDIR /build
+
+# Copiar manifest + lockfile y instalar TODO (incl. devDeps)
+COPY backend/package*.json ./
+RUN npm ci --no-audit --no-fund
+
+# Copiar source y compilar
+COPY backend/tsconfig.json ./
+COPY backend/src ./src
+RUN npx tsc
+
+# ── Stage 2: runtime ─────────────────────────────────────────
+FROM node:20-alpine AS runtime
 
 WORKDIR /app
 
-COPY backend/package*.json ./
-RUN npm install
+# tini para reaping zombie + manejo SIGTERM, wget para healthcheck
+RUN apk add --no-cache tini wget
 
-COPY backend/ ./
+# Solo manifest + lockfile, instalar prod deps únicamente
+COPY backend/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund \
+ && npm cache clean --force
+
+# Copiar el código compilado desde la stage de build
+COPY --from=build /build/dist ./dist
+
+# Copiar assets necesarios en runtime (PDFs, plantillas, etc.)
+COPY backend/assets ./assets
+
+# Crear directorios runtime con ownership correcto
+RUN mkdir -p uploads backups logs \
+ && chown -R node:node /app
+
+USER node
 
 EXPOSE 3001
 
-CMD ["npx", "tsx", "src/index.ts"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3001/api/health || exit 1
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/index.js"]

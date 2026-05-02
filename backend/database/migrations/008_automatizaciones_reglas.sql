@@ -9,24 +9,31 @@
 
 BEGIN;
 
-CREATE TYPE trigger_automatizacion AS ENUM (
-    'stock_bajo_minimo',     -- producto baja de stock_minimo
-    'stock_cero',            -- producto llega a 0
-    'lote_qc_ok',            -- lote nuevo con QC dentro de rango
-    'lote_qc_fuera_rango',   -- lote nuevo con QC fuera de rango (cuarentena)
-    'pedido_confirmado',     -- pedido cambia a confirmado
-    'manual'                 -- solo se dispara con botón "Ejecutar"
-);
+-- ENUMs envueltos en DO/EXCEPTION → idempotentes para re-runs.
+DO $$ BEGIN
+  CREATE TYPE trigger_automatizacion AS ENUM (
+      'stock_bajo_minimo',     -- producto baja de stock_minimo
+      'stock_cero',            -- producto llega a 0
+      'lote_qc_ok',            -- lote nuevo con QC dentro de rango
+      'lote_qc_fuera_rango',   -- lote nuevo con QC fuera de rango (cuarentena)
+      'pedido_confirmado',     -- pedido cambia a confirmado
+      'manual'                 -- solo se dispara con botón "Ejecutar"
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE accion_automatizacion AS ENUM (
-    'email_proveedor',
-    'crear_orden_compra',
-    'crear_orden_fabricacion',
-    'crear_orden_envasado',
-    'aprobar_lote',
-    'rechazar_lote',
-    'notificar'
-);
+DO $$ BEGIN
+  CREATE TYPE accion_automatizacion AS ENUM (
+      'email_proveedor',
+      'crear_orden_compra',
+      'crear_orden_fabricacion',
+      'crear_orden_envasado',
+      'aprobar_lote',
+      'rechazar_lote',
+      'notificar'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS automatizaciones_reglas (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -78,7 +78,10 @@
       "Bash(npx --prefix backend tsc -p backend --noEmit)",
       "Bash(grep -n \"http.get\\(\\\\`http://localhost\" backend/src/routes/pedidos.routes.ts)",
       "Bash(grep -nB2 -A8 \"TO_CHAR\\(DATE_TRUNC\\('month', updated_at\\)\" backend/src/routes/finanzas.routes.ts)",
-      "Bash(grep -nB2 -A8 \"ordenes_fab\\\\|num_ordenes\\\\|ordenes.*completadas\\\\|coste.*produccion\" backend/src/routes/finanzas.routes.ts)"
+      "Bash(grep -nB2 -A8 \"ordenes_fab\\\\|num_ordenes\\\\|ordenes.*completadas\\\\|coste.*produccion\" backend/src/routes/finanzas.routes.ts)",
+      "Bash(npm test *)",
+      "Bash(npx tsx -e ' *)",
+      "Bash(timeout 6 npx tsx src/index.ts)"
     ]
   }
 }

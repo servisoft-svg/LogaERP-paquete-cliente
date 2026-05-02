@@ -151,13 +151,12 @@ router.get('/login-logs', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // GET /api/auth/me — verify token
-router.get('/me', async (req, res) => {
+// authMiddleware ya valida el JWT (con algoritmo HS256 pinneado vía verifyToken).
+// Antes hacía la validación inline; centralizado para consistencia (Fix #23).
+router.get('/me', authMiddleware, async (req, res) => {
   try {
-    const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (!auth) return res.status(401).json({ error: 'No autorizado' });
-
-    const decoded = verifyToken(auth);
-    const [userId] = [decoded.id];
+    const userId = (req as any).user?.id;
+    if (!userId) return res.status(401).json({ error: 'No autorizado' });
 
     const { rows: [user] } = await pool.query(
       `SELECT id, nombre, email, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
@@ -167,7 +166,7 @@ router.get('/me', async (req, res) => {
 
     return res.json(user);
   } catch {
-    return res.status(401).json({ error: 'Token invalido' });
+    return res.status(500).json({ error: 'Error interno' });
   }
 });
 
@@ -180,15 +179,17 @@ router.post('/refresh', async (req, res) => {
 
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET ?? '';
+    const JWT_VERIFY_OPTS = { algorithms: ['HS256' as const] };
     let decoded: { id: string; rol: string; iat?: number; exp?: number };
     try {
-      decoded = jwt.verify(auth, JWT_SECRET) as typeof decoded;
+      decoded = jwt.verify(auth, JWT_SECRET, JWT_VERIFY_OPTS) as typeof decoded;
     } catch (err: unknown) {
-      // Token expirado: aceptarlo si la expiración fue hace <30 días
+      // Token expirado: aceptarlo solo si la expiración fue hace <24h.
+      // (Antes 30 días — ventana excesiva para tokens robados.)
       if (err instanceof Error && err.name === 'TokenExpiredError') {
-        const payload = jwt.verify(auth, JWT_SECRET, { ignoreExpiration: true }) as typeof decoded;
+        const payload = jwt.verify(auth, JWT_SECRET, { ...JWT_VERIFY_OPTS, ignoreExpiration: true }) as typeof decoded;
         const ageS = Date.now() / 1000 - (payload.exp ?? 0);
-        if (ageS > 30 * 86400) return res.status(401).json({ error: 'Sesion expirada' });
+        if (ageS > 86400) return res.status(401).json({ error: 'Sesion expirada' });
         decoded = payload;
       } else {
         return res.status(401).json({ error: 'Token invalido' });

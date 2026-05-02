@@ -1,7 +1,7 @@
 import express from 'express';
 import cors    from 'cors';
 import helmet  from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import compression from 'compression';
 import dotenv  from 'dotenv';
 import path    from 'path';
@@ -18,7 +18,7 @@ import pedidosRoutes, { webhookHandler } from './routes/pedidos.routes';
 import configuracionRoutes    from './routes/configuracion.routes';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
-import { authMiddleware, adminOnly } from './middleware/auth';
+import { authMiddleware, adminOnly, verifyToken } from './middleware/auth';
 import { traceIdMiddleware } from './middleware/traceId';
 import { auditoriaMiddleware } from './middleware/auditoria';
 import { pool }          from './db/pool';
@@ -26,6 +26,7 @@ import { queuesHealthy } from './queues/index';
 import { logger }        from './lib/logger';
 import { automatizacionesService } from './services/automatizaciones.service';
 import automatizacionesRoutes from './routes/automatizaciones.routes';
+import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
 
 dotenv.config();
 
@@ -85,26 +86,29 @@ if (!corsOrigin && process.env.NODE_ENV === 'production') {
   console.error('CORS_ORIGIN must be set in production');
   process.exit(1);
 }
+// Validar formato URL de CORS_ORIGIN si está definido (anti typo
+// silencioso). Acepta listado separado por comas para múltiples orígenes.
+if (corsOrigin) {
+  const origins = corsOrigin.split(',').map(s => s.trim()).filter(Boolean);
+  for (const o of origins) {
+    if (!/^https?:\/\/[^\s/$.?#].[^\s]*$/.test(o)) {
+      console.error(`CORS_ORIGIN inválido: "${o}" — debe ser una URL http(s)://`);
+      process.exit(1);
+    }
+  }
+}
 app.use(cors({
-  origin: corsOrigin || 'http://localhost:5173',
+  origin: corsOrigin
+    ? corsOrigin.split(',').map(s => s.trim()).filter(Boolean)
+    : 'http://localhost:5173',
   credentials: true,
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(auditoriaMiddleware);
-// Uploads protected: require auth token in query or header
-import jwt from 'jsonwebtoken';
-app.use('/uploads', (req, res, next) => {
-  const rawToken = req.query.token;
-  const token = (typeof rawToken === 'string' ? rawToken : '') ||
-    req.headers.authorization?.replace('Bearer ', '') || '';
-  if (!token) return res.status(401).json({ error: 'No autorizado' });
-  try {
-    jwt.verify(token, process.env.JWT_SECRET as string);
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Token invalido' });
-  }
-}, express.static(path.join(process.cwd(), 'uploads')));
+// Uploads protegidos por token (JWT con algoritmo pinneado vía verifyToken).
+// La validación de ownership real se hace en uploadsAuthMiddleware (Fix #6).
+import { uploadsAuthMiddleware } from './middleware/uploadsAuth';
+app.use('/uploads', uploadsAuthMiddleware, express.static(path.join(process.cwd(), 'uploads')));
 
 app.get('/health', async (_req, res) => {
   try {
@@ -119,7 +123,25 @@ app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
     const redis = await queuesHealthy().catch(() => false);
-    res.json({ status: 'ok', db: 'connected', redis: redis ? 'connected' : 'unavailable', uptime: process.uptime(), timestamp: new Date().toISOString() });
+    // Estado secuencias gestionadas (read-only). Si alguna unhealthy,
+    // el INSERT seguirá funcionando vía trigger defensivo runtime,
+    // pero esto sirve a monitoring para alertar.
+    const sequences = await inspectAllSequences().catch(() => []);
+    const sequencesHealthy = sequences.length > 0 && sequences.every(s => s.healthy);
+    res.json({
+      status: sequencesHealthy ? 'ok' : 'degraded',
+      db: 'connected',
+      redis: redis ? 'connected' : 'unavailable',
+      sequences: sequences.map(s => ({
+        name: s.name,
+        seqValue: s.seqValue,
+        maxReal: s.maxReal,
+        healthy: s.healthy,
+        ...(s.error ? { error: s.error } : {}),
+      })),
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    });
   } catch {
     res.status(500).json({ status: 'error', message: 'Database connection failed' });
   }
@@ -128,9 +150,31 @@ app.get('/api/health', async (_req, res) => {
 // Public routes (no auth)
 app.use('/api/auth', authRoutes);
 
-// Public webhook (before auth middleware) — with dedicated rate limit
-const webhookLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: 'Too many webhook requests' } });
-app.post('/api/pedidos/webhook', webhookLimiter, webhookHandler);
+// Public webhook (before auth middleware) — rate limit por cliente_email,
+// con fallback a IP. Antes el límite era 30/min por IP (43k pedidos/día con
+// un único token comprometido). Ahora 5/min por email + 60/min global por IP.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { error: 'Demasiadas peticiones webhook para este email. Espera 1 min.' },
+  keyGenerator: (req) => {
+    // Preferir cliente_email del body. Fallback a IP NORMALIZADA con
+    // ipKeyGenerator (express-rate-limit v8 lo exige para evitar bypass
+    // por usuarios IPv6 distintos del mismo /64 — el helper agrupa /64).
+    const email = (req.body?.cliente_email || req.body?.email || '').toString().toLowerCase().trim();
+    return email || ipKeyGenerator(req.ip ?? '');
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const webhookGlobalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Webhook saturado. Reintenta en 1 min.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.post('/api/pedidos/webhook', webhookGlobalLimiter, webhookLimiter, webhookHandler);
 
 // Protected routes (need token)
 app.use('/api/productos',     authMiddleware, productosRoutes);
@@ -161,9 +205,31 @@ queuesHealthy().then((ok) => {
 
 const server = http.createServer(app);
 
-server.listen(PORT, () => {
-  logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
-});
+// Bootstrap DB SIEMPRE en cada arranque: garantiza que secuencias y
+// funciones trigger defensivas están en estado correcto, sin depender
+// de que un operario haya aplicado las migraciones manualmente.
+// Idempotente, fail-soft (logea pero no impide arrancar — el trigger
+// defensivo runtime sigue siendo red de seguridad si esto falla).
+// Override: BOOTSTRAP_DB=false para saltarlo (útil en debugging).
+async function startup() {
+  if (process.env.BOOTSTRAP_DB !== 'false') {
+    try {
+      const result = await bootstrapDatabase();
+      if (!result.ok) {
+        logger.warn(`[startup] bootstrap completó con avisos (${result.errors.length} errores). Backend arranca igualmente — trigger defensivo runtime activo.`);
+      }
+    } catch (err) {
+      logger.error('[startup] bootstrap fallo total — backend arranca igualmente', { err });
+    }
+  } else {
+    logger.info('[startup] bootstrap DESACTIVADO por BOOTSTRAP_DB=false');
+  }
+
+  server.listen(PORT, () => {
+    logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
+  });
+}
+startup();
 
 // Cron interno: reintentar emails de automatización cada 5 min
 const RETRY_INTERVAL_MS = 5 * 60 * 1000;

@@ -23,11 +23,25 @@
     textarea {
       font-size: 16px !important;
     }
-    /* Touch targets mínimo 40px en botones de acción dentro de tablas */
+    /* Touch targets mínimo 44px (Apple HIG) en botones/links acción */
     table button,
-    table a {
+    table a,
+    button,
+    a[role="button"] {
+      min-height: 44px;
+    }
+    /* Excepción: botones icon-only pueden ser 36px si tienen aria-label claro */
+    button.icon-only,
+    a.icon-only {
       min-height: 36px;
     }
+  }
+
+  /* Scroll momentum (iOS Safari) en contenedores con overflow */
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .overflow-auto {
+    -webkit-overflow-scrolling: touch;
   }
 
   /* Safe area iOS — bottom nav y main respetan notch/home indicator */
