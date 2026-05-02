@@ -182,9 +182,11 @@ if (-not $nodeVer -or [int](($nodeVer -replace 'v','').Split('.')[0]) -lt 20) {
 # =============================================================
 # 2. PostgreSQL DEDICADO para Loga (instancia aislada)
 # =============================================================
-# Instalamos en C:\LogaERP\postgresql con servicio propio "postgresql-loga"
-# y puerto 5433. NO interferimos con ningun PostgreSQL existente que
-# pudiera haber en C:\Program Files\PostgreSQL\.
+# Usamos el ZIP portable de binarios (no el instalador EDB) + initdb +
+# pg_ctl register. El instalador EDB detecta versiones previas en
+# C:\Program Files\PostgreSQL\ y las "actualiza" ignorando --prefix,
+# rompiendo el aislamiento. El zip portable garantiza instancia
+# verdaderamente dedicada en C:\LogaERP\postgresql.
 $pgPath = "$PgInstallDir\bin"
 $psql = "$pgPath\psql.exe"
 $createdb = "$pgPath\createdb.exe"
@@ -192,16 +194,27 @@ $createdb = "$pgPath\createdb.exe"
 $pgInstalled = (Test-Path $psql) -and (Get-Service $PgServiceName -ErrorAction SilentlyContinue)
 
 if (-not $pgInstalled) {
-    Write-Step "Descargando PostgreSQL $PgVersion (~325MB, paciencia 1-3 min)..."
-    $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.6-1-windows-x64.exe"
-    $pgExe = "$env:TEMP\postgresql-installer.exe"
-    Download-File $pgUrl $pgExe
-    Write-Ok "Descarga completa ($([math]::Round((Get-Item $pgExe).Length/1MB)) MB)"
+    # 2a. Visual C++ Redistributable x64 (PostgreSQL portable lo necesita)
+    Write-Step "Instalando Visual C++ Redistributable x64..."
+    $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+    $vcExe = "$env:TEMP\vc_redist.x64.exe"
+    Download-File $vcUrl $vcExe
+    $vcProc = Start-Process $vcExe -ArgumentList "/install","/quiet","/norestart" -Wait -PassThru
+    # 0 = OK, 1638 = ya instalado version mas nueva, 3010 = OK pero pide reinicio (ignorable)
+    if ($vcProc.ExitCode -notin 0, 1638, 3010) {
+        throw "Instalacion VC++ Redistributable fallida (exit=$($vcProc.ExitCode))"
+    }
+    Remove-Item $vcExe -ErrorAction SilentlyContinue
+    Write-Ok "VC++ Redistributable OK"
 
-    # Limpiar instalacion incompleta previa si la hay
+    # 2b. Limpiar restos de intentos previos
+    if (Get-Service $PgServiceName -ErrorAction SilentlyContinue) {
+        Stop-Service $PgServiceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $PgServiceName | Out-Null
+        Start-Sleep -Seconds 2
+    }
     if (Test-Path $PgInstallDir) {
         Write-Warn "Limpiando $PgInstallDir previo..."
-        Stop-Service $PgServiceName -Force -ErrorAction SilentlyContinue
         Remove-Item $PgInstallDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path $PgDataDir) {
@@ -209,35 +222,56 @@ if (-not $pgInstalled) {
     }
     New-Item -ItemType Directory -Force -Path "C:\LogaERP" | Out-Null
 
-    Write-Step "Instalando PostgreSQL DEDICADO (puerto $PgPort, servicio $PgServiceName)..."
-    Write-Host "  Carpeta:  $PgInstallDir" -ForegroundColor DarkGray
-    Write-Host "  Datos:    $PgDataDir" -ForegroundColor DarkGray
-    Write-Host "  No toca ningun PostgreSQL existente" -ForegroundColor DarkGray
+    # 2c. Descargar zip portable
+    Write-Step "Descargando PostgreSQL $PgVersion portable (~200MB, paciencia 1-2 min)..."
+    $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.6-1-windows-x64-binaries.zip"
+    $pgZip = "$env:TEMP\postgresql-portable.zip"
+    Download-File $pgUrl $pgZip
+    Write-Ok "Descarga completa ($([math]::Round((Get-Item $pgZip).Length/1MB)) MB)"
 
-    $pgInstallArgs = @(
-        "--mode","unattended",
-        "--unattendedmodeui","none",
-        "--prefix",$PgInstallDir,
-        "--datadir",$PgDataDir,
-        "--superpassword",$PgPass,
-        "--servicename",$PgServiceName,
-        "--serviceaccount","NetworkService",
-        "--serverport",$PgPort,
-        "--disable-components","stackbuilder,pgAdmin",
-        "--enable-components","server,commandlinetools"
-    )
-    $proc = Start-Process $pgExe -ArgumentList $pgInstallArgs -Wait -PassThru
-    if ($proc.ExitCode -ne 0) {
-        $logFile = "$env:TEMP\install-postgresql.log"
-        $tail = if (Test-Path $logFile) { Get-Content $logFile -Tail 30 -ErrorAction SilentlyContinue } else { "(sin log)" }
-        throw "Instalacion PostgreSQL fallida (exit=$($proc.ExitCode)). Tail del log:`n$($tail -join "`n")"
-    }
-    Remove-Item $pgExe -ErrorAction SilentlyContinue
-
+    # 2d. Extraer (el zip contiene una carpeta raiz "pgsql\")
+    Write-Step "Extrayendo PostgreSQL en $PgInstallDir..."
+    $pgTmp = "$env:TEMP\pg-extract"
+    if (Test-Path $pgTmp) { Remove-Item $pgTmp -Recurse -Force }
+    Expand-Archive -Path $pgZip -DestinationPath $pgTmp -Force
+    Move-Item "$pgTmp\pgsql" $PgInstallDir
+    Remove-Item $pgTmp -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $pgZip -ErrorAction SilentlyContinue
     if (-not (Test-Path $psql)) {
-        throw "PostgreSQL instalado pero psql.exe no esta en $psql"
+        throw "Extraccion fallida: $psql no existe"
     }
-    Write-Ok "PostgreSQL DEDICADO instalado en $PgInstallDir"
+
+    # 2e. initdb (crea cluster con superuser=postgres y password fijo)
+    Write-Step "Inicializando cluster en $PgDataDir..."
+    $pwFile = "$env:TEMP\pgpw.txt"
+    [System.IO.File]::WriteAllText($pwFile, $PgPass, [System.Text.Encoding]::ASCII)
+    $initdb = "$pgPath\initdb.exe"
+    & $initdb -D $PgDataDir -U $PgUser --pwfile=$pwFile -E UTF8 --locale=C --auth-host=scram-sha-256 --auth-local=scram-sha-256 | Out-Null
+    Remove-Item $pwFile -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0) {
+        throw "initdb fallo (exit=$LASTEXITCODE)"
+    }
+
+    # 2f. Configurar puerto y listen
+    Add-Content "$PgDataDir\postgresql.conf" "`nport = $PgPort`nlisten_addresses = 'localhost'`n"
+
+    # 2g. Permisos: NetworkService debe poder leer/escribir el data dir
+    & icacls $PgDataDir /grant "NT AUTHORITY\NetworkService:(OI)(CI)F" /T /Q | Out-Null
+    & icacls $PgInstallDir /grant "NT AUTHORITY\NetworkService:(OI)(CI)RX" /T /Q | Out-Null
+
+    # 2h. Registrar servicio Windows con pg_ctl
+    Write-Step "Registrando servicio Windows '$PgServiceName' en puerto $PgPort..."
+    $pgCtl = "$pgPath\pg_ctl.exe"
+    & $pgCtl register -N $PgServiceName -U "NT AUTHORITY\NetworkService" -D $PgDataDir -S auto | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "pg_ctl register fallo (exit=$LASTEXITCODE)"
+    }
+
+    # 2i. Iniciar servicio
+    Start-Service $PgServiceName
+    Start-Sleep -Seconds 5
+
+    Write-Ok "PostgreSQL DEDICADO instalado en $PgInstallDir (servicio $PgServiceName, puerto $PgPort)"
 } else {
     Write-Ok "PostgreSQL DEDICADO ya instalado en $PgInstallDir (servicio $PgServiceName)"
 }
@@ -317,11 +351,21 @@ if ($dbExists -and $dbExists.Trim() -eq "1") {
 # =============================================================
 # 6. Aplicar migraciones
 # =============================================================
+# NOTA: NO usamos 2>&1 porque PowerShell 5.1 envuelve cada linea de
+# stderr como ErrorRecord y, con ErrorActionPreference=Stop, eleva
+# excepcion aunque psql devuelva exit 0 (los NOTICE de "IF NOT EXISTS"
+# salen por stderr y se confundirian con errores).
+# Usamos -v ON_ERROR_STOP=1 para que psql salga con exit!=0 SOLO en
+# ERRORs reales y verificamos $LASTEXITCODE.
 Write-Step "Aplicando migraciones SQL..."
 $env:PGPASSWORD = $AppPass
 $applied = 0
 Get-ChildItem "$ProjectDir\backend\database\migrations\*.sql" | Sort-Object Name | ForEach-Object {
-    & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -f $_.FullName 2>&1 | Out-Null
+    $name = $_.Name
+    & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -v ON_ERROR_STOP=1 -q -f $_.FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Migracion fallida: $name (exit=$LASTEXITCODE). Revisa los mensajes psql arriba."
+    }
     $applied++
 }
 Write-Ok "Procesadas $applied migraciones"

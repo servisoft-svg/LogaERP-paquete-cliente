@@ -1,0 +1,84 @@
+═══════════════════════════════════════════════════════════════════════
+  ERP LOGA — Requisitos para arrancar
+  install.bat instala todo el resto automaticamente. Esto es lo unico
+  que tienes que tener LISTO antes de lanzarlo.
+═══════════════════════════════════════════════════════════════════════
+
+[1] SISTEMA OPERATIVO
+    ─ Windows 10 (1709 o superior) o Windows 11
+    ─ Arquitectura x64 (no ARM ni 32-bit)
+
+[2] PERMISOS
+    ─ Cuenta con permisos de Administrador
+    ─ Lanzar install.bat con clic derecho > "Ejecutar como administrador"
+
+[3] CONEXION A INTERNET
+    ─ ~250 MB de descargas durante la instalacion:
+        - Node.js 20 LTS         ~ 30 MB   (nodejs.org)
+        - VC++ Redistributable   ~ 25 MB   (aka.ms / Microsoft)
+        - PostgreSQL 16 portable ~ 200 MB  (get.enterprisedb.com)
+    ─ Los siguientes dominios no deben estar bloqueados por firewall/proxy:
+        nodejs.org
+        aka.ms / download.visualstudio.microsoft.com
+        get.enterprisedb.com
+        registry.npmjs.org
+
+[4] ESPACIO EN DISCO
+    ─ ~2 GB libres en C:\
+        C:\LogaERP\postgresql      ~ 500 MB  (binarios PG portable)
+        C:\LogaERP\pgdata          ~ 100 MB  (cluster vacio, crece con uso)
+        backend\node_modules       ~ 400 MB
+        frontend\node_modules      ~ 300 MB
+        frontend\dist + caches     ~ 200 MB
+
+[5] PUERTOS LIBRES (el instalador NO los reasigna)
+    ─ 3001  Backend Node.js
+    ─ 4173  Frontend (servido en produccion con `serve`)
+    ─ 5433  PostgreSQL DEDICADO de Loga (5432 se deja libre para el de Windows)
+
+[6] LO QUE *NO* HACE FALTA TENER INSTALADO
+    El instalador descarga e instala todo esto automaticamente. NO los
+    pre-instales manualmente, evitaras conflictos:
+    ─ Node.js              (lo descarga si no esta)
+    ─ PostgreSQL           (instancia DEDICADA aislada en C:\LogaERP\)
+    ─ VC++ Redistributable (necesario para PostgreSQL portable)
+
+    Si YA tienes PostgreSQL en C:\Program Files\PostgreSQL\, no se toca:
+    el instalador crea su propio servicio "postgresql-loga" en puerto 5433.
+
+═══════════════════════════════════════════════════════════════════════
+  COMO ARRANCAR
+═══════════════════════════════════════════════════════════════════════
+
+  1. Descomprimir el proyecto en una carpeta sin espacios ni acentos
+     (recomendado: C:\erploga o similar).
+
+  2. Clic derecho sobre  install.bat  >  "Ejecutar como administrador"
+     Tarda 5-10 minutos la primera vez. NO cerrar la ventana.
+
+  3. Cuando termine, lanzar  start.bat
+     Se abre el ERP en  http://localhost:4173
+
+  4. Login inicial:
+     Email:    admin@loga.es
+     Password: Loga#Admin2026!     <-- CAMBIAR tras el primer login
+
+═══════════════════════════════════════════════════════════════════════
+  COMANDOS UTILES
+═══════════════════════════════════════════════════════════════════════
+
+  install.bat         Instalacion normal (preserva datos si los hay)
+  install-fresh.bat   Reinstala y BORRA la base de datos (-Fresh)
+  start.bat           Arranca backend + frontend + abre navegador
+  stop.bat            Para los procesos (mantiene instalacion)
+  uninstall.bat       Quita la tarea de auto-arranque y mata procesos
+  uninstall-all.bat   BORRA TODO: BD, PostgreSQL, node_modules, .env
+
+═══════════════════════════════════════════════════════════════════════
+  REFERENCIAS
+═══════════════════════════════════════════════════════════════════════
+
+  Detalle completo de dependencias y arquitectura .... REQUIREMENTS.md
+  Manual de usuario del ERP .......................... MANUAL_USUARIO.md
+  Guia paso a paso instalacion Windows ............... INSTALAR-WINDOWS.md
+  Despliegue en produccion / servidor ................ DEPLOY.md
