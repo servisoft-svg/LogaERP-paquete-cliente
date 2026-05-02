@@ -73,11 +73,13 @@ export default function Finanzas() {
   const [desgloseId, setDesgloseId] = useState<string | null>(null);
   const [rentaSearch, setRentaSearch] = useState('');
   const [rentaSort, setRentaSort] = useState<{ key: 'margen' | 'venta' | 'coste' | 'beneficio'; dir: 'desc' | 'asc' }>({ key: 'margen', dir: 'desc' });
+  const [año, setAño] = useState<number>(() => new Date().getFullYear());
 
   const cargar = useCallback(async () => {
+    setLoading(true);
     try {
       const [resRes, impRes] = await Promise.all([
-        finanzasApi.resumen(),
+        finanzasApi.resumen(año),
         finanzasApi.impactoCostes().catch(() => ({ data: { impactoRecetas: [], materiasPrimas: [] } })),
       ]);
       setData(resRes.data as ResumenData);
@@ -89,7 +91,7 @@ export default function Finanzas() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [año]);
 
   useEffect(() => { cargar(); }, [cargar]);
 
@@ -150,13 +152,16 @@ export default function Finanzas() {
 
   const exportar = async (tipo: string) => {
     try {
-      const res = await finanzasApi.exportar(tipo);
+      // Inventario es estado actual, no se filtra por año.
+      const usaAño = tipo !== 'inventario';
+      const res = await finanzasApi.exportar(tipo, usaAño ? año : undefined);
       const blob = new Blob([res.data], { type: 'text/csv' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `${tipo}.csv`; a.click();
+      const filename = usaAño ? `${tipo}-${año}.csv` : `${tipo}.csv`;
+      a.href = url; a.download = filename; a.click();
       URL.revokeObjectURL(url);
-      notify.success('Exportación lista', { description: `${tipo}.csv descargado` });
+      notify.success('Exportación lista', { description: `${filename} descargado` });
     } catch { notify.error(`No se pudo exportar ${tipo}`); }
   };
 
@@ -178,6 +183,19 @@ export default function Finanzas() {
             <span className="w-1 h-1 rounded-full bg-loga-red animate-pulse" />
             Live
           </span>
+          {/* Selector de año — filtra TODA la página + exports */}
+          <div className="ml-2 flex items-center gap-1.5">
+            <label className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-400">Año</label>
+            <select
+              value={año}
+              onChange={(e) => setAño(parseInt(e.target.value, 10))}
+              className="bg-zinc-100 dark:bg-white/5 text-[11px] font-bold text-loga-red outline-none px-2 h-7 rounded-md border border-loga-red/20 hover:border-loga-red focus:ring-2 focus:ring-loga-red/30 transition-all tabular-nums"
+            >
+              {Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - i).map(y => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+          </div>
         </div>
         <div className="flex items-center gap-1">
           {[
@@ -192,28 +210,21 @@ export default function Finanzas() {
             </button>
           ))}
           <div className="w-px h-4 bg-zinc-200 dark:bg-white/10 mx-1" />
-          <select id="plastico-year" defaultValue={new Date().getFullYear()}
-            className="bg-transparent text-[11px] font-medium text-zinc-600 dark:text-zinc-400 outline-none px-1.5 h-7 rounded-md hover:bg-loga-red/5 hover:text-loga-red transition-colors">
-            {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - i).map(y => (
-              <option key={y} value={y}>{y}</option>
-            ))}
-          </select>
           <button onClick={() => {
-            const y = (document.getElementById('plastico-year') as HTMLSelectElement)?.value || new Date().getFullYear();
             const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
-            const url = `/api/finanzas/informe-plastico?desde=${y}-01-01&hasta=${y}-12-31`;
+            const url = `/api/finanzas/informe-plastico?desde=${año}-01-01&hasta=${año}-12-31`;
             fetch(url, { headers: { Authorization: `Bearer ${token}` } })
               .then(r => r.blob())
               .then(blob => {
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
-                a.download = `informe-plastico-${y}.csv`;
+                a.download = `informe-plastico-${año}.csv`;
                 document.body.appendChild(a); a.click(); document.body.removeChild(a);
               })
               .catch(e => console.error('Error:', e));
           }}
             className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-loga-red hover:bg-loga-red/5 rounded-md transition-colors">
-            Plástico {new Date().getFullYear()}
+            Plástico {año}
             <Download size={10} strokeWidth={2} className="opacity-50 group-hover:opacity-100 transition-opacity" />
           </button>
         </div>

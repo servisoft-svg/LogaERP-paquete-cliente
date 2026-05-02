@@ -157,10 +157,10 @@ export const automatizacionesApi = {
 };
 
 export const finanzasApi = {
-  resumen: () => api.get('/finanzas/resumen'),
+  resumen: (año?: number) => api.get('/finanzas/resumen', { params: año ? { año } : {} }),
   historialPrecios: (productoId?: string) => api.get('/finanzas/historial-precios', { params: productoId ? { producto_id: productoId } : {} }),
   impactoCostes: () => api.get('/finanzas/impacto-costes'),
-  exportar: (tipo: string) => api.get(`/finanzas/exportar/${tipo}`, { responseType: 'blob' }),
+  exportar: (tipo: string, año?: number) => api.get(`/finanzas/exportar/${tipo}`, { responseType: 'blob', params: año ? { año } : {} }),
   predicciones: () => api.get('/finanzas/predicciones'),
   informePlastico: (desde?: string, hasta?: string) => api.get('/finanzas/informe-plastico', { params: { desde, hasta }, responseType: 'blob' }),
   informePlasticoResumen: (desde?: string, hasta?: string) => api.get('/finanzas/informe-plastico/resumen', { params: { desde, hasta } }),

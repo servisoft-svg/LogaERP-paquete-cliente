@@ -661,6 +661,12 @@ En la ficha de cada cliente se ve:
 
 El panel financiero muestra datos en tiempo real. Solo se cuentan los pedidos **completados** como facturacion — los pedidos confirmados o en proceso no suman como venta.
 
+### Selector de año
+
+En la barra superior hay un selector **Año** (rojo). Al cambiarlo se filtra **todo** el panel: facturación, evolución mensual, top productos, coste de producción, mermas, clientes activos y los CSV de exportación (`pedidos-2025.csv`, `produccion-2025.csv`, `informe-plastico-2025.csv`).
+
+Lo que **no** se filtra por año (porque siempre es estado actual): Rentabilidad por producto, Inmovilizado, Top 10 stock, Materias primas, Impacto de precios y CSV de Inventario.
+
 ### KPIs principales (tarjetas grandes)
 
 | Tarjeta | Que muestra | De donde sale |

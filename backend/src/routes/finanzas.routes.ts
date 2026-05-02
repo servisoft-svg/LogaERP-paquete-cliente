@@ -3,17 +3,26 @@ import { pool } from '../db/pool';
 
 const router = Router();
 
-let resumenCache: { data: unknown; timestamp: number } | null = null;
+// Cache por año — los KPIs temporales (facturación, ventas/mes, top productos,
+// coste producción, mermas, clientes activos) se filtran por año seleccionado.
+// El estado actual (inmovilizado, rentabilidad, precios MP) ignora el año.
+const resumenCacheByYear = new Map<number, { data: unknown; timestamp: number }>();
 const CACHE_TTL = 60 * 1000; // 1 minute — short because invalidated on mutations
 
-/** Call this to force refresh on next request */
-export function invalidarCacheFinanzas() { resumenCache = null; }
+/** Call this to force refresh on next request (limpia cache de TODOS los años) */
+export function invalidarCacheFinanzas() { resumenCacheByYear.clear(); }
 
-// GET /api/finanzas/resumen
-router.get('/resumen', async (_req, res) => {
+// GET /api/finanzas/resumen?año=2026  (default: año actual)
+router.get('/resumen', async (req, res) => {
   try {
-    if (resumenCache && Date.now() - resumenCache.timestamp < CACHE_TTL) {
-      return res.json(resumenCache.data);
+    const añoQuery = parseInt(String(req.query.año ?? req.query.anio ?? req.query.year ?? ''), 10);
+    const año = Number.isFinite(añoQuery) && añoQuery >= 2000 && añoQuery <= 2100
+      ? añoQuery
+      : new Date().getFullYear();
+
+    const cached = resumenCacheByYear.get(año);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return res.json(cached.data);
     }
     // 1. Rentabilidad — cálculo recursivo real:
     //    Envasado: receta envasado (cola granel × peso + envase + etiqueta)
@@ -286,35 +295,31 @@ router.get('/resumen', async (_req, res) => {
       LIMIT 10
     `);
 
-    // 4. Ventas (pedidos completados)
+    // 4. Ventas (pedidos completados del año)
     const { rows: [ventas] } = await pool.query(`
       SELECT
         COUNT(*) AS num_pedidos,
         COALESCE(SUM(total::NUMERIC), 0) AS facturacion_total,
         COALESCE(SUM(subtotal::NUMERIC), 0) AS subtotal_total,
         COALESCE(SUM(portes::NUMERIC), 0) AS portes_total
-      FROM pedidos WHERE estado = 'completado'
-    `);
+      FROM pedidos
+      WHERE estado = 'completado' AND EXTRACT(YEAR FROM updated_at) = $1
+    `, [año]);
 
-    // 5. Ventas por mes (ultimos 6 meses)
+    // 5. Ventas por mes — los 12 meses del año seleccionado
     const { rows: ventasMes } = await pool.query(`
       SELECT
         TO_CHAR(DATE_TRUNC('month', updated_at), 'YYYY-MM') AS mes,
         TO_CHAR(DATE_TRUNC('month', updated_at), 'Mon YY') AS mes_label,
         COUNT(*) AS num_pedidos,
         COALESCE(SUM(total::NUMERIC), 0) AS total
-      FROM pedidos WHERE estado = 'completado'
-        AND updated_at >= NOW() - INTERVAL '12 months'
+      FROM pedidos
+      WHERE estado = 'completado' AND EXTRACT(YEAR FROM updated_at) = $1
       GROUP BY DATE_TRUNC('month', updated_at)
       ORDER BY mes ASC
-    `);
+    `, [año]);
 
-    // 6. Ventas por producto (top 10) — solo pedidos completados.
-    // Antes (bug): contaba todas las salidas de stock × precio_venta actual.
-    // Esto incluía granel saliendo para envasarse, reversiones, ajustes —
-    // sumas falsas hasta 5000x del real. Ahora: lineas_pedido de pedidos
-    // completados, usando el precio_unitario del momento de la venta
-    // (snapshot histórico, no precio actual).
+    // 6. Ventas por producto (top 10) del año — pedidos completados, precio histórico
     const { rows: ventasProducto } = await pool.query(`
       SELECT p.nombre, p.codigo,
         COALESCE(SUM(lp.cantidad::NUMERIC), 0) AS cantidad_vendida,
@@ -324,40 +329,51 @@ router.get('/resumen', async (_req, res) => {
       FROM lineas_pedido lp
       JOIN pedidos pd ON pd.id = lp.pedido_id
       JOIN productos p ON p.id = lp.producto_id
-      WHERE pd.estado = 'completado'
+      WHERE pd.estado = 'completado' AND EXTRACT(YEAR FROM pd.updated_at) = $1
       GROUP BY p.id, p.nombre, p.codigo, p.unidad_medida, p.precio_venta
       ORDER BY facturacion DESC
       LIMIT 10
-    `);
+    `, [año]);
 
-    // 7. Coste de produccion total — usa precio real del lote consumido
+    // 7. Coste de produccion del año — usa precio real del lote consumido.
+    //    Filtramos por sm.created_at (fecha real del consumo) en lugar de
+    //    op.updated_at, que está corrupto por seeds posteriores que tocaron
+    //    todas las órdenes históricas. La migración 029 limpió duplicados
+    //    de stock_moves y añadió UNIQUE(id,created_at) para prevenirlos.
     const { rows: [costeProd] } = await pool.query(`
-      SELECT COUNT(DISTINCT op.id) AS num_ordenes,
+      SELECT COUNT(DISTINCT sm.orden_id) AS num_ordenes,
         COALESCE(SUM(ABS(sm.cantidad::NUMERIC) * COALESCE(l.precio_compra, p.precio_unitario)), 0) AS coste_total
       FROM stock_moves sm
       JOIN productos p ON p.id = sm.producto_id
       LEFT JOIN lotes l ON l.id = sm.lote_id
       JOIN ordenes_produccion op ON op.id = sm.orden_id
       WHERE sm.tipo = 'produccion_consumo' AND op.estado = 'completada'
-    `);
+        AND EXTRACT(YEAR FROM sm.created_at) = $1
+    `, [año]);
 
-    // 8. Producciones rechazadas/canceladas + lotes rechazados
+    // 8. Producciones rechazadas/canceladas + lotes rechazados del año
     const { rows: [rechazos] } = await pool.query(`
       SELECT
-        (SELECT COUNT(*) FROM ordenes_produccion WHERE estado = 'cancelada') AS ordenes_canceladas,
+        (SELECT COUNT(*) FROM ordenes_produccion
+          WHERE estado = 'cancelada' AND EXTRACT(YEAR FROM created_at) = $1) AS ordenes_canceladas,
         COALESCE((SELECT SUM(l.cantidad_inicial * COALESCE(l.precio_compra, p.precio_unitario))
           FROM lotes l JOIN productos p ON p.id = l.producto_id
-          WHERE l.estado = 'rechazado'), 0) AS valor_rechazado,
-        (SELECT COUNT(*) FROM lotes WHERE estado = 'rechazado') AS lotes_rechazados
-    `);
+          WHERE l.estado = 'rechazado'
+            AND EXTRACT(YEAR FROM l.created_at) = $1), 0) AS valor_rechazado,
+        (SELECT COUNT(*) FROM lotes
+          WHERE estado = 'rechazado' AND EXTRACT(YEAR FROM created_at) = $1) AS lotes_rechazados
+    `, [año]);
 
-    // 9. Clientes activos con pedidos
+    // 9. Clientes activos con pedidos del año
     const { rows: [clientesInfo] } = await pool.query(`
       SELECT COUNT(DISTINCT cliente_id) AS clientes_activos
-      FROM pedidos WHERE estado = 'completado' AND created_at >= NOW() - INTERVAL '12 months'
-    `);
+      FROM pedidos
+      WHERE estado = 'completado' AND EXTRACT(YEAR FROM updated_at) = $1
+    `, [año]);
 
-    // 10. Mermas — kg perdidos por producto, valorados en EUR
+    // 10. Mermas del año — kg perdidos por producto, valorados en EUR.
+    //     Filtra por COALESCE(fecha_fin, created_at): seeds históricos no
+    //     setean fecha_fin, así que created_at es la mejor aproximación.
     const { rows: mermaRows } = await pool.query(`
       SELECT
         op.merma_proceso,
@@ -372,7 +388,8 @@ router.get('/resumen', async (_req, res) => {
       WHERE op.estado = 'completada'
         AND op.merma_proceso IS NOT NULL
         AND op.merma_proceso > 0
-    `);
+        AND EXTRACT(YEAR FROM COALESCE(op.fecha_fin, op.created_at)) = $1
+    `, [año]);
     let merma_total_kg = 0;
     let merma_total_eur = 0;
     let merma_unidades_perdidas = 0;
@@ -386,6 +403,7 @@ router.get('/resumen', async (_req, res) => {
     }
 
     const result = {
+      año,
       rentabilidad,
       rechazos: {
         ordenes_canceladas: parseInt(rechazos.ordenes_canceladas),
@@ -421,7 +439,7 @@ router.get('/resumen', async (_req, res) => {
         num_ordenes: mermaRows.length,
       },
     };
-    resumenCache = { data: result, timestamp: Date.now() };
+    resumenCacheByYear.set(año, { data: result, timestamp: Date.now() });
     return res.json(result);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -586,15 +604,24 @@ router.get('/impacto-costes', async (_req, res) => {
   }
 });
 
-// GET /api/finanzas/exportar/pedidos — CSV export
-router.get('/exportar/pedidos', async (_req, res) => {
+// Helper año: query string ?año=2026 — default año actual
+function resolverAño(req: { query: Record<string, unknown> }): number {
+  const v = parseInt(String(req.query.año ?? req.query.anio ?? req.query.year ?? ''), 10);
+  return Number.isFinite(v) && v >= 2000 && v <= 2100 ? v : new Date().getFullYear();
+}
+
+// GET /api/finanzas/exportar/pedidos?año=2026 — CSV export del año
+router.get('/exportar/pedidos', async (req, res) => {
   try {
+    const año = resolverAño(req);
     const { rows } = await pool.query(`
       SELECT pd.numero_pedido, pd.estado, pd.cliente_nombre,
              pd.fecha_entrega, pd.subtotal, pd.portes, pd.iva_porcentaje, pd.total,
              pd.created_at
-      FROM pedidos pd ORDER BY pd.created_at DESC LIMIT 50000
-    `);
+      FROM pedidos pd
+      WHERE EXTRACT(YEAR FROM pd.created_at) = $1
+      ORDER BY pd.created_at DESC LIMIT 50000
+    `, [año]);
     const BOM = '\uFEFF';
     const headers = ['Numero','Estado','Cliente','Fecha entrega','Subtotal','Portes','IVA %','Total','Creado'];
     const lines = rows.map(r => [
@@ -609,16 +636,17 @@ router.get('/exportar/pedidos', async (_req, res) => {
 
     const csv = BOM + headers.join(';') + '\n' + lines.join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="pedidos.csv"');
+    res.setHeader('Content-Disposition', `attachment; filename="pedidos-${año}.csv"`);
     res.send(csv);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
 
-// GET /api/finanzas/exportar/produccion — CSV export
-router.get('/exportar/produccion', async (_req, res) => {
+// GET /api/finanzas/exportar/produccion?año=2026 — CSV export del año
+router.get('/exportar/produccion', async (req, res) => {
   try {
+    const año = resolverAño(req);
     const { rows } = await pool.query(`
       SELECT op.numero_orden, r.nombre AS receta_nombre, p.nombre AS producto_nombre,
              op.cantidad_planificada, op.cantidad_producida, op.estado,
@@ -626,8 +654,9 @@ router.get('/exportar/produccion', async (_req, res) => {
       FROM ordenes_produccion op
       JOIN recetas r ON r.id = op.receta_id
       JOIN productos p ON p.id = r.producto_id
+      WHERE EXTRACT(YEAR FROM op.created_at) = $1
       ORDER BY op.created_at DESC LIMIT 50000
-    `);
+    `, [año]);
     const BOM = '\uFEFF';
     const headers = ['Numero orden','Receta','Producto','Cant. planificada','Cant. producida','Estado','Cliente','Fecha planificada','Creado'];
     const lines = rows.map(r => [
@@ -642,7 +671,7 @@ router.get('/exportar/produccion', async (_req, res) => {
 
     const csv = BOM + headers.join(';') + '\n' + lines.join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="produccion.csv"');
+    res.setHeader('Content-Disposition', `attachment; filename="produccion-${año}.csv"`);
     res.send(csv);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
