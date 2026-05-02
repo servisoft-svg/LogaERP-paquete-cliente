@@ -119,8 +119,18 @@ router.get('/', async (req, res) => {
 // GET /api/productos/:id
 router.get('/:id', async (req, res) => {
   try {
+    // Incluye precio_coste_calculado (desde receta) y flag has_receta_activa
+    // para que la UI sepa si puede ofrecer "restaurar coste automático".
     const { rows: [prod] } = await pool.query(
-      `SELECT p.*, pv.nombre AS proveedor_nombre, pv.email AS proveedor_email
+      `SELECT p.*,
+              pv.nombre AS proveedor_nombre, pv.email AS proveedor_email,
+              public.fn_calcular_coste_receta(p.id) AS precio_coste_calculado,
+              EXISTS(
+                SELECT 1 FROM public.recetas r
+                WHERE r.producto_id = p.id AND r.activa = TRUE
+                  AND ((p.tipo::text = 'producto_envasado'  AND r.tipo_receta = 'envasado') OR
+                       (p.tipo::text = 'producto_fabricado' AND r.tipo_receta = 'fabricacion'))
+              ) AS has_receta_activa
        FROM productos p
        LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
        WHERE p.id = $1`,
@@ -196,39 +206,64 @@ router.put('/:id', async (req, res) => {
     const {
       codigo, nombre, descripcion, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id, activo, caducidad_meses, peso_unitario_kg, peso_plastico_kg,
+      reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
     if (stock_minimo != null && stock_maximo != null && Number(stock_minimo) > Number(stock_maximo)) {
       return res.status(400).json({ error: 'stock_minimo no puede ser mayor que stock_maximo' });
     }
 
-    // Registrar cambio de precio si aplica
-    if (precio_unitario != null || precio_venta != null) {
-      const { rows: [anterior] } = await pool.query(`SELECT precio_unitario, precio_venta FROM productos WHERE id = $1`, [req.params.id]);
-      if (anterior) {
-        if (precio_unitario != null && Math.abs(Number(precio_unitario) - parseFloat(anterior.precio_unitario)) > 0.0001) {
-          await pool.query(
-            `INSERT INTO historial_precios (producto_id, tipo, precio_anterior, precio_nuevo, motivo)
-             VALUES ($1, 'compra', $2, $3, 'Actualizacion precio de compra')`,
-            [req.params.id, anterior.precio_unitario, Number(precio_unitario).toFixed(6)]
-          );
-        }
-        if (precio_venta != null && Math.abs(Number(precio_venta) - parseFloat(anterior.precio_venta ?? '0')) > 0.0001) {
-          await pool.query(
-            `INSERT INTO historial_precios (producto_id, tipo, precio_anterior, precio_nuevo, motivo)
-             VALUES ($1, 'venta', $2, $3, 'Actualizacion precio de venta')`,
-            [req.params.id, anterior.precio_venta ?? '0', Number(precio_venta).toFixed(6)]
-          );
-        }
-        // Audit trail
-        await pool.query(
-          `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
-           VALUES ($1, 'CAMBIO_PRECIO', 'productos', $2, $3)`,
-          [(req as any).user?.id ?? null, req.params.id,
-           `Precio: compra ${anterior.precio_unitario}→${precio_unitario ?? 'sin cambio'}, venta ${anterior.precio_venta ?? '0'}→${precio_venta ?? 'sin cambio'}`]
-        );
-        invalidarCacheFinanzas();
+    // ── Lógica precio coste auto vs manual ──
+    // Si reset_coste_auto = true → quitar manual flag y recalcular desde receta.
+    // Si precio_unitario viene en payload Y difiere del coste calculado actual
+    //   → marcar como manual (override del usuario).
+    // Si precio_unitario coincide con el calculado, no marcar como manual.
+    const { rows: [anterior] } = await pool.query(
+      `SELECT precio_unitario, precio_venta, precio_coste_manual,
+              public.fn_calcular_coste_receta(id) AS coste_calculado
+       FROM productos WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!anterior) return res.status(404).json({ error: 'Producto no encontrado' });
+
+    let nuevoManualFlag: boolean | null = null;
+    if (reset_coste_auto === true) {
+      nuevoManualFlag = false; // volver a auto
+    } else if (precio_unitario != null) {
+      const calc = anterior.coste_calculado != null ? parseFloat(anterior.coste_calculado) : null;
+      const nuevo = Number(precio_unitario);
+      // Si hay coste calculado disponible y el usuario manda algo diferente,
+      // se considera override manual. Si manda exactamente el calculado o no
+      // hay receta, no se cambia el flag.
+      if (calc != null && Math.abs(nuevo - calc) > 0.0001) {
+        nuevoManualFlag = true;
       }
+    }
+
+    // Registrar cambio de precio en historial
+    if (precio_unitario != null && Math.abs(Number(precio_unitario) - parseFloat(anterior.precio_unitario)) > 0.0001) {
+      await pool.query(
+        `INSERT INTO historial_precios (producto_id, tipo, precio_anterior, precio_nuevo, motivo)
+         VALUES ($1, 'compra', $2, $3, $4)`,
+        [req.params.id, anterior.precio_unitario, Number(precio_unitario).toFixed(6),
+         nuevoManualFlag === true ? 'Override manual de coste' : 'Actualizacion precio de compra']
+      );
+    }
+    if (precio_venta != null && Math.abs(Number(precio_venta) - parseFloat(anterior.precio_venta ?? '0')) > 0.0001) {
+      await pool.query(
+        `INSERT INTO historial_precios (producto_id, tipo, precio_anterior, precio_nuevo, motivo)
+         VALUES ($1, 'venta', $2, $3, 'Actualizacion precio de venta')`,
+        [req.params.id, anterior.precio_venta ?? '0', Number(precio_venta).toFixed(6)]
+      );
+    }
+    if (precio_unitario != null || precio_venta != null) {
+      await pool.query(
+        `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+         VALUES ($1, 'CAMBIO_PRECIO', 'productos', $2, $3)`,
+        [(req as any).user?.id ?? null, req.params.id,
+         `Precio: compra ${anterior.precio_unitario}→${precio_unitario ?? 'sin cambio'}, venta ${anterior.precio_venta ?? '0'}→${precio_venta ?? 'sin cambio'}${nuevoManualFlag === true ? ' [manual]' : nuevoManualFlag === false ? ' [auto reset]' : ''}`]
+      );
+      invalidarCacheFinanzas();
     }
 
     const { rows: [prod] } = await pool.query(
@@ -245,7 +280,8 @@ router.put('/:id', async (req, res) => {
          activo        = COALESCE($10, activo),
          caducidad_meses = $12,
          peso_unitario_kg = $13,
-         peso_plastico_kg = COALESCE($14::NUMERIC, peso_plastico_kg)
+         peso_plastico_kg = COALESCE($14::NUMERIC, peso_plastico_kg),
+         precio_coste_manual = COALESCE($15, precio_coste_manual)
        WHERE id = $11
        RETURNING *`,
       [
@@ -263,10 +299,23 @@ router.put('/:id', async (req, res) => {
         caducidad_meses != null ? Number(caducidad_meses) || null : null,
         peso_unitario_kg != null ? Number(peso_unitario_kg) || null : null,
         peso_plastico_kg != null ? Number(peso_plastico_kg).toFixed(4) : null,
+        nuevoManualFlag,
       ]
     );
-    if (!prod) return res.status(404).json({ error: 'Producto no encontrado' });
-    invalidarCacheFinanzas(); // cualquier edit puede afectar valor inventario
+
+    // Si el flag pasa a FALSE (reset auto), recalcular ahora desde receta
+    if (nuevoManualFlag === false) {
+      await pool.query(`SELECT public.fn_actualizar_coste_si_no_manual($1)`, [req.params.id]);
+      // Releer el producto con el precio recalculado
+      const { rows: [refreshed] } = await pool.query(
+        `SELECT p.*, public.fn_calcular_coste_receta(p.id) AS precio_coste_calculado
+         FROM productos p WHERE id = $1`,
+        [req.params.id]
+      );
+      if (refreshed) return res.json(refreshed);
+    }
+
+    invalidarCacheFinanzas();
     return res.json(prod);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });

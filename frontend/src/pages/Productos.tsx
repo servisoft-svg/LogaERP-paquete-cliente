@@ -131,6 +131,13 @@ export default function Productos() {
   const [originalLotes, setOriginalLotes] = useState<LoteDisponible[]>([]);
   const [editLoteId, setEditLoteId]       = useState('');
   const [loadingEditLotes, setLoadingEditLotes] = useState(false);
+  // Info de coste calculado desde receta (para mostrar hint en form editar)
+  const [costeReceta, setCosteReceta] = useState<{
+    calculado: number | null;
+    hasReceta: boolean;
+    esManual: boolean;
+  } | null>(null);
+  const [resetAuto, setResetAuto] = useState(false);
 
   // Modal añadir stock + lote
   const [modalStock, setModalStock]         = useState(false);
@@ -176,6 +183,8 @@ export default function Productos() {
     setEditando(null);
     setForm(EMPTY);
     setError('');
+    setCosteReceta(null);
+    setResetAuto(false);
     setModalOpen(true);
   };
 
@@ -200,7 +209,18 @@ export default function Productos() {
     setEditLotes([]);
     setEditLoteId('');
     setError('');
+    setResetAuto(false);
+    setCosteReceta(null);
     setModalOpen(true);
+
+    // Cargar info de coste desde receta en background
+    productosApi.obtener(p.id).then(({ data }: { data: any }) => {
+      setCosteReceta({
+        calculado: data.precio_coste_calculado != null ? parseFloat(data.precio_coste_calculado) : null,
+        hasReceta: !!data.has_receta_activa,
+        esManual: !!data.precio_coste_manual,
+      });
+    }).catch(() => { /* silencioso */ });
     // Cargar lotes disponibles en background
     setLoadingEditLotes(true);
     try {
@@ -219,7 +239,9 @@ export default function Productos() {
     }
     setSaving(true);
     setError('');
-    const payload = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null };
+    const payload: any = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null };
+    // Si user pulsó "Restaurar auto", indicar al backend que vuelva a modo automático
+    if (resetAuto) payload.reset_coste_auto = true;
     const ejecutarGuardar = async () => {
       if (editando) {
         await productosApi.editar(editando.id, payload);
@@ -1072,12 +1094,52 @@ export default function Productos() {
                 {UNIDADES.map((u) => <option key={u} value={u}>{u}</option>)}
               </Select>
             </FormField>
-            <FormField label="Precio coste (EUR)" hint="Precio de compra">
+            <FormField
+              label="Precio coste (EUR)"
+              hint={
+                costeReceta?.hasReceta
+                  ? costeReceta.esManual
+                    ? 'Editado manualmente — el cálculo automático está desactivado'
+                    : 'Calculado automáticamente desde la receta · Edita para sobrescribir'
+                  : 'Precio de compra'
+              }
+            >
               <Input
                 type="number" min="0" step="0.01"
                 value={form.precio_unitario}
-                onChange={(e) => setForm((f) => ({ ...f, precio_unitario: e.target.value }))}
+                onChange={(e) => {
+                  setForm((f) => ({ ...f, precio_unitario: e.target.value }));
+                  setResetAuto(false); // si user edita manualmente, ya no es reset
+                }}
               />
+              {costeReceta?.hasReceta && costeReceta.calculado != null && (
+                <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+                  <span className={clsx(
+                    'inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-bold uppercase tracking-wider',
+                    costeReceta.esManual
+                      ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                      : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                  )}>
+                    <span className={clsx('w-1 h-1 rounded-full', costeReceta.esManual ? 'bg-amber-500' : 'bg-emerald-500')} />
+                    {costeReceta.esManual ? 'Manual' : 'Auto'}
+                  </span>
+                  <span className="text-zinc-500">
+                    Receta calcula: <b className="text-zinc-700 dark:text-zinc-300 tabular-nums">{costeReceta.calculado.toFixed(4)}</b> EUR
+                  </span>
+                  {costeReceta.esManual && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setForm((f) => ({ ...f, precio_unitario: costeReceta.calculado!.toFixed(4) }));
+                        setResetAuto(true);
+                      }}
+                      className="ml-auto text-loga-red hover:underline font-bold"
+                    >
+                      Restaurar auto
+                    </button>
+                  )}
+                </div>
+              )}
             </FormField>
           </div>
 
