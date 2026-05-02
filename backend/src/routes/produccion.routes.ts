@@ -280,9 +280,71 @@ router.post('/envasado-rapido', async (req, res) => {
       await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [totalUnidades, etiqueta_id]);
     }
 
+    // ── Materiales extra de la receta envasado (Fix C-2) ──
+    // Antes: envasado rápido solo descontaba cola + envase + etiqueta opcional.
+    // El manual prometía consumo de "todos los materiales extra" (cajas, tapones,
+    // selladores, sellos QR...) pero el código los ignoraba. Ahora: si el
+    // producto envasado destino tiene receta tipo='envasado' activa, se
+    // consumen TODOS sus ingredientes (excepto cola/envase/etiqueta ya
+    // descontados arriba para evitar doble descuento).
+    const idsYaDescontados = new Set<string>([cola_id, envase_id, etiqueta_id].filter(Boolean) as string[]);
+    const materialesExtraConsumidos: { id: string; nombre: string; cantidad: number }[] = [];
+    let costeMaterialesExtra = 0;
+    const { rows: [recetaEnv] } = await client.query<{ id: string }>(
+      `SELECT id FROM recetas WHERE producto_id = $1 AND tipo_receta = 'envasado' AND activa = TRUE
+       ORDER BY version DESC LIMIT 1`,
+      [pe.id]
+    );
+    if (recetaEnv) {
+      const { rows: ingredientesExtra } = await client.query<{
+        materia_prima_id: string; cantidad: string; nombre: string; tipo: string;
+        coste_medio_actual: string | null; precio_unitario: string | null;
+      }>(
+        `SELECT ir.materia_prima_id, ir.cantidad, p.nombre, p.tipo::text AS tipo,
+                p.coste_medio_actual, p.precio_unitario
+         FROM ingredientes_receta ir JOIN productos p ON p.id = ir.materia_prima_id
+         WHERE ir.receta_id = $1`,
+        [recetaEnv.id]
+      );
+      for (const ing of ingredientesExtra) {
+        if (idsYaDescontados.has(ing.materia_prima_id)) continue;
+        const cantidadPorUd = parseFloat(ing.cantidad);
+        if (!Number.isFinite(cantidadPorUd) || cantidadPorUd <= 0) continue;
+        const cantidadNecesaria = cantidadPorUd * totalUnidades;
+        const { rows: lotesExtra } = await client.query<{ id: string; cantidad_actual: string }>(
+          `SELECT id, cantidad_actual FROM lotes
+           WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
+           ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
+          [ing.materia_prima_id]
+        );
+        let resta = cantidadNecesaria;
+        for (const l of lotesExtra) {
+          if (resta <= 0) break;
+          const disp = parseFloat(l.cantidad_actual);
+          const usar = Math.min(disp, resta);
+          await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
+          await client.query(
+            `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
+             VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
+            [ing.materia_prima_id, l.id, (-usar).toFixed(6), disp.toFixed(6), (disp - usar).toFixed(6), orden.id, userId, `Material receta ${orden.numero_orden}: ${ing.nombre}`]
+          );
+          resta -= usar;
+        }
+        if (resta > 0.001) throw new Error(`STOCK_INSUFICIENTE:${ing.nombre}:falta=${resta.toFixed(0)} en lotes`);
+        await client.query(
+          `UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`,
+          [cantidadNecesaria.toFixed(6), ing.materia_prima_id]
+        );
+        materialesExtraConsumidos.push({ id: ing.materia_prima_id, nombre: ing.nombre, cantidad: cantidadNecesaria });
+        const cmpExtra = parseFloat(ing.coste_medio_actual ?? ing.precio_unitario ?? '0');
+        costeMaterialesExtra += cantidadPorUd * cmpExtra; // coste por unidad envasada
+        idsYaDescontados.add(ing.materia_prima_id);
+      }
+    }
+
     // ── Crear lote de producto envasado + stock_move de salida ──
     const loteInterno = `PE-${orden.numero_orden}-${Date.now()}`;
-    // Cost per unit: (cola CMP * weight) + (envase CMP / multiplicador) + etiqueta CMP
+    // Cost per unit: (cola CMP * weight) + (envase CMP / multiplicador) + etiqueta CMP + materiales extra
     const colaCMP = parseFloat(String(cola.coste_medio_actual || cola.precio_unitario || '0'));
     const envaseCMP = parseFloat(String(envase?.coste_medio_actual || envase?.precio_unitario || '0'));
     let costePE = (colaCMP * pesoEnvase) + (multiplicador > 1 ? envaseCMP / multiplicador : envaseCMP);
@@ -290,6 +352,7 @@ router.post('/envasado-rapido', async (req, res) => {
       const { rows: [etiq] } = await client.query(`SELECT coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [etiqueta_id]);
       if (etiq) costePE += parseFloat(etiq.coste_medio_actual || etiq.precio_unitario || '0');
     }
+    costePE += costeMaterialesExtra;
     // Read current stock for accurate stock_move antes/despues
     const { rows: [peStock] } = await client.query(`SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [pe.id]);
     const peStockAntes = parseFloat(peStock?.stock_actual ?? '0');
@@ -310,8 +373,13 @@ router.post('/envasado-rapido', async (req, res) => {
     await client.query('COMMIT');
     invalidarCacheFinanzas();
 
-    // Push-based stock alerts for consumed materials
-    const alertIds = [cola_id, envase_id, etiqueta_id].filter(Boolean) as string[];
+    // Push-based stock alerts for consumed materials (incluye extras de receta)
+    const alertIds = [
+      cola_id,
+      envase_id,
+      etiqueta_id,
+      ...materialesExtraConsumidos.map(m => m.id),
+    ].filter(Boolean) as string[];
     alertaService.checkStockMinimo(alertIds).catch(() => {});
 
     // Automatizaciones: producto envasado producido + materiales consumidos
@@ -330,6 +398,7 @@ router.post('/envasado-rapido', async (req, res) => {
       cajas_consumidas: multiplicador > 1 ? cantidadEnvases : undefined,
       peso_cola_consumido: pesoTotal,
       envases_consumidos: envase_id ? cantidadEnvases : 0,
+      materiales_extra: materialesExtraConsumidos,
       lote: loteInterno,
       orden_id: orden.id,
       numero_orden: orden.numero_orden,
