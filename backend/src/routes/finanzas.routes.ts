@@ -43,12 +43,36 @@ router.get('/resumen', async (_req, res) => {
     async function calcularCosteProducto(productoId: string): Promise<CosteResult> {
       if (costeCache[productoId]) return costeCache[productoId];
 
+      // Cargar producto para saber qué tipo de receta buscar:
+      //   - producto_envasado  → tipo_receta='envasado'
+      //   - producto_fabricado → tipo_receta='fabricacion'
+      // Antes (bug): no filtraba tipo_receta. Si un producto envasado
+      // tenía dos recetas activas (ej: la real + una de prueba mal
+      // asignada), cogía la última por version sin discriminar tipo.
+      // Caso real: PT-CL-10L tenía receta correcta (10kg cola=29.35€) y
+      // receta huérfana "Garrafa rapida 10L" (1kg cola=4.05€) → mostraba
+      // 4.05€ con margen 91.6% imposible.
+      const { rows: [prodInfo] } = await pool.query<{ tipo: string }>(
+        `SELECT tipo::text AS tipo FROM productos WHERE id = $1`, [productoId]
+      );
+      const tipoEsperado = prodInfo?.tipo === 'producto_envasado' ? 'envasado'
+                         : prodInfo?.tipo === 'producto_fabricado' ? 'fabricacion'
+                         : null;
+
       const { rows: [receta] } = await pool.query(
-        `SELECT id, rendimiento, tipo_receta FROM recetas WHERE producto_id = $1 AND activa = TRUE ORDER BY version DESC LIMIT 1`,
-        [productoId]
+        tipoEsperado
+          ? `SELECT id, rendimiento, tipo_receta FROM recetas
+             WHERE producto_id = $1 AND activa = TRUE AND tipo_receta = $2
+             ORDER BY version DESC LIMIT 1`
+          : `SELECT id, rendimiento, tipo_receta FROM recetas
+             WHERE producto_id = $1 AND activa = TRUE
+             ORDER BY version DESC LIMIT 1`,
+        tipoEsperado ? [productoId, tipoEsperado] : [productoId]
       );
 
       if (!receta) {
+        // Sin receta: usar CMP (calculado recursivo desde lotes vía trigger
+        // C-4) o fallback a precio_unitario manual.
         const c = getCMP(productoId);
         const r: CosteResult = { coste_ud: c, coste_batch: c, rendimiento: 1, desglose: [] };
         costeCache[productoId] = r;
@@ -291,16 +315,22 @@ router.get('/resumen', async (_req, res) => {
       ORDER BY mes ASC
     `);
 
-    // 6. Ventas por producto (top 10)
+    // 6. Ventas por producto (top 10) — solo pedidos completados.
+    // Antes (bug): contaba todas las salidas de stock × precio_venta actual.
+    // Esto incluía granel saliendo para envasarse, reversiones, ajustes —
+    // sumas falsas hasta 5000x del real. Ahora: lineas_pedido de pedidos
+    // completados, usando el precio_unitario del momento de la venta
+    // (snapshot histórico, no precio actual).
     const { rows: ventasProducto } = await pool.query(`
       SELECT p.nombre, p.codigo,
-        COALESCE(SUM(ABS(sm.cantidad::NUMERIC)), 0) AS cantidad_vendida,
+        COALESCE(SUM(lp.cantidad::NUMERIC), 0) AS cantidad_vendida,
         p.unidad_medida,
         p.precio_venta,
-        COALESCE(SUM(ABS(sm.cantidad::NUMERIC) * p.precio_venta), 0) AS facturacion
-      FROM stock_moves sm
-      JOIN productos p ON p.id = sm.producto_id
-      WHERE sm.tipo = 'salida' AND p.tipo IN ('producto_terminado', 'producto_fabricado', 'producto_envasado')
+        COALESCE(SUM(lp.cantidad::NUMERIC * COALESCE(lp.precio_unitario::NUMERIC, p.precio_venta::NUMERIC, 0)), 0) AS facturacion
+      FROM lineas_pedido lp
+      JOIN pedidos pd ON pd.id = lp.pedido_id
+      JOIN productos p ON p.id = lp.producto_id
+      WHERE pd.estado = 'completado'
       GROUP BY p.id, p.nombre, p.codigo, p.unidad_medida, p.precio_venta
       ORDER BY facturacion DESC
       LIMIT 10
