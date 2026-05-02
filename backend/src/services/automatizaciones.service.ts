@@ -840,11 +840,10 @@ class AutomatizacionesService {
             restante -= consumir;
           }
           if (restante > 0.001) throw new Error(`STOCK_AGOTADO_DURANTE_AUTO:${item.producto_nombre}`);
-          // Decremento atómico (no recálculo desde lotes) — evita race con consumos concurrentes
-          await client.query(
-            `UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
-            [parseFloat(item.cantidad).toFixed(6), item.producto_id]
-          );
+          // [Eliminado tras hot-fix C-5 trigger]: el UPDATE lotes anterior
+          // ya disparó fn_trg_lotes_stock_actual que recalculó productos.stock_actual.
+          // Restar de nuevo causaba doble descuento → CHECK violation visto en
+          // pedido PED-2026-01344 con error "stock_actual_check".
         }
 
         // 4) Cerrar pedido

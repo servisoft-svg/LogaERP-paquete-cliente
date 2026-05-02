@@ -232,7 +232,9 @@ router.post('/envasado-rapido', async (req, res) => {
       restaCola -= usar;
     }
     if (restaCola > 0.001) throw new Error(`STOCK_INSUFICIENTE:${cola.nombre}:falta=${restaCola.toFixed(6)} kg en lotes`);
-    await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [pesoTotal.toFixed(6), cola_id]);
+    // [Hot-fix C-5]: trigger fn_trg_lotes_stock_actual ya gestionó stock_actual
+    // tras los UPDATE lotes anteriores. Solo bumpeamos version (optimistic lock).
+    await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [cola_id]);
 
     // ── Descontar envases FIFO (cantidadEnvases = boxes/pallets, not individual units) ──
     if (envase_id) {
@@ -254,7 +256,8 @@ router.post('/envasado-rapido', async (req, res) => {
         restaEnv -= usar;
       }
       if (restaEnv > 0.001) throw new Error(`STOCK_INSUFICIENTE:${envase?.nombre ?? 'envase'}:falta=${restaEnv.toFixed(0)} en lotes`);
-      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [cantidadEnvases, envase_id]);
+      // [Hot-fix C-5]: trigger ya gestionó stock_actual desde lotes.
+      await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [envase_id]);
     }
 
     // ── Descontar etiquetas FIFO (totalUnidades = individual units, one label per unit) ──
@@ -277,7 +280,8 @@ router.post('/envasado-rapido', async (req, res) => {
         restaEtiq -= usar;
       }
       if (restaEtiq > 0.001) throw new Error(`STOCK_INSUFICIENTE:etiqueta:falta=${restaEtiq.toFixed(0)} en lotes`);
-      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [totalUnidades, etiqueta_id]);
+      // [Hot-fix C-5]: trigger ya gestionó stock_actual desde lotes.
+      await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [etiqueta_id]);
     }
 
     // ── Materiales extra de la receta envasado (Fix C-2) ──
@@ -331,10 +335,8 @@ router.post('/envasado-rapido', async (req, res) => {
           resta -= usar;
         }
         if (resta > 0.001) throw new Error(`STOCK_INSUFICIENTE:${ing.nombre}:falta=${resta.toFixed(0)} en lotes`);
-        await client.query(
-          `UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`,
-          [cantidadNecesaria.toFixed(6), ing.materia_prima_id]
-        );
+        // [Hot-fix C-5]: trigger ya gestionó stock_actual desde lotes.
+        await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [ing.materia_prima_id]);
         materialesExtraConsumidos.push({ id: ing.materia_prima_id, nombre: ing.nombre, cantidad: cantidadNecesaria });
         const cmpExtra = parseFloat(ing.coste_medio_actual ?? ing.precio_unitario ?? '0');
         costeMaterialesExtra += cantidadPorUd * cmpExtra; // coste por unidad envasada
@@ -361,7 +363,9 @@ router.post('/envasado-rapido', async (req, res) => {
        VALUES ($1, $2, $3, $3, 'aprobado', $4) RETURNING id`,
       [pe.id, loteInterno, totalUnidades, costePE.toFixed(6)]
     );
-    await client.query(`UPDATE productos SET stock_actual = stock_actual + $1, version = version + 1 WHERE id = $2`, [totalUnidades, pe.id]);
+    // [Hot-fix C-5]: el INSERT INTO lotes anterior dispara trigger que ya
+    // actualizó productos.stock_actual con el nuevo total desde lotes.
+    await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [pe.id]);
     await client.query(
       `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
        VALUES ($1, $2, 'produccion_salida', $3, $4, $5, $6, $7, $8)`,
@@ -674,7 +678,8 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
         );
         falta -= usar;
       }
-      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1, version = version + 1 WHERE id = $2`, [c.cantidad.toFixed(6), c.producto_id]);
+      // [Hot-fix C-5]: trigger ya gestionó stock_actual desde lotes.
+      await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [c.producto_id]);
     }
 
     // Crear lote de producto envasado — coste = cola + envase + todos los materiales
@@ -693,7 +698,8 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
        VALUES ($1, $2, $3, $3, 'aprobado', $4) RETURNING id`,
       [pe.id, loteInterno, calc.totalUnidades, costePE.toFixed(6)]
     );
-    await client.query(`UPDATE productos SET stock_actual = stock_actual + $1, version = version + 1 WHERE id = $2`, [calc.totalUnidades, pe.id]);
+    // [Hot-fix C-5]: trigger ya gestionó stock_actual tras INSERT lote.
+    await client.query(`UPDATE productos SET version = version + 1 WHERE id = $1`, [pe.id]);
 
     await client.query(
       `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)

@@ -568,7 +568,9 @@ router.post('/:id/consumir', async (req, res) => {
         });
       }
 
-      await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`, [item.cantidad.toFixed(6), item.producto_id]);
+      // [Eliminado tras hot-fix C-5 trigger]: trigger fn_trg_lotes_stock_actual
+      // ya recalculó productos.stock_actual desde lotes al UPDATE lotes anterior.
+      // Restar de nuevo causaba doble descuento → CHECK constraint violation.
       consumidos.push(`${item.nombre}: ${item.cantidad} ${item.unidad}`);
     }
 

@@ -937,13 +937,9 @@ export const produccionController = {
           }
         }
 
-        // Aplicar deltas a productos (decremento atómico per id)
-        for (const [pid, delta] of deltaPorProducto) {
-          await client.query(
-            `UPDATE productos SET stock_actual = stock_actual + $1::NUMERIC WHERE id = $2`,
-            [delta.toFixed(6), pid]
-          );
-        }
+        // [Hot-fix C-5]: stock_actual se actualiza vía trigger cuando los UPDATE
+        // lotes de abajo se aplican. Aplicar delta manual aquí causaría doble
+        // descuento (mismo bug que vimos en autoCompletarPedido — CHECK violation).
 
         // Aplicar deltas a lotes (un UPDATE por mv con lote_id, batch via VALUES)
         const lotesDelta = new Map<string, number>();
