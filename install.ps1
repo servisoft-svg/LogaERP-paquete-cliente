@@ -44,8 +44,13 @@ Set-Location $ProjectDir
 try {
 
 $DbName = "loga_erp"
-$DbUser = "postgres"
-$DbPass = "loga_local_$(Get-Random -Maximum 999999)"  # password local solo
+# Usuario de aplicación (igual que en macOS) — se crea sobre el superuser postgres
+$AppUser = "loga"
+$AppPass = "loga123"
+# Superuser postgres (lo crea Windows al instalar). Password se le pide al usuario
+# o se lee de .postgres_password.txt si ya existe.
+$PgUser = "postgres"
+$PgPass = $null  # se rellena más abajo
 
 Write-Host ""
 Write-Host "==========================================================="
@@ -97,65 +102,89 @@ foreach ($v in 17,16,15,14) {
 
 if (-not $pgPath) {
     Write-Step "Instalando PostgreSQL 16 (puede tardar varios minutos)..."
-    # PostgreSQL silent install: --params para password de superuser
-    winget install -e --id PostgreSQL.PostgreSQL.16 --silent --accept-source-agreements --accept-package-agreements --override "--mode unattended --unattendedmodeui none --superpassword $DbPass --servicename postgresql-16 --serviceaccount postgres"
+    Write-Host "  IMPORTANTE: el instalador de PostgreSQL puede abrir una ventana"
+    Write-Host "  y pedirte un password para el usuario 'postgres'." -ForegroundColor Yellow
+    Write-Host "  Pon el que quieras (recomendado: postgres123) y RECUERDALO." -ForegroundColor Yellow
+    Write-Host ""
+    winget install -e --id PostgreSQL.PostgreSQL.16 --accept-source-agreements --accept-package-agreements
     $pgPath = "C:\Program Files\PostgreSQL\16\bin"
-
-    # Guardar el password en un archivo local solo lectura — el usuario lo verá si lo necesita
-    $DbPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
-    Write-Warn "Password de PostgreSQL guardado en .postgres_password.txt (NO lo borres)"
+    if (-not (Test-Path "$pgPath\psql.exe")) {
+        throw "PostgreSQL no se instalo correctamente. Reintenta o instala manual desde postgresql.org/download/windows"
+    }
     Write-Ok "PostgreSQL instalado"
 } else {
     Write-Ok "PostgreSQL ya instalado en $pgPath"
-    # Si .postgres_password.txt existe, recuperar password; si no, pedirlo
-    if (Test-Path "$ProjectDir\.postgres_password.txt") {
-        $DbPass = (Get-Content "$ProjectDir\.postgres_password.txt").Trim()
-    } else {
-        $DbPass = Read-Host "Introduce el password del usuario 'postgres' (el que pusiste al instalar PostgreSQL)" -AsSecureString
-        $DbPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($DbPass))
-    }
 }
 
-$env:PGPASSWORD = $DbPass
+# Recuperar/pedir password del superuser postgres
+if (Test-Path "$ProjectDir\.postgres_password.txt") {
+    $PgPass = (Get-Content "$ProjectDir\.postgres_password.txt").Trim()
+    Write-Ok "Password de 'postgres' leido de .postgres_password.txt"
+} else {
+    Write-Host ""
+    Write-Host "Necesito el password del usuario 'postgres' (superuser PostgreSQL)." -ForegroundColor Yellow
+    Write-Host "Es el que acabas de poner durante la instalacion (NO el del usuario loga)." -ForegroundColor Yellow
+    $secure = Read-Host "Password de 'postgres'" -AsSecureString
+    $PgPass = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+    # Guardar para futuras ejecuciones
+    $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
+    Write-Ok "Password guardado en .postgres_password.txt"
+}
+
 $psql = Join-Path $pgPath "psql.exe"
 $createdb = Join-Path $pgPath "createdb.exe"
 
 # -------------------------------------------------------------
-# 3. Esperar a PostgreSQL
+# 3. Verificar conexión como postgres
 # -------------------------------------------------------------
-Write-Step "Verificando conexión a PostgreSQL..."
+Write-Step "Verificando conexion a PostgreSQL..."
+$env:PGPASSWORD = $PgPass
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {
-    & $psql -U $DbUser -d postgres -c "\q" 2>$null
+    & $psql -U $PgUser -d postgres -c "\q" 2>$null
     if ($LASTEXITCODE -eq 0) { $ok = $true; break }
     Start-Sleep -Seconds 2
 }
 if (-not $ok) {
-    Write-Err "No se conecta a PostgreSQL. Comprueba que el servicio 'postgresql-16' está corriendo:"
-    Write-Host "  Get-Service postgresql-16   |   Start-Service postgresql-16"
-    exit 1
+    Write-Err "No se conecta a PostgreSQL como '$PgUser'. Posibles causas:"
+    Write-Host "  - Password incorrecto. Borra .postgres_password.txt y reintenta."
+    Write-Host "  - Servicio parado: Start-Service postgresql-16"
+    throw "Conexion a PostgreSQL fallida"
 }
 Write-Ok "PostgreSQL responde"
 
 # -------------------------------------------------------------
-# 4. Crear base de datos
+# 4. Crear usuario de aplicación 'loga' (igual que en macOS)
 # -------------------------------------------------------------
-$dbExists = & $psql -U $DbUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'"
+$userExists = & $psql -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$AppUser'"
+if ($userExists.Trim() -eq "1") {
+    Write-Ok "Usuario '$AppUser' ya existe"
+} else {
+    Write-Step "Creando usuario '$AppUser' con CREATEDB..."
+    & $psql -U $PgUser -d postgres -c "CREATE USER $AppUser WITH PASSWORD '$AppPass' CREATEDB;" | Out-Null
+    Write-Ok "Usuario '$AppUser' creado"
+}
+
+# -------------------------------------------------------------
+# 5. Crear base de datos (propietario = loga)
+# -------------------------------------------------------------
+$dbExists = & $psql -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'"
 if ($dbExists.Trim() -eq "1") {
     Write-Ok "Base de datos '$DbName' ya existe"
 } else {
-    Write-Step "Creando base de datos '$DbName'..."
-    & $createdb -U $DbUser $DbName
+    Write-Step "Creando base de datos '$DbName' (propietario: $AppUser)..."
+    & $createdb -U $PgUser -O $AppUser $DbName
     Write-Ok "Base de datos creada"
 }
 
 # -------------------------------------------------------------
-# 5. Aplicar migraciones
+# 6. Aplicar migraciones (como usuario loga)
 # -------------------------------------------------------------
 Write-Step "Aplicando migraciones SQL..."
+$env:PGPASSWORD = $AppPass
 $applied = 0
 Get-ChildItem "$ProjectDir\backend\database\migrations\*.sql" | Sort-Object Name | ForEach-Object {
-    & $psql -U $DbUser -d $DbName -f $_.FullName 2>&1 | Out-Null
+    & $psql -U $AppUser -d $DbName -f $_.FullName 2>&1 | Out-Null
     $applied++
 }
 Write-Ok "Procesadas $applied migraciones"
@@ -170,8 +199,8 @@ if (-not (Test-Path $envFile)) {
     $bkp = -join ((1..32) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     $whk = -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     @"
-# Generado automáticamente por install.ps1 — $(Get-Date)
-DATABASE_URL=postgresql://${DbUser}:${DbPass}@localhost:5432/$DbName
+# Generado automaticamente por install.ps1 - $(Get-Date)
+DATABASE_URL=postgresql://${AppUser}:${AppPass}@localhost:5432/$DbName
 JWT_SECRET=$jwt
 BACKUP_PASSWORD=$bkp
 WEBHOOK_TOKEN=$whk
