@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  DollarSign, TrendingUp, Factory, Warehouse, Download, BarChart3, PieChart,
-  ArrowUpRight, ArrowDownRight, Package, Search, Sparkles, Activity,
-  ChevronDown, Receipt, Layers, Box, Beaker, Zap, AlertTriangle,
+  Download, ArrowUpRight, ArrowDownRight, Search, ChevronDown,
+  AlertTriangle, Plus, Minus,
 } from 'lucide-react';
 import { finanzasApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -49,40 +48,18 @@ interface ImpactoReceta {
 }
 interface MPPrecio { codigo: string; nombre: string; unidad_medida: string; precio_actual: string; precio_anterior: string | null; variacion_pct: string }
 
-// ── Helpers de formato ──────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────
 const fmt = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fmtShort = (n: number) => {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return fmt(n);
-};
 const fmtInt = (n: number) => n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
+const fmtCompact = (n: number) => {
+  if (n >= 1_000_000) return (n / 1_000_000).toLocaleString('es-ES', { maximumFractionDigits: 2 }) + 'M';
+  if (n >= 1_000) return (n / 1_000).toLocaleString('es-ES', { maximumFractionDigits: 1 }) + 'K';
+  return n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
+};
 
-// ── Sparkline mini SVG (sin librería) ───────────────────────────────
-function Sparkline({ values, color = '#FF0000', height = 28 }: { values: number[]; color?: string; height?: number }) {
-  if (values.length < 2) return null;
-  const max = Math.max(...values, 1);
-  const min = Math.min(...values, 0);
-  const range = max - min || 1;
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * 100;
-    const y = height - ((v - min) / range) * height;
-    return `${x},${y}`;
-  }).join(' ');
-  const areaPoints = `0,${height} ${points} 100,${height}`;
-  return (
-    <svg viewBox={`0 0 100 ${height}`} className="w-full overflow-visible" preserveAspectRatio="none" style={{ height }}>
-      <defs>
-        <linearGradient id={`spark-${color}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon points={areaPoints} fill={`url(#spark-${color})`} />
-      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
+// Estilos editoriales reutilizables
+const SERIF = { fontFamily: '"Instrument Serif", "Times New Roman", serif' };
+const MONO = { fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace' };
 
 // ── Página ──────────────────────────────────────────────────────────
 export default function Finanzas() {
@@ -97,7 +74,6 @@ export default function Finanzas() {
   const [desgloseId, setDesgloseId] = useState<string | null>(null);
   const [rentaSearch, setRentaSearch] = useState('');
   const [rentaSort, setRentaSort] = useState<{ key: 'margen' | 'venta' | 'coste' | 'beneficio'; dir: 'desc' | 'asc' }>({ key: 'margen', dir: 'desc' });
-  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
 
   const cargar = useCallback(async () => {
     try {
@@ -109,7 +85,6 @@ export default function Finanzas() {
       const imp = impRes.data as { impactoRecetas: ImpactoReceta[]; materiasPrimas: MPPrecio[] };
       setImpactoRecetas(imp.impactoRecetas ?? []);
       setMpPrecios(imp.materiasPrimas ?? []);
-      setRefreshedAt(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al cargar datos financieros');
     } finally {
@@ -119,19 +94,16 @@ export default function Finanzas() {
 
   useEffect(() => { cargar(); }, [cargar]);
 
-  // ── Memos para no recalcular en cada render ────────────────────────
+  // Memos
   const beneficioBruto = useMemo(() => (data ? data.ventas.facturacion_total - data.costeProd.coste_total : 0), [data]);
   const margenPct = useMemo(() => (data && data.ventas.facturacion_total > 0 ? (beneficioBruto / data.ventas.facturacion_total) * 100 : 0), [data, beneficioBruto]);
   const maxMes = useMemo(() => (data ? Math.max(...data.ventasMes.map(v => parseFloat(String(v.total))), 1) : 1), [data]);
+  const minMes = useMemo(() => (data ? Math.min(...data.ventasMes.map(v => parseFloat(String(v.total))), 0) : 0), [data]);
   const avgMes = useMemo(() => {
     if (!data || data.ventasMes.length === 0) return 0;
     return data.ventasMes.reduce((s, m) => s + parseFloat(String(m.total)), 0) / data.ventasMes.length;
   }, [data]);
-  const totalEvolucion = useMemo(() => data?.ventasMes.reduce((s, m) => s + parseFloat(String(m.total)), 0) ?? 0, [data]);
 
-  const sparkVentas = useMemo(() => data?.ventasMes.map(m => parseFloat(String(m.total))) ?? [], [data]);
-
-  // Filtro + búsqueda + sort de rentabilidad (memoizado)
   const rentabilidadFiltrada = useMemo(() => {
     if (!data) return [];
     let arr = data.rentabilidad.filter(r => rentaTab === 'todos' || r.tipo === rentaTab);
@@ -158,24 +130,21 @@ export default function Finanzas() {
     setRentaSort(prev => prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' });
   };
 
-  // ── Guards de auth/loading/error ───────────────────────────────────
   if (!isAdmin) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center space-y-2">
-          <AlertTriangle size={32} className="mx-auto text-amber-500" />
-          <p className="text-gray-500 text-sm">Acceso restringido a administradores</p>
+          <AlertTriangle size={28} className="mx-auto text-zinc-400" />
+          <p className="text-zinc-500 text-xs uppercase tracking-widest">Acceso restringido</p>
         </div>
       </div>
     );
   }
-  if (loading) {
-    return <div className="flex items-center justify-center min-h-[60vh]"><SpinnerColaBlanca /></div>;
-  }
+  if (loading) return <div className="flex items-center justify-center min-h-[60vh]"><SpinnerColaBlanca /></div>;
   if (error || !data) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
-        <p className="text-loga-red text-sm">{error || 'Sin datos'}</p>
+        <p className="text-loga-red text-xs uppercase tracking-widest">{error || 'Sin datos'}</p>
       </div>
     );
   }
@@ -192,562 +161,238 @@ export default function Finanzas() {
     } catch { notify.error(`No se pudo exportar ${tipo}`); }
   };
 
-  // ── Render principal ───────────────────────────────────────────────
+  const fechaHoy = new Date().toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+  // ─────────────────────────────────────────────────────────────────
   return (
-    <div className="animate-fade-in space-y-6 pb-12">
+    <div className="animate-fade-in -mx-4 sm:-mx-6 -mt-4 sm:-mt-6">
 
-      {/* ═══════════════════════════════════════════════════════════════
-           HERO HEADER — gradient + métricas resumen integradas
-         ═══════════════════════════════════════════════════════════════ */}
-      <motion.section
-        initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
-        className="relative overflow-hidden rounded-3xl border border-gray-100 bg-gradient-to-br from-white via-white to-red-50/30 dark:from-zinc-900 dark:via-zinc-900 dark:to-red-950/20 p-6 shadow-sm"
-      >
-        {/* Decorative blobs */}
-        <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-loga-red/5 blur-3xl pointer-events-none" />
-        <div className="absolute -bottom-16 -left-16 w-48 h-48 rounded-full bg-emerald-500/5 blur-3xl pointer-events-none" />
-
-        <div className="relative flex flex-col md:flex-row md:items-center md:justify-between gap-5">
-          <div className="flex items-start gap-4">
-            <div className="rounded-2xl bg-gradient-to-br from-loga-red to-red-600 p-3 shadow-lg shadow-red-500/20">
-              <Activity size={22} className="text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <h1 className="text-2xl font-black text-gray-900 tracking-tight">Finanzas</h1>
-                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  En vivo
-                </span>
-              </div>
-              <p className="text-xs text-gray-500">
-                Panel financiero ·{' '}
-                {refreshedAt && <span className="text-gray-400">Actualizado {refreshedAt.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</span>}
-              </p>
-            </div>
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  MASTHEAD — barra superior tipo periódico financiero      ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      <div className="border-b border-black dark:border-white/20 px-6 sm:px-12 py-3">
+        <div className="flex items-center justify-between gap-4 text-[10px] uppercase tracking-[0.2em] font-medium">
+          <div className="flex items-center gap-4 text-zinc-600 dark:text-zinc-400">
+            <span className="font-bold text-black dark:text-white">Loga · Daily Ledger</span>
+            <span className="hidden sm:inline text-zinc-400">{fechaHoy}</span>
           </div>
-
-          {/* Acciones agrupadas */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1 rounded-xl border border-gray-200 bg-white p-1 shadow-sm">
-              {([
-                { tipo: 'pedidos',     label: 'Pedidos',    icon: Receipt },
-                { tipo: 'produccion',  label: 'Producción', icon: Factory },
-                { tipo: 'inventario',  label: 'Inventario', icon: Box },
-              ] as const).map(({ tipo, label, icon: Icon }) => (
-                <button key={tipo} onClick={() => exportar(tipo)}
-                  className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-all">
-                  <Icon size={12} /> {label}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center rounded-xl border border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 overflow-hidden shadow-sm">
-              <select id="plastico-year" defaultValue={new Date().getFullYear()}
-                className="bg-transparent px-2 py-1.5 text-[11px] font-bold text-emerald-700 outline-none border-r border-emerald-200">
-                {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - i).map(y => (
-                  <option key={y} value={y}>{y}</option>
-                ))}
-              </select>
-              <button onClick={() => {
-                const y = (document.getElementById('plastico-year') as HTMLSelectElement)?.value || new Date().getFullYear();
-                const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
-                const url = `/api/finanzas/informe-plastico?desde=${y}-01-01&hasta=${y}-12-31`;
-                fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-                  .then(r => r.blob())
-                  .then(blob => {
-                    const a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = `informe-plastico-${y}.csv`;
-                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                  })
-                  .catch(e => console.error('Error:', e));
-              }}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 transition-all">
-                <Download size={12} /> Plástico (Ley 7/2022)
-              </button>
-            </div>
-          </div>
-        </div>
-      </motion.section>
-
-      {/* ═══════════════════════════════════════════════════════════════
-           KPI HERO — 4 métricas grandes con sparkline + comparativas
-         ═══════════════════════════════════════════════════════════════ */}
-      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          {
-            label: 'Facturación',
-            value: data.ventas.facturacion_total,
-            sub: `${fmtInt(data.ventas.num_pedidos)} pedidos`,
-            icon: DollarSign,
-            color: '#10b981',
-            gradientFrom: 'from-emerald-50',
-            gradientTo: 'to-emerald-100/30',
-            iconBg: 'bg-gradient-to-br from-emerald-400 to-emerald-600',
-            textColor: 'text-emerald-700 dark:text-emerald-400',
-            sparkColor: '#10b981',
-            spark: sparkVentas.length > 1 ? sparkVentas : undefined,
-          },
-          {
-            label: 'Coste producción',
-            value: data.costeProd.coste_total,
-            sub: `${fmtInt(data.costeProd.num_ordenes)} órdenes`,
-            icon: Factory,
-            color: '#f59e0b',
-            gradientFrom: 'from-amber-50',
-            gradientTo: 'to-amber-100/30',
-            iconBg: 'bg-gradient-to-br from-amber-400 to-orange-500',
-            textColor: 'text-amber-700 dark:text-amber-400',
-            sparkColor: '#f59e0b',
-            spark: undefined,
-          },
-          {
-            label: 'Beneficio bruto',
-            value: beneficioBruto,
-            sub: `${margenPct.toFixed(1)}% margen`,
-            subBadge: margenPct >= 40 ? 'excelente' : margenPct >= 20 ? 'óptimo' : 'revisar',
-            subBadgeColor: margenPct >= 40 ? 'emerald' : margenPct >= 20 ? 'amber' : 'red',
-            icon: TrendingUp,
-            color: beneficioBruto >= 0 ? '#3b82f6' : '#FF0000',
-            gradientFrom: beneficioBruto >= 0 ? 'from-blue-50' : 'from-red-50',
-            gradientTo: beneficioBruto >= 0 ? 'to-indigo-100/30' : 'to-red-100/30',
-            iconBg: beneficioBruto >= 0 ? 'bg-gradient-to-br from-blue-400 to-indigo-600' : 'bg-gradient-to-br from-red-500 to-rose-600',
-            textColor: beneficioBruto >= 0 ? 'text-blue-700 dark:text-blue-400' : 'text-loga-red',
-            sparkColor: beneficioBruto >= 0 ? '#3b82f6' : '#FF0000',
-            spark: undefined,
-          },
-          {
-            label: 'Valor inventario',
-            value: data.inmovilizado.valor_total,
-            sub: 'Stock inmovilizado',
-            icon: Warehouse,
-            color: '#8b5cf6',
-            gradientFrom: 'from-violet-50',
-            gradientTo: 'to-purple-100/30',
-            iconBg: 'bg-gradient-to-br from-violet-400 to-purple-600',
-            textColor: 'text-violet-700 dark:text-violet-400',
-            sparkColor: '#8b5cf6',
-            spark: undefined,
-          },
-        ].map((card, i) => (
-          <motion.article
-            key={card.label}
-            initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.08, type: 'spring', stiffness: 280, damping: 24 }}
-            whileHover={{ y: -4, transition: { duration: 0.2 } }}
-            className={clsx(
-              'relative rounded-2xl border border-gray-100 dark:border-white/10 p-5 shadow-sm overflow-hidden group cursor-default transition-shadow hover:shadow-lg',
-              'bg-gradient-to-br', card.gradientFrom, card.gradientTo, 'dark:from-zinc-900 dark:to-zinc-900',
-            )}
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">{card.label}</p>
-                <p className={clsx('text-3xl font-black tabular-nums tracking-tight leading-none', card.textColor)}>
-                  {fmtShort(card.value)}
-                </p>
-                <p className="text-[10px] font-semibold text-gray-400 mt-1">EUR</p>
-              </div>
-              <div className={clsx('rounded-2xl p-2.5 shadow-md transition-transform group-hover:scale-110 group-hover:rotate-3', card.iconBg)}>
-                <card.icon size={18} className="text-white" strokeWidth={2.5} />
-              </div>
-            </div>
-
-            <div className="flex items-end justify-between gap-3">
-              <div className="flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-400">
-                <span className="font-semibold">{card.sub}</span>
-                {card.subBadge && (
-                  <span className={clsx(
-                    'rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider',
-                    card.subBadgeColor === 'emerald' && 'bg-emerald-100 text-emerald-700',
-                    card.subBadgeColor === 'amber' && 'bg-amber-100 text-amber-700',
-                    card.subBadgeColor === 'red' && 'bg-red-100 text-red-700',
-                  )}>
-                    {card.subBadge}
-                  </span>
-                )}
-              </div>
-              {card.spark && (
-                <div className="w-20 opacity-70 group-hover:opacity-100 transition-opacity">
-                  <Sparkline values={card.spark} color={card.sparkColor} height={24} />
-                </div>
-              )}
-            </div>
-          </motion.article>
-        ))}
-      </section>
-
-      {/* ═══════════════════════════════════════════════════════════════
-           MÉTRICAS OPERATIVAS — 4 mini cards
-         ═══════════════════════════════════════════════════════════════ */}
-      <motion.section
-        initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
-        className="grid grid-cols-2 md:grid-cols-4 gap-3"
-      >
-        {[
-          {
-            label: 'Ticket medio', icon: Receipt,
-            value: data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0',
-            unit: 'EUR/pedido', accent: 'violet',
-          },
-          {
-            label: 'Coste medio/orden', icon: Factory,
-            value: data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0',
-            unit: 'EUR/orden', accent: 'amber',
-          },
-          {
-            label: 'Producción rechazada', icon: AlertTriangle,
-            value: fmtShort(data.rechazos.valor_rechazado),
-            unit: `${data.rechazos.ordenes_canceladas} órd · ${data.rechazos.lotes_rechazados} lotes`,
-            accent: 'red',
-          },
-          {
-            label: 'Mermas producción', icon: Beaker,
-            value: `${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')} kg`,
-            unit: `${fmt(data.mermas?.total_eur ?? 0)} EUR perdidos`,
-            accent: 'amber',
-          },
-        ].map((m, i) => {
-          const accentMap: Record<string, { ring: string; icon: string; text: string }> = {
-            violet: { ring: 'ring-violet-100 dark:ring-violet-900/30', icon: 'text-violet-500 bg-violet-50 dark:bg-violet-950/30', text: 'text-violet-700 dark:text-violet-400' },
-            amber:  { ring: 'ring-amber-100 dark:ring-amber-900/30',  icon: 'text-amber-500 bg-amber-50 dark:bg-amber-950/30',   text: 'text-amber-700 dark:text-amber-400' },
-            red:    { ring: 'ring-red-100 dark:ring-red-900/30',      icon: 'text-loga-red bg-red-50 dark:bg-red-950/30',         text: 'text-loga-red' },
-          };
-          const a = accentMap[m.accent];
-          return (
-            <motion.div
-              key={m.label}
-              initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 + i * 0.05 }}
-              whileHover={{ y: -2 }}
-              className={clsx('rounded-xl border border-gray-100 bg-white dark:bg-zinc-900 px-4 py-3.5 ring-1 transition-all hover:shadow-md', a.ring)}
-            >
-              <div className="flex items-start justify-between mb-1.5">
-                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">{m.label}</p>
-                <div className={clsx('rounded-md p-1', a.icon)}>
-                  <m.icon size={11} strokeWidth={2.5} />
-                </div>
-              </div>
-              <p className={clsx('text-lg font-black tabular-nums leading-tight', a.text)}>{m.value}</p>
-              <p className="text-[9px] text-gray-400 mt-0.5 truncate">{m.unit}</p>
-            </motion.div>
-          );
-        })}
-      </motion.section>
-
-      {/* ═══════════════════════════════════════════════════════════════
-           EVOLUCIÓN DE VENTAS — Chart de barras mejorado
-         ═══════════════════════════════════════════════════════════════ */}
-      {data.ventasMes.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }}
-          className="rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center justify-between p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="flex items-center gap-3">
-              <div className="rounded-xl bg-loga-red/10 p-2">
-                <BarChart3 size={16} className="text-loga-red" />
-              </div>
-              <div>
-                <h2 className="text-sm font-bold text-gray-900 dark:text-white">Evolución de ventas</h2>
-                <p className="text-[11px] text-gray-400">Últimos {data.ventasMes.length} meses</p>
-              </div>
-            </div>
-            <div className="text-right">
-              <p className="text-xs text-gray-400 font-medium">Total período</p>
-              <p className="text-lg font-black text-gray-900 dark:text-white tabular-nums">{fmt(totalEvolucion)} EUR</p>
-            </div>
-          </div>
-
-          <div className="p-5 pt-4">
-            <div className="flex items-end gap-1.5 sm:gap-2 h-52">
-              {data.ventasMes.map((m, i) => {
-                const total = parseFloat(String(m.total));
-                const pct = maxMes > 0 ? (total / maxMes) * 100 : 0;
-                const aboveAvg = total > avgMes;
-                const diffPct = avgMes > 0 ? ((total / avgMes - 1) * 100) : 0;
-                return (
-                  <div key={m.mes} className="flex-1 flex flex-col items-center gap-1.5 group relative min-w-0">
-                    {/* Tooltip rico */}
-                    <div className="absolute -top-24 left-1/2 -translate-x-1/2 bg-gray-900 dark:bg-zinc-800 text-white rounded-xl px-3 py-2.5 text-[10px] opacity-0 group-hover:opacity-100 transition-all pointer-events-none z-20 whitespace-nowrap shadow-2xl ring-1 ring-white/10">
-                      <p className="font-black text-base tabular-nums leading-none mb-1">{fmt(total)} <span className="text-xs text-gray-400">EUR</span></p>
-                      <div className="flex items-center gap-2 text-[10px]">
-                        <span className="text-gray-400">{m.num_pedidos} pedidos</span>
-                        <span className="text-gray-500">·</span>
-                        <span className="text-gray-300 font-semibold">{m.mes_label}</span>
-                      </div>
-                      <div className={clsx('mt-1.5 flex items-center gap-1 text-[10px] font-bold', aboveAvg ? 'text-emerald-400' : 'text-amber-400')}>
-                        {aboveAvg ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
-                        {aboveAvg ? '+' : ''}{diffPct.toFixed(0)}% vs media
-                      </div>
-                      <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-2.5 h-2.5 bg-gray-900 dark:bg-zinc-800 rotate-45" />
-                    </div>
-
-                    {/* Barra */}
-                    <div className="w-full relative cursor-pointer" style={{ height: '152px' }}>
-                      <div className="absolute inset-0 bg-gray-50 dark:bg-zinc-800/50 rounded-xl" />
-                      {/* Línea media (solo arriba) */}
-                      <div className="absolute left-0 right-0 border-t border-dashed border-gray-300 dark:border-white/15"
-                           style={{ bottom: `${avgMes > 0 ? (avgMes / maxMes) * 100 : 0}%` }} />
-                      <motion.div
-                        initial={{ height: 0 }}
-                        animate={{ height: `${pct}%` }}
-                        transition={{ delay: 0.6 + i * 0.06, duration: 0.7, ease: [0.32, 0.72, 0, 1] }}
-                        className={clsx(
-                          'absolute bottom-0 left-1 right-1 rounded-lg transition-all',
-                          'group-hover:left-0 group-hover:right-0 group-hover:shadow-lg',
-                          aboveAvg
-                            ? 'bg-gradient-to-t from-loga-red via-red-500 to-red-400'
-                            : 'bg-gradient-to-t from-red-300 to-red-200 dark:from-red-900/50 dark:to-red-800/30'
-                        )}
-                      />
-                      {/* Indicador above-avg sutil */}
-                      {aboveAvg && (
-                        <motion.div
-                          initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1 + i * 0.06 }}
-                          className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-emerald-400 ring-2 ring-white dark:ring-zinc-900"
-                        />
-                      )}
-                    </div>
-
-                    <span className="text-[10px] font-bold text-gray-700 dark:text-gray-300">{m.mes_label.split(' ')[0]}</span>
-                    <span className="text-[9px] text-gray-400 tabular-nums hidden sm:inline">{fmtShort(total)}</span>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Legenda */}
-            <div className="flex items-center justify-center gap-5 mt-4 text-[10px] text-gray-500 dark:text-gray-400">
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-2 rounded bg-gradient-to-t from-loga-red to-red-400" />
-                Sobre la media
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-3 h-2 rounded bg-gradient-to-t from-red-300 to-red-200" />
-                Bajo la media
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-5 border-t border-dashed border-gray-400 dark:border-white/30" />
-                Media: <b className="text-gray-700 dark:text-gray-200 tabular-nums">{fmtShort(avgMes)}</b>
-              </span>
-            </div>
-          </div>
-        </motion.section>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════════
-           INVENTARIO — Donut + Top 10 (2 columnas en desktop)
-         ═══════════════════════════════════════════════════════════════ */}
-      <section className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-
-        {/* Donut distribución (2 cols) */}
-        <motion.div
-          initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.55 }}
-          className="lg:col-span-2 rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center gap-3 p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="rounded-xl bg-violet-100 dark:bg-violet-950/30 p-2">
-              <PieChart size={16} className="text-violet-600 dark:text-violet-400" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Distribución inventario</h2>
-              <p className="text-[11px] text-gray-400">Por categoría de producto</p>
-            </div>
-          </div>
-
-          <div className="p-5">
-            <div className="flex flex-col sm:flex-row items-center gap-6">
-              {/* Donut SVG mejorado */}
-              <div className="relative w-36 h-36 shrink-0">
-                <svg viewBox="0 0 36 36" className="w-full h-full -rotate-90">
-                  {(() => {
-                    const items = [
-                      { value: data.inmovilizado.valor_mp, color: '#3b82f6' },
-                      { value: data.inmovilizado.valor_fab, color: '#FF0000' },
-                      { value: data.inmovilizado.valor_env, color: '#10b981' },
-                      { value: data.inmovilizado.valor_emb, color: '#f59e0b' },
-                    ];
-                    const total = data.inmovilizado.valor_total || 1;
-                    let offset = 0;
-                    return items.map((item, i) => {
-                      const pct = (item.value / total) * 100;
-                      const el = (
-                        <circle
-                          key={i} cx="18" cy="18" r="14" fill="none" stroke={item.color} strokeWidth="5"
-                          strokeDasharray={`${pct} ${100 - pct}`} strokeDashoffset={`-${offset}`}
-                          strokeLinecap="round"
-                          className="transition-all duration-1000"
-                          style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))' }}
-                        />
-                      );
-                      offset += pct;
-                      return el;
-                    });
-                  })()}
-                </svg>
-                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <p className="text-2xl font-black text-gray-900 dark:text-white tabular-nums leading-none">{fmtShort(data.inmovilizado.valor_total)}</p>
-                  <p className="text-[10px] font-bold text-gray-400 mt-1">EUR TOTAL</p>
-                </div>
-              </div>
-
-              {/* Legend con barra de progreso */}
-              <div className="flex-1 w-full space-y-2.5">
-                {([
-                  { label: 'Materia prima', value: data.inmovilizado.valor_mp,  color: '#3b82f6', icon: Beaker },
-                  { label: 'Fabricado',     value: data.inmovilizado.valor_fab, color: '#FF0000', icon: Zap },
-                  { label: 'Envasado',      value: data.inmovilizado.valor_env, color: '#10b981', icon: Package },
-                  { label: 'Embalaje',      value: data.inmovilizado.valor_emb, color: '#f59e0b', icon: Box },
-                ]).map(({ label, value, color, icon: Icon }) => {
-                  const pct = data.inmovilizado.valor_total > 0 ? (value / data.inmovilizado.valor_total) * 100 : 0;
-                  return (
-                    <div key={label} className="group">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Icon size={11} style={{ color }} />
-                        <span className="text-[11px] font-semibold text-gray-700 dark:text-gray-300 flex-1">{label}</span>
-                        <span className="text-[11px] font-black tabular-nums text-gray-900 dark:text-white">{fmtShort(value)}</span>
-                        <span className="text-[10px] tabular-nums text-gray-400 w-10 text-right font-semibold">{pct.toFixed(0)}%</span>
-                      </div>
-                      <div className="h-1.5 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden">
-                        <motion.div
-                          initial={{ width: 0 }} animate={{ width: `${pct}%` }}
-                          transition={{ delay: 0.7, duration: 0.8 }}
-                          className="h-full rounded-full"
-                          style={{ backgroundColor: color }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </motion.div>
-
-        {/* Top 10 inmovilizado (3 cols) */}
-        <motion.div
-          initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.6 }}
-          className="lg:col-span-3 rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center gap-3 p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="rounded-xl bg-amber-100 dark:bg-amber-950/30 p-2">
-              <Layers size={16} className="text-amber-600 dark:text-amber-400" />
-            </div>
-            <div className="flex-1">
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Top 10 inmovilizado</h2>
-              <p className="text-[11px] text-gray-400">Productos con más valor en stock</p>
-            </div>
-            <span className="rounded-full bg-amber-100 dark:bg-amber-950/30 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400">
-              {data.topInmovilizado.length}
+          <div className="flex items-center gap-3 text-zinc-500">
+            <span className="hidden md:inline">EUR</span>
+            <span className="hidden md:inline">·</span>
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-loga-red animate-pulse" />
+              Live
             </span>
           </div>
+        </div>
+      </div>
 
-          <div className="p-5 space-y-2.5">
-            {data.topInmovilizado.slice(0, 10).map((p, i) => {
-              const maxVal = data.topInmovilizado[0] ? parseFloat(String(data.topInmovilizado[0].valor)) : 1;
-              const val = parseFloat(String(p.valor));
-              const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
-              const tipoConfig = p.tipo === 'producto_fabricado'
-                ? { color: 'bg-loga-red', text: 'text-loga-red', label: 'Granel' }
-                : p.tipo === 'producto_envasado'
-                ? { color: 'bg-emerald-500', text: 'text-emerald-600', label: 'Envasado' }
-                : p.tipo === 'materia_prima'
-                ? { color: 'bg-blue-500', text: 'text-blue-600', label: 'MP' }
-                : { color: 'bg-amber-500', text: 'text-amber-600', label: 'Embalaje' };
-              return (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.7 + i * 0.04 }}
-                  className="group"
-                >
-                  <div className="flex items-center gap-2.5 mb-1">
-                    <span className="flex items-center justify-center w-5 h-5 rounded-md bg-gray-100 dark:bg-zinc-800 text-[10px] font-black text-gray-500 dark:text-gray-400 shrink-0">
-                      {i + 1}
-                    </span>
-                    <span className="text-[12px] font-semibold text-gray-800 dark:text-gray-100 flex-1 truncate">{p.nombre}</span>
-                    <span className={clsx('rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider bg-opacity-10', tipoConfig.text)}
-                          style={{ backgroundColor: 'transparent' }}>
-                      {tipoConfig.label}
-                    </span>
-                    <span className="text-[12px] font-black tabular-nums text-gray-900 dark:text-white w-20 text-right">{fmt(val)}</span>
-                  </div>
-                  <div className="flex items-center gap-2.5 pl-7">
-                    <div className="flex-1 h-1.5 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden">
-                      <motion.div
-                        initial={{ width: 0 }} animate={{ width: `${pct}%` }}
-                        transition={{ delay: 0.9 + i * 0.04, duration: 0.6 }}
-                        className={clsx('h-full rounded-full', tipoConfig.color)}
-                      />
-                    </div>
-                    <span className="text-[10px] tabular-nums text-gray-400 w-24 text-right font-medium">
-                      {fmtInt(parseFloat(String(p.stock_actual)))} {p.unidad_medida}
-                    </span>
-                  </div>
-                </motion.div>
-              );
-            })}
-            {data.topInmovilizado.length === 0 && (
-              <div className="py-8 text-center">
-                <Box size={28} className="mx-auto text-gray-300 mb-2" />
-                <p className="text-xs text-gray-400">Sin datos de inventario</p>
-              </div>
-            )}
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  HERO — la facturación como titular gigante editorial      ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      <section className="px-6 sm:px-12 pt-12 pb-10 sm:pt-20 sm:pb-16 border-b border-black/10 dark:border-white/10">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+          {/* Columna izquierda: titular */}
+          <div className="lg:col-span-7">
+            <motion.p
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4 }}
+              className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-5"
+            >
+              Facturación acumulada
+            </motion.p>
+            <motion.h1
+              initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+              className="text-[clamp(4rem,12vw,9rem)] leading-[0.85] tracking-[-0.04em] text-black dark:text-white"
+              style={SERIF}
+            >
+              {fmt(data.ventas.facturacion_total).split(',')[0]}
+              <span className="text-zinc-400 dark:text-zinc-600">,{fmt(data.ventas.facturacion_total).split(',')[1] ?? '00'}</span>
+            </motion.h1>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3, duration: 0.5 }}
+              className="mt-6 flex items-baseline gap-3 text-sm"
+            >
+              <span className="uppercase tracking-widest text-[10px] font-bold text-zinc-500">EUR</span>
+              <span className="h-px flex-1 max-w-[120px] bg-black/20 dark:bg-white/20 self-center" />
+              <span className="text-zinc-700 dark:text-zinc-300" style={MONO}>{fmtInt(data.ventas.num_pedidos)} pedidos completados</span>
+            </motion.div>
+          </div>
+
+          {/* Columna derecha: 3 stats apiladas */}
+          <div className="lg:col-span-5 lg:border-l lg:border-black/10 dark:lg:border-white/10 lg:pl-10 flex flex-col justify-end gap-7 pt-2">
+            <StatLine
+              label="Beneficio bruto"
+              value={fmtCompact(beneficioBruto)}
+              hint={`${margenPct.toFixed(1)}% margen`}
+              positive={beneficioBruto >= 0}
+              delay={0.2}
+            />
+            <StatLine
+              label="Coste producción"
+              value={fmtCompact(data.costeProd.coste_total)}
+              hint={`${fmtInt(data.costeProd.num_ordenes)} órdenes`}
+              delay={0.3}
+            />
+            <StatLine
+              label="Inmovilizado"
+              value={fmtCompact(data.inmovilizado.valor_total)}
+              hint={`${fmtInt(data.topInmovilizado.length)} productos en stock`}
+              delay={0.4}
+            />
+          </div>
+        </div>
+
+        {/* Acciones discretas al pie del hero */}
+        <motion.div
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.6, duration: 0.5 }}
+          className="mt-12 flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px]"
+        >
+          <span className="uppercase tracking-[0.2em] text-zinc-400 font-bold">Exportar</span>
+          {[
+            { tipo: 'pedidos',     label: 'Pedidos' },
+            { tipo: 'produccion',  label: 'Producción' },
+            { tipo: 'inventario',  label: 'Inventario' },
+          ].map(({ tipo, label }) => (
+            <button key={tipo} onClick={() => exportar(tipo)}
+              className="group inline-flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300 hover:text-loga-red transition-colors">
+              <span className="border-b border-zinc-300 dark:border-zinc-600 group-hover:border-loga-red transition-colors pb-px">{label}</span>
+              <Download size={11} strokeWidth={2.5} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+            </button>
+          ))}
+          <span className="text-zinc-300 dark:text-zinc-700">·</span>
+          <div className="inline-flex items-center gap-1.5">
+            <select id="plastico-year" defaultValue={new Date().getFullYear()}
+              className="bg-transparent text-zinc-700 dark:text-zinc-300 text-[11px] outline-none border-b border-zinc-300 dark:border-zinc-600 hover:border-loga-red transition-colors py-px">
+              {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - i).map(y => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+            <button onClick={() => {
+              const y = (document.getElementById('plastico-year') as HTMLSelectElement)?.value || new Date().getFullYear();
+              const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
+              const url = `/api/finanzas/informe-plastico?desde=${y}-01-01&hasta=${y}-12-31`;
+              fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+                .then(r => r.blob())
+                .then(blob => {
+                  const a = document.createElement('a');
+                  a.href = URL.createObjectURL(blob);
+                  a.download = `informe-plastico-${y}.csv`;
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                })
+                .catch(e => console.error('Error:', e));
+            }}
+              className="group inline-flex items-center gap-1.5 text-zinc-700 dark:text-zinc-300 hover:text-loga-red transition-colors">
+              <span className="border-b border-zinc-300 dark:border-zinc-600 group-hover:border-loga-red transition-colors pb-px">Plástico Ley 7/2022</span>
+              <Download size={11} strokeWidth={2.5} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+            </button>
           </div>
         </motion.div>
       </section>
 
-      {/* ═══════════════════════════════════════════════════════════════
-           RENTABILIDAD POR PRODUCTO — tabla con search + sort
-         ═══════════════════════════════════════════════════════════════ */}
-      <motion.section
-        initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.65 }}
-        className="rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-      >
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-5 pb-4 border-b border-gray-50 dark:border-white/5">
-          <div className="flex items-center gap-3">
-            <div className="rounded-xl bg-emerald-100 dark:bg-emerald-950/30 p-2">
-              <Sparkles size={16} className="text-emerald-600 dark:text-emerald-400" />
-            </div>
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  MÉTRICAS OPERATIVAS — banda horizontal con números       ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      <section className="px-6 sm:px-12 py-8 border-b border-black/10 dark:border-white/10">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-y-6 gap-x-8">
+          <MicroStat
+            label="Ticket medio"
+            value={data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0'}
+            unit="EUR/pedido"
+            delay={0.05}
+          />
+          <MicroStat
+            label="Coste medio/orden"
+            value={data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0'}
+            unit="EUR/orden"
+            delay={0.1}
+          />
+          <MicroStat
+            label="Producción rechazada"
+            value={fmt(data.rechazos.valor_rechazado)}
+            unit={`${data.rechazos.ordenes_canceladas} órd · ${data.rechazos.lotes_rechazados} lotes`}
+            delay={0.15}
+            danger
+          />
+          <MicroStat
+            label="Mermas producción"
+            value={`${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')}`}
+            unit={`kg · ${fmt(data.mermas?.total_eur ?? 0)} EUR`}
+            delay={0.2}
+            warning
+          />
+        </div>
+      </section>
+
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  EVOLUCIÓN — chart minimalista de líneas + área           ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      {data.ventasMes.length > 0 && (
+        <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+          <div className="flex items-baseline justify-between gap-6 mb-10 flex-wrap">
             <div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Rentabilidad por producto</h2>
-              <p className="text-[11px] text-gray-400">Margen calculado desde receta · Click para desglose</p>
+              <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Evolución</p>
+              <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>
+                Últimos {data.ventasMes.length} meses
+              </h2>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-500 mb-1">Pico mensual</p>
+              <p className="text-2xl text-black dark:text-white tabular-nums" style={MONO}>{fmtCompact(maxMes)}<span className="text-sm text-zinc-400 ml-1">EUR</span></p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Search */}
-            <div className="relative flex-1 sm:flex-initial">
-              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <LineChart
+            data={data.ventasMes}
+            maxMes={maxMes}
+            minMes={minMes}
+            avgMes={avgMes}
+          />
+        </section>
+      )}
+
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  RENTABILIDAD — tabla editorial financiera                 ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+        <div className="flex items-end justify-between gap-6 mb-8 flex-wrap">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Rentabilidad</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>
+              Margen por <em>producto</em>
+            </h2>
+            <p className="text-xs text-zinc-500 mt-1.5">Coste calculado recursivamente desde receta</p>
+          </div>
+
+          {/* Search + filter en una línea */}
+          <div className="flex items-center gap-6">
+            <div className="relative">
+              <Search size={11} className="absolute left-0 top-1/2 -translate-y-1/2 text-zinc-400" />
               <input
                 type="text"
-                placeholder="Buscar producto..."
+                placeholder="Buscar..."
                 value={rentaSearch}
                 onChange={(e) => setRentaSearch(e.target.value)}
-                className="w-full sm:w-44 rounded-lg border border-gray-200 bg-white dark:bg-zinc-800 pl-7 pr-2 py-1.5 text-[11px] outline-none focus:border-loga-red transition-colors"
+                className="w-32 sm:w-44 bg-transparent border-b border-zinc-300 dark:border-zinc-600 pl-5 pb-1 text-xs outline-none focus:border-loga-red transition-colors placeholder:text-zinc-400"
               />
             </div>
-            {/* Tabs filtro */}
-            <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 dark:bg-zinc-800 p-1">
+            <div className="flex items-center gap-4 text-[11px] uppercase tracking-widest font-bold">
               {([
-                { v: 'todos',              l: 'Todos',    color: 'bg-gray-700' },
-                { v: 'producto_fabricado', l: 'Granel',   color: 'bg-loga-red' },
-                { v: 'producto_envasado',  l: 'Envasado', color: 'bg-emerald-600' },
-              ] as const).map(({ v, l, color }) => {
+                { v: 'todos',              l: 'Todos' },
+                { v: 'producto_fabricado', l: 'Granel' },
+                { v: 'producto_envasado',  l: 'Envasado' },
+              ] as const).map(({ v, l }) => {
                 const count = v === 'todos' ? data.rentabilidad.length : data.rentabilidad.filter(r => r.tipo === v).length;
+                const active = rentaTab === v;
                 return (
-                  <button
-                    key={v}
-                    onClick={() => setRentaTab(v)}
+                  <button key={v} onClick={() => setRentaTab(v)}
                     className={clsx(
-                      'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-bold transition-all',
-                      rentaTab === v ? `${color} text-white shadow-sm` : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-zinc-700'
-                    )}
-                  >
-                    {l}
-                    <span className={clsx('rounded-md px-1 py-0.5 text-[9px] font-black tabular-nums',
-                      rentaTab === v ? 'bg-white/20 text-white' : 'bg-gray-200 dark:bg-zinc-700 text-gray-500 dark:text-gray-400')}>
-                      {count}
-                    </span>
+                      'group transition-colors flex items-baseline gap-1.5',
+                      active ? 'text-black dark:text-white' : 'text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300'
+                    )}>
+                    <span className={clsx('pb-1 border-b-2 transition-colors', active ? 'border-loga-red' : 'border-transparent group-hover:border-zinc-300')}>{l}</span>
+                    <span className="text-[9px] text-zinc-400 tabular-nums">({count})</span>
                   </button>
                 );
               })}
@@ -755,146 +400,112 @@ export default function Finanzas() {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-100 dark:divide-white/5 text-sm">
-            <thead className="bg-gray-50 dark:bg-zinc-800/50">
-              <tr>
-                <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Producto</th>
-                <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Tipo</th>
-                <SortableHeader label="Precio venta" active={rentaSort.key === 'venta'} dir={rentaSort.dir} onClick={() => ordenarPor('venta')} />
-                <SortableHeader label="Precio coste" active={rentaSort.key === 'coste'} dir={rentaSort.dir} onClick={() => ordenarPor('coste')} />
-                <SortableHeader label="Margen %" active={rentaSort.key === 'margen'} dir={rentaSort.dir} onClick={() => ordenarPor('margen')} />
-                <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Variación</th>
-                <SortableHeader label="Beneficio/ud" active={rentaSort.key === 'beneficio'} dir={rentaSort.dir} onClick={() => ordenarPor('beneficio')} />
+        {/* Tabla editorial */}
+        <div className="border-t-2 border-b-2 border-black dark:border-white">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-black/20 dark:border-white/20 text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-500">
+                <th className="text-left py-3 pr-4">Producto</th>
+                <SortHeader label="Venta"    active={rentaSort.key === 'venta'}    dir={rentaSort.dir} onClick={() => ordenarPor('venta')} align="right" />
+                <SortHeader label="Coste"    active={rentaSort.key === 'coste'}    dir={rentaSort.dir} onClick={() => ordenarPor('coste')} align="right" />
+                <SortHeader label="Margen"   active={rentaSort.key === 'margen'}   dir={rentaSort.dir} onClick={() => ordenarPor('margen')} align="right" />
+                <th className="text-right py-3 px-2 font-bold w-20">Δ</th>
+                <SortHeader label="Beneficio" active={rentaSort.key === 'beneficio'} dir={rentaSort.dir} onClick={() => ordenarPor('beneficio')} align="right" />
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-zinc-900 divide-y divide-gray-50 dark:divide-white/5">
-              {rentabilidadFiltrada.map(r => {
+            <tbody>
+              {rentabilidadFiltrada.map((r, i) => {
                 const margen = parseFloat(String(r.margen_pct));
-                const margenColor = margen < 20 ? 'text-loga-red bg-red-50 dark:bg-red-950/30 ring-red-200/50'
-                                  : margen < 40 ? 'text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 ring-amber-200/50'
-                                  : 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 ring-emerald-200/50';
-                const tipoLabel = r.tipo === 'producto_fabricado' ? 'Granel' : r.tipo === 'producto_envasado' ? 'Envasado' : 'Prod.';
-                const tipoCls = r.tipo === 'producto_fabricado' ? 'bg-loga-red/10 text-loga-red' : 'bg-emerald-100 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400';
+                const margenColor = margen < 20 ? 'text-loga-red' : margen < 40 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400';
                 const isOpen = desgloseId === r.id;
                 return (
                   <React.Fragment key={r.id}>
-                    <tr
+                    <motion.tr
+                      initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.015 }}
                       className={clsx(
-                        'transition-colors cursor-pointer',
-                        isOpen ? 'bg-gray-50 dark:bg-zinc-800/50' : 'hover:bg-gray-50 dark:hover:bg-zinc-800/30'
+                        'border-b border-zinc-100 dark:border-zinc-800/60 cursor-pointer group transition-all',
+                        isOpen ? 'bg-zinc-50 dark:bg-zinc-900/40' : 'hover:bg-zinc-50/60 dark:hover:bg-zinc-900/20'
                       )}
                       onClick={() => setDesgloseId(isOpen ? null : r.id)}
                     >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <ChevronDown size={12} className={clsx('text-gray-400 transition-transform', isOpen && 'rotate-180')} />
+                      <td className="py-3.5 pr-4 align-top">
+                        <div className="flex items-baseline gap-3">
+                          <span className="text-zinc-300 group-hover:text-loga-red transition-colors mt-0.5">
+                            {isOpen ? <Minus size={11} strokeWidth={2.5} /> : <Plus size={11} strokeWidth={2.5} />}
+                          </span>
                           <div>
-                            <p className="text-xs font-bold text-gray-900 dark:text-white">{r.nombre}</p>
-                            <p className="text-[10px] text-gray-400 font-mono">{r.codigo}</p>
-                            {r.precio_kg != null && (
-                              <p className="text-[10px] text-blue-500 dark:text-blue-400 mt-0.5">
-                                {fmt(r.precio_kg)} EUR/kg · {fmt(r.precio_1000kg ?? 0)}/1000kg
-                              </p>
-                            )}
+                            <p className="text-sm font-medium text-black dark:text-white leading-tight">{r.nombre}</p>
+                            <p className="text-[10px] text-zinc-400 mt-0.5" style={MONO}>
+                              {r.codigo}
+                              <span className="ml-2 inline-block text-zinc-300">{r.tipo === 'producto_fabricado' ? '· Granel' : '· Envasado'}</span>
+                            </p>
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3">
-                        <span className={clsx('rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider', tipoCls)}>
-                          {tipoLabel}
-                        </span>
+                      <td className="py-3.5 pr-2 text-right align-top">
+                        <p className="text-sm tabular-nums text-black dark:text-white" style={MONO}>{fmt(r.precio_venta)}</p>
+                        <p className="text-[10px] text-zinc-400">EUR/{r.unidad_medida}</p>
                       </td>
-                      <td className="px-4 py-3 text-xs tabular-nums text-gray-700 dark:text-gray-300 font-semibold">
-                        {fmt(r.precio_venta)} <span className="text-gray-400 font-normal">EUR/{r.unidad_medida}</span>
+                      <td className="py-3.5 pr-2 text-right align-top">
+                        <p className="text-sm tabular-nums text-zinc-700 dark:text-zinc-300" style={MONO}>{fmt(r.precio_coste)}</p>
+                        <p className="text-[10px] text-zinc-400">EUR/{r.unidad_medida}</p>
                       </td>
-                      <td className="px-4 py-3 text-xs tabular-nums text-gray-700 dark:text-gray-300">
-                        <p className="font-semibold">{fmt(r.precio_coste)} <span className="text-gray-400 font-normal">EUR/{r.unidad_medida}</span></p>
-                        {r.coste_batch != null && r.rendimiento != null && r.rendimiento > 1 && (
-                          <p className="text-[10px] text-gray-400">Batch {r.rendimiento} {r.unidad_medida}: {fmt(r.coste_batch)} EUR</p>
-                        )}
+                      <td className="py-3.5 pr-2 text-right align-top">
+                        <p className={clsx('text-base font-medium tabular-nums', margenColor)} style={MONO}>{margen.toFixed(1)}%</p>
                       </td>
-                      <td className="px-4 py-3">
-                        <span className={clsx('inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-black tabular-nums ring-1', margenColor)}>
-                          {margen.toFixed(1)}%
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
+                      <td className="py-3.5 px-2 text-right align-top">
                         {r.diff_margen != null && r.diff_margen !== 0 ? (
-                          <div className="relative group">
-                            <span className={clsx(
-                              'inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-black tabular-nums',
-                              r.diff_margen > 0 ? 'text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'text-loga-red bg-red-50 dark:bg-red-950/30'
-                            )}>
-                              {r.diff_margen > 0 ? <ArrowUpRight size={9} /> : <ArrowDownRight size={9} />}
-                              {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
-                            </span>
-                            {r.salud && (
-                              <div className="absolute left-0 bottom-full mb-1 hidden group-hover:block z-20 w-56 px-3 py-2 rounded-xl shadow-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-zinc-900 text-[10px] text-gray-600 dark:text-gray-400 font-normal whitespace-normal">
-                                <span className={clsx('inline-block w-2 h-2 rounded-full mr-1.5 align-middle', r.diff_margen > 0 ? 'bg-emerald-500' : 'bg-red-500')} />
-                                {r.salud}
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-[10px] text-gray-300">—</span>
-                        )}
+                          <span className={clsx(
+                            'inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums',
+                            r.diff_margen > 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-loga-red'
+                          )} style={MONO}>
+                            {r.diff_margen > 0 ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
+                            {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}
+                          </span>
+                        ) : <span className="text-zinc-300">—</span>}
                       </td>
-                      <td className="px-4 py-3 text-xs tabular-nums font-black text-gray-900 dark:text-white">
-                        {fmt(r.beneficio_ud)} <span className="text-gray-400 font-normal text-[10px]">EUR</span>
+                      <td className="py-3.5 pl-2 text-right align-top">
+                        <p className="text-sm tabular-nums font-medium text-black dark:text-white" style={MONO}>{fmt(r.beneficio_ud)}</p>
+                        <p className="text-[10px] text-zinc-400">EUR/ud</p>
                       </td>
-                    </tr>
-                    {/* Desglose expandible */}
+                    </motion.tr>
                     <AnimatePresence>
                       {isOpen && r.desglose && r.desglose.length > 0 && (
                         <tr>
-                          <td colSpan={7} className="px-0 py-0 bg-gradient-to-b from-gray-50 to-white dark:from-zinc-800/50 dark:to-zinc-900">
+                          <td colSpan={6} className="p-0">
                             <motion.div
                               initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
                               exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2 }}
-                              className="px-6 py-4"
+                              className="bg-zinc-50/70 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800"
                             >
-                              <div className="flex items-center gap-2 mb-2">
-                                <Layers size={11} className="text-gray-400" />
-                                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Desglose de coste</p>
-                              </div>
-                              <div className="rounded-lg border border-gray-100 dark:border-white/5 bg-white dark:bg-zinc-900 overflow-hidden">
-                                <table className="w-full text-[11px]">
-                                  <thead>
-                                    <tr className="text-gray-400 text-[10px] uppercase tracking-wider bg-gray-50 dark:bg-zinc-800/50">
-                                      <th className="text-left py-2 px-3 font-bold">Ingrediente</th>
-                                      <th className="text-right py-2 px-3 font-bold">Cantidad</th>
-                                      <th className="text-right py-2 px-3 font-bold">Precio/ud</th>
-                                      <th className="text-right py-2 px-3 font-bold">Coste línea</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-gray-50 dark:divide-white/5">
-                                    {r.desglose.map((d, i) => (
-                                      <tr key={i} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30">
-                                        <td className="py-1.5 px-3 text-gray-700 dark:text-gray-300 font-medium">{d.nombre}</td>
-                                        <td className="py-1.5 px-3 text-right tabular-nums text-gray-500 dark:text-gray-400">
-                                          {d.cantidad.toLocaleString('es-ES', { maximumFractionDigits: 4 })} <span className="text-gray-400">{d.unidad}</span>
-                                        </td>
-                                        <td className="py-1.5 px-3 text-right tabular-nums text-gray-500 dark:text-gray-400">
-                                          {fmt(d.precio_ud)} <span className="text-gray-400">EUR/{d.unidad}</span>
-                                        </td>
-                                        <td className="py-1.5 px-3 text-right tabular-nums font-bold text-gray-900 dark:text-white">{fmt(d.coste_linea)} EUR</td>
-                                      </tr>
-                                    ))}
-                                    <tr className="border-t-2 border-gray-200 dark:border-white/10 font-bold bg-gray-50 dark:bg-zinc-800/50">
-                                      <td className="py-2 px-3 text-gray-800 dark:text-gray-200" colSpan={3}>
-                                        Total batch{r.rendimiento && r.rendimiento > 1 ? ` (${r.rendimiento} ${r.unidad_medida})` : ''}
-                                      </td>
-                                      <td className="py-2 px-3 text-right tabular-nums text-gray-900 dark:text-white">{fmt(r.coste_batch ?? r.precio_coste)} EUR</td>
-                                    </tr>
-                                    {r.rendimiento && r.rendimiento > 1 && (
-                                      <tr className="font-bold text-loga-red bg-red-50/50 dark:bg-red-950/20">
-                                        <td className="py-2 px-3" colSpan={3}>Coste por {r.unidad_medida}</td>
-                                        <td className="py-2 px-3 text-right tabular-nums">{fmt(r.precio_coste)} EUR</td>
-                                      </tr>
-                                    )}
-                                  </tbody>
-                                </table>
+                              <div className="px-8 py-5">
+                                <p className="text-[9px] uppercase tracking-[0.3em] font-bold text-loga-red mb-4">Desglose de coste</p>
+                                <div className="grid grid-cols-12 gap-4 text-[11px] mb-2 pb-2 border-b border-zinc-200 dark:border-zinc-700/50">
+                                  <span className="col-span-5 uppercase tracking-widest text-zinc-400 font-bold">Ingrediente</span>
+                                  <span className="col-span-3 text-right uppercase tracking-widest text-zinc-400 font-bold">Cantidad</span>
+                                  <span className="col-span-2 text-right uppercase tracking-widest text-zinc-400 font-bold">Precio</span>
+                                  <span className="col-span-2 text-right uppercase tracking-widest text-zinc-400 font-bold">Línea</span>
+                                </div>
+                                {r.desglose.map((d, j) => (
+                                  <div key={j} className="grid grid-cols-12 gap-4 text-xs py-1.5 border-b border-zinc-100/80 dark:border-zinc-800/40 last:border-b-0">
+                                    <span className="col-span-5 text-zinc-700 dark:text-zinc-300">{d.nombre}</span>
+                                    <span className="col-span-3 text-right tabular-nums text-zinc-500" style={MONO}>{d.cantidad.toLocaleString('es-ES', { maximumFractionDigits: 4 })} {d.unidad}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-zinc-500" style={MONO}>{fmt(d.precio_ud)}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-black dark:text-white font-medium" style={MONO}>{fmt(d.coste_linea)}</span>
+                                  </div>
+                                ))}
+                                <div className="grid grid-cols-12 gap-4 text-xs pt-3 mt-2 border-t-2 border-black dark:border-white">
+                                  <span className="col-span-10 font-medium text-black dark:text-white">
+                                    Total batch{r.rendimiento && r.rendimiento > 1 ? ` · ${r.rendimiento} ${r.unidad_medida}` : ''}
+                                  </span>
+                                  <span className="col-span-2 text-right tabular-nums font-medium text-black dark:text-white" style={MONO}>{fmt(r.coste_batch ?? r.precio_coste)} EUR</span>
+                                </div>
+                                {r.rendimiento && r.rendimiento > 1 && (
+                                  <div className="grid grid-cols-12 gap-4 text-xs pt-1.5">
+                                    <span className="col-span-10 text-loga-red">Coste por {r.unidad_medida}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-loga-red font-medium" style={MONO}>{fmt(r.precio_coste)} EUR</span>
+                                  </div>
+                                )}
                               </div>
                             </motion.div>
                           </td>
@@ -905,168 +516,228 @@ export default function Finanzas() {
                 );
               })}
               {rentabilidadFiltrada.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center">
-                    <Package size={28} className="mx-auto text-gray-300 mb-2" />
-                    <p className="text-xs text-gray-400">{rentaSearch ? 'Sin resultados para esta búsqueda' : 'Sin productos con precios'}</p>
-                  </td>
-                </tr>
+                <tr><td colSpan={6} className="py-16 text-center text-xs text-zinc-400">{rentaSearch ? 'Sin resultados' : 'Sin productos'}</td></tr>
               )}
             </tbody>
           </table>
         </div>
-      </motion.section>
+      </section>
 
-      {/* ═══════════════════════════════════════════════════════════════
-           TOP 10 VENTAS POR PRODUCTO
-         ═══════════════════════════════════════════════════════════════ */}
-      {data.ventasProducto.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.7 }}
-          className="rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center gap-3 p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="rounded-xl bg-blue-100 dark:bg-blue-950/30 p-2">
-              <TrendingUp size={16} className="text-blue-600 dark:text-blue-400" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Top productos por ventas</h2>
-              <p className="text-[11px] text-gray-400">Pedidos completados · Precio efectivo del momento de la venta</p>
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  INVENTARIO — composición asimétrica                       ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
+
+          {/* Distribución (izquierda, 5 cols) */}
+          <div className="lg:col-span-5">
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Distribución</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em] mb-8" style={SERIF}>
+              Por <em>categoría</em>
+            </h2>
+
+            <div className="space-y-1">
+              {([
+                { label: 'Materia prima', value: data.inmovilizado.valor_mp,  color: '#000000' },
+                { label: 'Fabricado',     value: data.inmovilizado.valor_fab, color: '#FF0000' },
+                { label: 'Envasado',      value: data.inmovilizado.valor_env, color: '#525252' },
+                { label: 'Embalaje',      value: data.inmovilizado.valor_emb, color: '#a3a3a3' },
+              ]).map(({ label, value, color }, i) => {
+                const pct = data.inmovilizado.valor_total > 0 ? (value / data.inmovilizado.valor_total) * 100 : 0;
+                return (
+                  <motion.div
+                    key={label}
+                    initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: 0.1 + i * 0.08 }}
+                    className="group cursor-default"
+                  >
+                    <div className="flex items-baseline justify-between py-2.5 border-b border-zinc-200 dark:border-zinc-800">
+                      <span className="text-sm text-black dark:text-white">{label}</span>
+                      <div className="flex items-baseline gap-3">
+                        <span className="tabular-nums text-zinc-400 text-xs" style={MONO}>{pct.toFixed(1)}%</span>
+                        <span className="tabular-nums text-base text-black dark:text-white font-medium w-28 text-right" style={MONO}>{fmt(value)}</span>
+                      </div>
+                    </div>
+                    <motion.div
+                      initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
+                      transition={{ delay: 0.3 + i * 0.08, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+                      style={{ backgroundColor: color, transformOrigin: 'left' }}
+                      className="h-px"
+                    />
+                  </motion.div>
+                );
+              })}
+              <div className="flex items-baseline justify-between pt-5 mt-4 border-t-2 border-black dark:border-white">
+                <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-500">Total</span>
+                <span className="text-2xl tabular-nums text-black dark:text-white" style={MONO}>{fmt(data.inmovilizado.valor_total)} <span className="text-sm text-zinc-400">EUR</span></span>
+              </div>
             </div>
           </div>
 
-          <div className="p-5 space-y-2">
+          {/* Top inmovilizado (derecha, 7 cols) */}
+          <div className="lg:col-span-7">
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Inmovilizado</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em] mb-8" style={SERIF}>
+              Top <em>{data.topInmovilizado.length > 10 ? '10' : data.topInmovilizado.length}</em> productos
+            </h2>
+
+            <ol className="space-y-0">
+              {data.topInmovilizado.slice(0, 10).map((p, i) => {
+                const val = parseFloat(String(p.valor));
+                const maxVal = data.topInmovilizado[0] ? parseFloat(String(data.topInmovilizado[0].valor)) : 1;
+                const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
+                return (
+                  <motion.li
+                    key={i}
+                    initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.1 + i * 0.05 }}
+                    className="group flex items-baseline gap-5 py-3 border-b border-zinc-100 dark:border-zinc-800/60 hover:border-loga-red transition-colors"
+                  >
+                    <span className="text-zinc-300 dark:text-zinc-600 tabular-nums w-8 group-hover:text-loga-red transition-colors text-xs" style={MONO}>
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-black dark:text-white truncate">{p.nombre}</p>
+                      <p className="text-[10px] text-zinc-400 mt-0.5" style={MONO}>
+                        {fmtInt(parseFloat(String(p.stock_actual)))} {p.unidad_medida}
+                      </p>
+                    </div>
+                    <div className="hidden sm:block w-32 lg:w-40">
+                      <motion.div
+                        initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
+                        transition={{ delay: 0.3 + i * 0.05, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+                        style={{ transformOrigin: 'right' }}
+                        className="h-px bg-black dark:bg-white"
+                      />
+                    </div>
+                    <span className="tabular-nums text-sm text-black dark:text-white w-24 text-right" style={MONO}>{fmt(val)}</span>
+                  </motion.li>
+                );
+              })}
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  TOP VENTAS — lista numerada estilo "ranking"             ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
+      {data.ventasProducto.length > 0 && (
+        <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+          <div className="mb-10">
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Mejores ventas</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>
+              Productos más <em>vendidos</em>
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-3">
             {data.ventasProducto.map((v, i) => {
               const fact = parseFloat(String(v.facturacion));
               const cantidad = parseFloat(String(v.cantidad_vendida));
               const maxFact = parseFloat(String(data.ventasProducto[0]?.facturacion ?? 1));
               const pct = maxFact > 0 ? (fact / maxFact) * 100 : 0;
-              const precioEfectivo = cantidad > 0 ? fact / cantidad : 0;
+              const precioEf = cantidad > 0 ? fact / cantidad : 0;
               return (
                 <motion.div
                   key={i}
-                  initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.8 + i * 0.04 }}
-                  className="group rounded-xl border border-gray-100 dark:border-white/5 bg-gradient-to-r from-white to-gray-50/30 dark:from-zinc-900 dark:to-zinc-800/30 p-3 hover:shadow-md transition-all"
+                  initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 * i }}
+                  className="group flex items-start gap-5 py-3 border-b border-zinc-200 dark:border-zinc-800 hover:border-loga-red transition-colors"
                 >
-                  <div className="flex items-center gap-3">
-                    <span className="flex items-center justify-center w-7 h-7 rounded-xl bg-gradient-to-br from-blue-100 to-indigo-100 dark:from-blue-950/40 dark:to-indigo-950/40 text-xs font-black text-blue-700 dark:text-blue-400 shrink-0">
-                      {i + 1}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2 mb-1">
-                        <p className="text-xs font-bold text-gray-900 dark:text-white truncate">{v.nombre}</p>
-                        <span className="text-[10px] text-gray-400 font-mono">{v.codigo}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-[10px] text-gray-500 dark:text-gray-400">
-                        <span><b className="text-gray-700 dark:text-gray-300 tabular-nums">{fmtInt(cantidad)}</b> {v.unidad_medida}</span>
-                        <span className="text-gray-300">·</span>
-                        <span><b className="text-gray-700 dark:text-gray-300 tabular-nums">{fmt(precioEfectivo)}</b> EUR/{v.unidad_medida} efectivo</span>
-                      </div>
-                      <div className="mt-1.5 h-1 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden">
-                        <motion.div
-                          initial={{ width: 0 }} animate={{ width: `${pct}%` }}
-                          transition={{ delay: 1 + i * 0.04, duration: 0.6 }}
-                          className="h-full bg-gradient-to-r from-blue-400 to-indigo-500 rounded-full"
-                        />
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-sm font-black text-gray-900 dark:text-white tabular-nums">{fmt(fact)}</p>
-                      <p className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">EUR Total</p>
-                    </div>
+                  <span className="text-zinc-300 dark:text-zinc-600 tabular-nums text-xs pt-1 w-6 group-hover:text-loga-red transition-colors" style={MONO}>
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-black dark:text-white">{v.nombre}</p>
+                    <p className="text-[10px] text-zinc-400 mt-0.5 flex items-center gap-2 flex-wrap" style={MONO}>
+                      <span>{fmtInt(cantidad)} {v.unidad_medida}</span>
+                      <span className="text-zinc-300">·</span>
+                      <span>{fmt(precioEf)} EUR/{v.unidad_medida}</span>
+                    </p>
+                    <motion.div
+                      initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
+                      transition={{ delay: 0.2 + i * 0.05, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+                      style={{ transformOrigin: 'left' }}
+                      className="h-px bg-loga-red/40 mt-2"
+                    />
+                  </div>
+                  <div className="text-right">
+                    <p className="text-base tabular-nums text-black dark:text-white font-medium" style={MONO}>{fmtCompact(fact)}</p>
+                    <p className="text-[10px] text-zinc-400 uppercase tracking-widest">EUR</p>
                   </div>
                 </motion.div>
               );
             })}
           </div>
-        </motion.section>
+        </section>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════
-           IMPACTO PRECIOS — Cards expandibles
-         ═══════════════════════════════════════════════════════════════ */}
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  IMPACTO PRECIOS — lista expandible editorial              ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
       {impactoRecetas.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.75 }}
-          className="rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center gap-3 p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="rounded-xl bg-purple-100 dark:bg-purple-950/30 p-2">
-              <Activity size={16} className="text-purple-600 dark:text-purple-400" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Impacto de precios en rentabilidad</h2>
-              <p className="text-[11px] text-gray-400">Variación de margen real (PVP + coste anterior vs actual)</p>
-            </div>
+        <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+          <div className="mb-10">
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Impacto en margen</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>
+              Variación de <em>rentabilidad</em>
+            </h2>
+            <p className="text-xs text-zinc-500 mt-1.5">PVP y coste anterior vs actual</p>
           </div>
 
-          <div className="divide-y divide-gray-50 dark:divide-white/5">
+          <div className="border-t-2 border-black dark:border-white">
             {impactoRecetas.map((r) => {
               const expanded = expandedReceta === r.receta_nombre;
               const diffPositivo = r.diff_margen > 0;
               const diffNegativo = r.diff_margen < 0;
               const pvpCambio = r.pvp_anterior && r.pvp_actual && Math.abs(r.pvp_actual - r.pvp_anterior) > 0.01;
-              const margenColor = r.margen_actual > 40 ? 'text-emerald-600 dark:text-emerald-400'
-                                : r.margen_actual > 20 ? 'text-amber-600 dark:text-amber-400'
-                                : 'text-loga-red';
+              const margenColor = r.margen_actual > 40 ? 'text-emerald-700 dark:text-emerald-400'
+                : r.margen_actual > 20 ? 'text-amber-700 dark:text-amber-400' : 'text-loga-red';
               return (
-                <div key={r.receta_nombre}>
+                <div key={r.receta_nombre} className="border-b border-zinc-200 dark:border-zinc-800">
                   <button
                     onClick={() => setExpandedReceta(expanded ? null : r.receta_nombre)}
                     className={clsx(
-                      'w-full px-5 py-4 flex items-center justify-between text-left transition-colors',
-                      expanded ? 'bg-gray-50 dark:bg-zinc-800/50' : 'hover:bg-gray-50 dark:hover:bg-zinc-800/30'
+                      'w-full grid grid-cols-12 gap-4 items-baseline py-5 text-left transition-colors group',
+                      expanded ? 'bg-zinc-50/60 dark:bg-zinc-900/40' : 'hover:bg-zinc-50/40 dark:hover:bg-zinc-900/20'
                     )}
                   >
-                    <div className="min-w-0 flex items-start gap-3">
-                      <div className={clsx(
-                        'mt-1 w-2 h-2 rounded-full shrink-0',
-                        diffNegativo ? 'bg-red-500 ring-2 ring-red-200 dark:ring-red-900/50'
-                          : diffPositivo ? 'bg-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900/50'
-                          : 'bg-gray-300'
+                    <span className="col-span-1 mt-1 self-start">
+                      <span className={clsx(
+                        'inline-block w-2 h-2 rounded-full',
+                        diffNegativo ? 'bg-loga-red' : diffPositivo ? 'bg-emerald-500' : 'bg-zinc-300'
                       )} />
-                      <div>
-                        <p className="text-sm font-bold text-gray-900 dark:text-white">{r.producto_nombre}</p>
-                        <p className="text-[11px] text-gray-400 mt-0.5">
-                          <span className="font-semibold">{r.receta_nombre}</span>
-                          {r.pvp_actual !== undefined && (
-                            <span className="ml-2">
-                              · PVP: <b className="text-gray-600 dark:text-gray-300 tabular-nums">{r.pvp_actual.toFixed(2)} EUR/{r.unidad_medida}</b>
-                              {pvpCambio && (
-                                <span className="ml-1 text-blue-500 dark:text-blue-400 text-[10px]">
-                                  (ant: {r.pvp_anterior?.toFixed(2)})
-                                </span>
-                              )}
-                            </span>
-                          )}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-5 shrink-0">
-                      <div className="text-right">
-                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Coste/{r.unidad_medida}</p>
-                        <p className="text-xs font-black text-gray-900 dark:text-white tabular-nums mt-0.5">{r.coste_actual.toFixed(4)}</p>
-                        {r.diff_coste !== 0 && (
-                          <p className={clsx('text-[10px] font-bold tabular-nums', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
-                            {r.diff_coste > 0 ? '+' : ''}{r.diff_coste.toFixed(4)}
-                          </p>
+                    </span>
+                    <div className="col-span-12 sm:col-span-6">
+                      <p className="text-sm text-black dark:text-white font-medium">{r.producto_nombre}</p>
+                      <p className="text-[11px] text-zinc-500 mt-0.5" style={MONO}>
+                        {r.receta_nombre}
+                        {r.pvp_actual !== undefined && (
+                          <span> · PVP {r.pvp_actual.toFixed(2)} EUR/{r.unidad_medida}</span>
                         )}
-                      </div>
-                      <div className="text-right">
-                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Margen</p>
-                        <p className={clsx('text-base font-black tabular-nums mt-0.5', margenColor)}>
-                          {r.margen_actual.toFixed(1)}%
-                        </p>
-                        {r.diff_margen !== 0 && (
-                          <p className={clsx('inline-flex items-center gap-0.5 text-[10px] font-bold tabular-nums', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
-                            {diffPositivo ? <ArrowUpRight size={9} /> : <ArrowDownRight size={9} />}
-                            {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
-                          </p>
-                        )}
-                      </div>
-                      <ChevronDown size={14} className={clsx('text-gray-400 transition-transform', expanded && 'rotate-180')} />
+                        {pvpCambio && <span className="text-zinc-400"> (ant: {r.pvp_anterior?.toFixed(2)})</span>}
+                      </p>
                     </div>
+                    <div className="col-span-6 sm:col-span-2 text-right">
+                      <p className="text-[10px] text-zinc-400 uppercase tracking-widest">Coste</p>
+                      <p className="text-sm tabular-nums text-black dark:text-white" style={MONO}>{r.coste_actual.toFixed(4)}</p>
+                      {r.diff_coste !== 0 && (
+                        <p className={clsx('text-[10px] tabular-nums', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')} style={MONO}>
+                          {r.diff_coste > 0 ? '+' : ''}{r.diff_coste.toFixed(4)}
+                        </p>
+                      )}
+                    </div>
+                    <div className="col-span-6 sm:col-span-2 text-right">
+                      <p className="text-[10px] text-zinc-400 uppercase tracking-widest">Margen</p>
+                      <p className={clsx('text-base tabular-nums', margenColor)} style={MONO}>{r.margen_actual.toFixed(1)}%</p>
+                      {r.diff_margen !== 0 && (
+                        <p className={clsx('text-[10px] tabular-nums inline-flex items-center gap-0.5', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')} style={MONO}>
+                          {diffPositivo ? <ArrowUpRight size={9} /> : <ArrowDownRight size={9} />}
+                          {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
+                        </p>
+                      )}
+                    </div>
+                    <ChevronDown size={14} className={clsx('col-span-1 justify-self-end text-zinc-400 transition-transform', expanded && 'rotate-180')} />
                   </button>
 
                   <AnimatePresence>
@@ -1074,50 +745,36 @@ export default function Finanzas() {
                       <motion.div
                         initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2 }}
-                        className="px-5 pb-4 bg-gray-50/30 dark:bg-zinc-800/20"
+                        className="overflow-hidden bg-zinc-50/50 dark:bg-zinc-900/30"
                       >
-                        {r.salud && (
-                          <div className={clsx(
-                            'mb-3 px-3 py-2 rounded-xl text-[11px] font-medium flex items-start gap-2',
-                            diffNegativo ? 'bg-red-50 dark:bg-red-950/30 text-loga-red'
-                              : diffPositivo ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400'
-                              : 'bg-gray-50 dark:bg-zinc-800 text-gray-500'
-                          )}>
-                            <Sparkles size={11} className="shrink-0 mt-0.5" />
-                            <span>
-                              {r.salud}
-                              {pvpCambio && <span className="ml-2 text-blue-500 dark:text-blue-400 font-normal">PVP: {r.pvp_anterior?.toFixed(2)} → {r.pvp_actual?.toFixed(2)}</span>}
-                            </span>
+                        <div className="px-8 sm:px-16 py-5">
+                          {r.salud && (
+                            <p className={clsx(
+                              'text-[11px] mb-4 italic',
+                              diffNegativo ? 'text-loga-red' : diffPositivo ? 'text-emerald-700 dark:text-emerald-400' : 'text-zinc-500'
+                            )} style={SERIF}>
+                              "{r.salud}"
+                            </p>
+                          )}
+                          <div className="grid grid-cols-12 gap-3 text-[11px] mb-2 pb-1.5 border-b border-zinc-200 dark:border-zinc-700/50">
+                            <span className="col-span-6 uppercase tracking-widest text-zinc-400 font-bold">Materia prima</span>
+                            <span className="col-span-2 text-right uppercase tracking-widest text-zinc-400 font-bold">Anterior</span>
+                            <span className="col-span-2 text-right uppercase tracking-widest text-zinc-400 font-bold">Actual</span>
+                            <span className="col-span-2 text-right uppercase tracking-widest text-zinc-400 font-bold">Impacto</span>
                           </div>
-                        )}
-                        <div className="rounded-lg border border-gray-100 dark:border-white/5 bg-white dark:bg-zinc-900 overflow-hidden">
-                          <table className="w-full text-[11px]">
-                            <thead>
-                              <tr className="text-gray-400 text-[10px] uppercase tracking-wider bg-gray-50 dark:bg-zinc-800/50">
-                                <th className="text-left py-2 px-3 font-bold">Ingrediente</th>
-                                <th className="text-right py-2 px-3 font-bold">Precio anterior</th>
-                                <th className="text-right py-2 px-3 font-bold">Precio actual</th>
-                                <th className="text-right py-2 px-3 font-bold">Impacto/batch</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-gray-50 dark:divide-white/5">
-                              {r.detalle_mp.map((mp, i) => (
-                                <tr key={i} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/30">
-                                  <td className="py-1.5 px-3 text-gray-700 dark:text-gray-300 font-medium">
-                                    {mp.nombre} <span className="text-gray-400 text-[10px] font-normal">({mp.cantidad.toFixed(2)})</span>
-                                  </td>
-                                  <td className="py-1.5 px-3 text-right tabular-nums text-gray-500 dark:text-gray-400">{mp.precio_anterior?.toFixed(4) ?? '—'}</td>
-                                  <td className="py-1.5 px-3 text-right tabular-nums font-bold text-gray-800 dark:text-gray-200">{mp.precio_actual.toFixed(4)}</td>
-                                  <td className={clsx(
-                                    'py-1.5 px-3 text-right font-black tabular-nums',
-                                    mp.diff > 0 ? 'text-loga-red' : mp.diff < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400'
-                                  )}>
-                                    {mp.diff !== 0 ? `${mp.diff > 0 ? '+' : ''}${mp.diff.toFixed(2)} EUR` : '—'}
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          {r.detalle_mp.map((mp, i) => (
+                            <div key={i} className="grid grid-cols-12 gap-3 text-xs py-1.5 border-b border-zinc-100 dark:border-zinc-800/50 last:border-b-0">
+                              <span className="col-span-6 text-zinc-700 dark:text-zinc-300">{mp.nombre} <span className="text-zinc-400">({mp.cantidad.toFixed(2)})</span></span>
+                              <span className="col-span-2 text-right tabular-nums text-zinc-500" style={MONO}>{mp.precio_anterior?.toFixed(4) ?? '—'}</span>
+                              <span className="col-span-2 text-right tabular-nums text-black dark:text-white font-medium" style={MONO}>{mp.precio_actual.toFixed(4)}</span>
+                              <span className={clsx(
+                                'col-span-2 text-right tabular-nums font-medium',
+                                mp.diff > 0 ? 'text-loga-red' : mp.diff < 0 ? 'text-emerald-700 dark:text-emerald-400' : 'text-zinc-300'
+                              )} style={MONO}>
+                                {mp.diff !== 0 ? `${mp.diff > 0 ? '+' : ''}${mp.diff.toFixed(2)}` : '—'}
+                              </span>
+                            </div>
+                          ))}
                         </div>
                       </motion.div>
                     )}
@@ -1126,109 +783,238 @@ export default function Finanzas() {
               );
             })}
           </div>
-        </motion.section>
+        </section>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════
-           PRECIOS MATERIAS PRIMAS — Heatmap visual
-         ═══════════════════════════════════════════════════════════════ */}
+      {/* ╔═══════════════════════════════════════════════════════════╗
+          ║  MATERIAS PRIMAS — banda inferior con stats               ║
+          ╚═══════════════════════════════════════════════════════════╝ */}
       {mpPrecios.length > 0 && (
-        <motion.section
-          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.8 }}
-          className="rounded-2xl border border-gray-100 bg-white dark:bg-zinc-900 shadow-sm overflow-hidden"
-        >
-          <div className="flex items-center gap-3 p-5 pb-3 border-b border-gray-50 dark:border-white/5">
-            <div className="rounded-xl bg-orange-100 dark:bg-orange-950/30 p-2">
-              <Beaker size={16} className="text-orange-600 dark:text-orange-400" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-gray-900 dark:text-white">Precios de materias primas</h2>
-              <p className="text-[11px] text-gray-400">Variaciones últimos 90 días</p>
-            </div>
+        <section className="px-6 sm:px-12 py-12 border-b border-black/10 dark:border-white/10">
+          <div className="mb-10">
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-loga-red mb-2">Materias primas</p>
+            <h2 className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>
+              Variación últimos <em>90 días</em>
+            </h2>
           </div>
 
-          <div className="p-5">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {[...mpPrecios]
-                .sort((a, b) => parseFloat(b.variacion_pct) - parseFloat(a.variacion_pct))
-                .map((item, i) => {
-                  const variacion = parseFloat(item.variacion_pct);
-                  const intensity = Math.min(Math.abs(variacion) / 30, 1); // satura a 30%
-                  const bgIntensity = 0.05 + intensity * 0.15;
-                  return (
-                    <motion.div
-                      key={i}
-                      initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: 0.85 + i * 0.03 }}
-                      className="rounded-xl border border-gray-100 dark:border-white/5 p-3 hover:shadow-md transition-all relative overflow-hidden"
-                      style={{
-                        backgroundColor: variacion > 0
-                          ? `rgba(239, 68, 68, ${bgIntensity})`
-                          : variacion < 0
-                          ? `rgba(16, 185, 129, ${bgIntensity})`
-                          : undefined,
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-bold text-gray-900 dark:text-white truncate">{item.nombre}</p>
-                          <p className="text-[10px] text-gray-400 font-mono">{item.codigo}</p>
-                        </div>
-                        {item.precio_anterior && variacion !== 0 && (
-                          <span className={clsx(
-                            'inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px] font-black tabular-nums shrink-0',
-                            variacion > 0 ? 'bg-red-100 dark:bg-red-950/40 text-loga-red' : 'bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400'
-                          )}>
-                            {variacion > 0 ? <ArrowUpRight size={9} /> : <ArrowDownRight size={9} />}
-                            {variacion > 0 ? '+' : ''}{variacion.toFixed(1)}%
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-baseline justify-between gap-2 text-[10px]">
-                        <div>
-                          <p className="text-gray-400">Anterior</p>
-                          <p className="font-semibold tabular-nums text-gray-500 dark:text-gray-400">
-                            {item.precio_anterior ? parseFloat(item.precio_anterior).toFixed(4) : '—'}
-                          </p>
-                        </div>
-                        <ArrowUpRight size={11} className="text-gray-300 rotate-90" />
-                        <div className="text-right">
-                          <p className="text-gray-400">Actual</p>
-                          <p className="font-black tabular-nums text-gray-900 dark:text-white">
-                            {parseFloat(item.precio_actual).toFixed(4)} <span className="text-gray-400 font-normal">{item.unidad_medida}</span>
-                          </p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-10 gap-y-2">
+            {[...mpPrecios]
+              .sort((a, b) => Math.abs(parseFloat(b.variacion_pct)) - Math.abs(parseFloat(a.variacion_pct)))
+              .map((item, i) => {
+                const variacion = parseFloat(item.variacion_pct);
+                const pct = parseFloat(item.precio_actual);
+                const ant = item.precio_anterior ? parseFloat(item.precio_anterior) : null;
+                const isUp = variacion > 0;
+                return (
+                  <motion.div
+                    key={i}
+                    initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.03 * i }}
+                    className="group py-3 border-b border-zinc-200 dark:border-zinc-800 hover:border-loga-red transition-colors"
+                  >
+                    <div className="flex items-baseline justify-between gap-2 mb-1">
+                      <p className="text-sm text-black dark:text-white truncate flex-1 min-w-0">{item.nombre}</p>
+                      {item.precio_anterior && variacion !== 0 && (
+                        <span className={clsx(
+                          'text-sm tabular-nums font-medium inline-flex items-center gap-0.5 shrink-0',
+                          isUp ? 'text-loga-red' : 'text-emerald-700 dark:text-emerald-400'
+                        )} style={MONO}>
+                          {isUp ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+                          {isUp ? '+' : ''}{variacion.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline justify-between gap-3 text-[11px]" style={MONO}>
+                      <span className="text-zinc-400">
+                        {ant ? ant.toFixed(4) : '—'} → <span className="text-black dark:text-white font-medium">{pct.toFixed(4)}</span> EUR/{item.unidad_medida}
+                      </span>
+                      <span className="text-zinc-300 text-[10px]">{item.codigo}</span>
+                    </div>
+                  </motion.div>
+                );
+              })}
           </div>
-        </motion.section>
+        </section>
       )}
+
+      {/* Fin */}
+      <div className="px-6 sm:px-12 py-8 text-center">
+        <p className="text-[10px] uppercase tracking-[0.3em] text-zinc-400">— Loga Daily Ledger —</p>
+      </div>
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Componente helper: Header sortable de columna
+// COMPONENTES AUXILIARES
 // ═══════════════════════════════════════════════════════════════════════
-function SortableHeader({ label, active, dir, onClick }: { label: string; active: boolean; dir: 'asc' | 'desc'; onClick: () => void }) {
+
+function StatLine({ label, value, hint, positive, delay = 0 }: { label: string; value: string; hint?: string; positive?: boolean; delay?: number }) {
   return (
-    <th className="px-4 py-3 text-left">
+    <motion.div
+      initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
+      transition={{ delay, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+    >
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-500">{label}</span>
+        {positive !== undefined && (
+          <span className={clsx('text-xs', positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-loga-red')}>
+            {positive ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+          </span>
+        )}
+      </div>
+      <p className="text-3xl sm:text-4xl text-black dark:text-white tracking-[-0.02em]" style={SERIF}>{value}<span className="text-zinc-400 text-base ml-1">EUR</span></p>
+      {hint && <p className="text-[11px] text-zinc-500 mt-1" style={MONO}>{hint}</p>}
+    </motion.div>
+  );
+}
+
+function MicroStat({ label, value, unit, delay = 0, danger, warning }: {
+  label: string; value: string; unit: string; delay?: number; danger?: boolean; warning?: boolean;
+}) {
+  const valueColor = danger ? 'text-loga-red' : warning ? 'text-amber-700 dark:text-amber-400' : 'text-black dark:text-white';
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay }}
+      className="group"
+    >
+      <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-zinc-500 mb-2">{label}</p>
+      <p className={clsx('text-2xl tabular-nums tracking-tight', valueColor)} style={MONO}>{value}</p>
+      <p className="text-[11px] text-zinc-500 mt-1">{unit}</p>
+    </motion.div>
+  );
+}
+
+function SortHeader({ label, active, dir, onClick, align = 'left' }: { label: string; active: boolean; dir: 'asc' | 'desc'; onClick: () => void; align?: 'left' | 'right' }) {
+  return (
+    <th className={clsx('py-3 pr-2 font-bold', align === 'right' && 'text-right')}>
       <button
         onClick={onClick}
         className={clsx(
-          'inline-flex items-center gap-1 text-xs font-bold uppercase tracking-wider transition-colors',
-          active ? 'text-loga-red' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+          'inline-flex items-center gap-1 transition-colors',
+          active ? 'text-loga-red' : 'text-zinc-500 hover:text-black dark:hover:text-white'
         )}
       >
         {label}
         <ChevronDown
-          size={10}
+          size={9}
           className={clsx('transition-all', active ? 'opacity-100' : 'opacity-30', active && dir === 'asc' && 'rotate-180')}
         />
       </button>
     </th>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LINE CHART editorial — área + línea + dots con tooltip flotante
+// ═══════════════════════════════════════════════════════════════════════
+function LineChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; maxMes: number; minMes: number; avgMes: number }) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const W = 1000;
+  const H = 320;
+  const padX = 40;
+  const padY = 30;
+  const innerW = W - padX * 2;
+  const innerH = H - padY * 2;
+  const range = Math.max(maxMes - minMes, 1);
+
+  const points = data.map((m, i) => {
+    const v = parseFloat(String(m.total));
+    const x = padX + (i / Math.max(data.length - 1, 1)) * innerW;
+    const y = padY + innerH - ((v - minMes) / range) * innerH;
+    return { x, y, v, m };
+  });
+
+  const linePath = points.reduce((acc, p, i) => acc + (i === 0 ? `M${p.x},${p.y}` : ` L${p.x},${p.y}`), '');
+  const areaPath = `${linePath} L${points[points.length - 1].x},${padY + innerH} L${points[0].x},${padY + innerH} Z`;
+  const avgY = padY + innerH - ((avgMes - minMes) / range) * innerH;
+
+  const hovered = hoverIdx != null ? points[hoverIdx] : null;
+
+  return (
+    <div className="relative w-full">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" preserveAspectRatio="none" style={{ minHeight: 240 }}>
+        <defs>
+          <linearGradient id="chart-area" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#FF0000" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="#FF0000" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+
+        {/* Línea media (hairline punteado) */}
+        <line x1={padX} y1={avgY} x2={W - padX} y2={avgY} stroke="currentColor" strokeWidth="0.5" strokeDasharray="3 4" className="text-zinc-300 dark:text-zinc-600" />
+        <text x={W - padX} y={avgY - 6} textAnchor="end" className="text-[10px] fill-zinc-400 uppercase tracking-widest" style={{ fontFamily: '"JetBrains Mono", monospace' }}>
+          Media {fmtCompact(avgMes)}
+        </text>
+
+        {/* Eje X — labels */}
+        {points.map((p, i) => (
+          <text key={i} x={p.x} y={H - 8} textAnchor="middle"
+            className={clsx('text-[10px] fill-zinc-400 uppercase', hoverIdx === i && 'fill-loga-red font-bold')}
+            style={{ fontFamily: '"JetBrains Mono", monospace' }}>
+            {p.m.mes_label.split(' ')[0]}
+          </text>
+        ))}
+
+        {/* Área */}
+        <motion.path
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5, duration: 1 }}
+          d={areaPath} fill="url(#chart-area)"
+        />
+
+        {/* Línea principal */}
+        <motion.path
+          initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 1.4, ease: [0.65, 0, 0.35, 1] }}
+          d={linePath} fill="none" stroke="#FF0000" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+        />
+
+        {/* Dots + hit areas */}
+        {points.map((p, i) => (
+          <g key={i}>
+            <motion.circle
+              initial={{ scale: 0 }} animate={{ scale: 1 }}
+              transition={{ delay: 1.4 + i * 0.04, type: 'spring', stiffness: 300, damping: 20 }}
+              cx={p.x} cy={p.y} r={hoverIdx === i ? 5 : 3} fill="#FF0000"
+              className="transition-all"
+            />
+            {hoverIdx === i && (
+              <line x1={p.x} y1={p.y} x2={p.x} y2={H - padY} stroke="#FF0000" strokeWidth="0.5" strokeDasharray="2 2" opacity="0.5" />
+            )}
+            {/* Hit area amplia */}
+            <rect
+              x={p.x - innerW / data.length / 2}
+              y={padY}
+              width={innerW / data.length}
+              height={innerH}
+              fill="transparent"
+              onMouseEnter={() => setHoverIdx(i)}
+              onMouseLeave={() => setHoverIdx(null)}
+              className="cursor-crosshair"
+            />
+          </g>
+        ))}
+      </svg>
+
+      {/* Tooltip flotante minimalista */}
+      <AnimatePresence>
+        {hovered && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.15 }}
+            className="absolute pointer-events-none bg-black dark:bg-white text-white dark:text-black px-4 py-3 rounded-sm shadow-2xl"
+            style={{
+              left: `${(hovered.x / W) * 100}%`,
+              top: `${(hovered.y / H) * 100}%`,
+              transform: 'translate(-50%, calc(-100% - 14px))',
+            }}
+          >
+            <p className="text-[9px] uppercase tracking-[0.3em] opacity-60 mb-1" style={MONO}>{hovered.m.mes_label}</p>
+            <p className="text-xl tracking-tight" style={SERIF}>{fmt(hovered.v)}<span className="text-xs opacity-60 ml-1">EUR</span></p>
+            <p className="text-[10px] opacity-70 mt-0.5" style={MONO}>{hovered.m.num_pedidos} pedidos · {hovered.v > avgMes ? '+' : ''}{((hovered.v / avgMes - 1) * 100).toFixed(0)}% vs media</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
