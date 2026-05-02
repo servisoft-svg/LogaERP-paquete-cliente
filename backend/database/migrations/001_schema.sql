@@ -2,8 +2,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict 75WoGb4XVG402OYhiR0egkrJCZeC57njGiuIFIATX5hiJP0b2X1JaI2HBHaQ8dt
-
 -- Dumped from database version 16.13 (Homebrew)
 -- Dumped by pg_dump version 16.13 (Homebrew)
 
@@ -33,7 +31,7 @@ COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
 
 
 --
--- Name: estado_compra; Type: TYPE; Schema: public; Owner: adrianmartinlopez
+-- Name: estado_compra; Type: TYPE; Schema: public; Owner: loga
 --
 
 CREATE TYPE public.estado_compra AS ENUM (
@@ -44,7 +42,7 @@ CREATE TYPE public.estado_compra AS ENUM (
 );
 
 
-ALTER TYPE public.estado_compra OWNER TO adrianmartinlopez;
+ALTER TYPE public.estado_compra OWNER TO loga;
 
 --
 -- Name: estado_lote; Type: TYPE; Schema: public; Owner: loga
@@ -75,19 +73,21 @@ CREATE TYPE public.estado_orden AS ENUM (
 ALTER TYPE public.estado_orden OWNER TO loga;
 
 --
--- Name: estado_pedido; Type: TYPE; Schema: public; Owner: adrianmartinlopez
+-- Name: estado_pedido; Type: TYPE; Schema: public; Owner: loga
 --
 
 CREATE TYPE public.estado_pedido AS ENUM (
     'nuevo',
     'confirmado',
     'en_produccion',
+    'fabricado',
+    'envasado',
     'completado',
     'cancelado'
 );
 
 
-ALTER TYPE public.estado_pedido OWNER TO adrianmartinlopez;
+ALTER TYPE public.estado_pedido OWNER TO loga;
 
 --
 -- Name: tipo_movimiento; Type: TYPE; Schema: public; Owner: loga
@@ -166,7 +166,7 @@ $$;
 ALTER FUNCTION public.fn_check_alerta_stock() OWNER TO loga;
 
 --
--- Name: fn_numero_oc(); Type: FUNCTION; Schema: public; Owner: adrianmartinlopez
+-- Name: fn_numero_oc(); Type: FUNCTION; Schema: public; Owner: loga
 --
 
 CREATE FUNCTION public.fn_numero_oc() RETURNS trigger
@@ -180,7 +180,7 @@ END;
 $_$;
 
 
-ALTER FUNCTION public.fn_numero_oc() OWNER TO adrianmartinlopez;
+ALTER FUNCTION public.fn_numero_oc() OWNER TO loga;
 
 --
 -- Name: fn_numero_orden(); Type: FUNCTION; Schema: public; Owner: loga
@@ -202,7 +202,7 @@ $$;
 ALTER FUNCTION public.fn_numero_orden() OWNER TO loga;
 
 --
--- Name: fn_numero_pedido(); Type: FUNCTION; Schema: public; Owner: adrianmartinlopez
+-- Name: fn_numero_pedido(); Type: FUNCTION; Schema: public; Owner: loga
 --
 
 CREATE FUNCTION public.fn_numero_pedido() RETURNS trigger
@@ -216,7 +216,7 @@ END;
 $_$;
 
 
-ALTER FUNCTION public.fn_numero_pedido() OWNER TO adrianmartinlopez;
+ALTER FUNCTION public.fn_numero_pedido() OWNER TO loga;
 
 --
 -- Name: fn_set_updated_at(); Type: FUNCTION; Schema: public; Owner: loga
@@ -407,7 +407,7 @@ CREATE TABLE public.notificaciones (
 ALTER TABLE public.notificaciones OWNER TO loga;
 
 --
--- Name: ordenes_compra; Type: TABLE; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra; Type: TABLE; Schema: public; Owner: loga
 --
 
 CREATE TABLE public.ordenes_compra (
@@ -428,7 +428,7 @@ CREATE TABLE public.ordenes_compra (
 );
 
 
-ALTER TABLE public.ordenes_compra OWNER TO adrianmartinlopez;
+ALTER TABLE public.ordenes_compra OWNER TO loga;
 
 --
 -- Name: ordenes_produccion; Type: TABLE; Schema: public; Owner: loga
@@ -705,7 +705,7 @@ ALTER TABLE ONLY public.notificaciones
 
 
 --
--- Name: ordenes_compra ordenes_compra_numero_oc_key; Type: CONSTRAINT; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra ordenes_compra_numero_oc_key; Type: CONSTRAINT; Schema: public; Owner: loga
 --
 
 ALTER TABLE ONLY public.ordenes_compra
@@ -713,7 +713,7 @@ ALTER TABLE ONLY public.ordenes_compra
 
 
 --
--- Name: ordenes_compra ordenes_compra_pkey; Type: CONSTRAINT; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra ordenes_compra_pkey; Type: CONSTRAINT; Schema: public; Owner: loga
 --
 
 ALTER TABLE ONLY public.ordenes_compra
@@ -966,7 +966,7 @@ CREATE TRIGGER trg_lotes_updated_at BEFORE UPDATE ON public.lotes FOR EACH ROW E
 
 
 --
--- Name: ordenes_compra trg_numero_oc; Type: TRIGGER; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra trg_numero_oc; Type: TRIGGER; Schema: public; Owner: loga
 --
 
 CREATE TRIGGER trg_numero_oc BEFORE INSERT ON public.ordenes_compra FOR EACH ROW EXECUTE FUNCTION public.fn_numero_oc();
@@ -987,7 +987,7 @@ CREATE TRIGGER trg_numero_pedido BEFORE INSERT ON public.pedidos FOR EACH ROW EX
 
 
 --
--- Name: ordenes_compra trg_oc_updated_at; Type: TRIGGER; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra trg_oc_updated_at; Type: TRIGGER; Schema: public; Owner: loga
 --
 
 CREATE TRIGGER trg_oc_updated_at BEFORE UPDATE ON public.ordenes_compra FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -1086,7 +1086,7 @@ ALTER TABLE ONLY public.notificaciones
 
 
 --
--- Name: ordenes_compra ordenes_compra_lote_creado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra ordenes_compra_lote_creado_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
 --
 
 ALTER TABLE ONLY public.ordenes_compra
@@ -1094,7 +1094,7 @@ ALTER TABLE ONLY public.ordenes_compra
 
 
 --
--- Name: ordenes_compra ordenes_compra_producto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra ordenes_compra_producto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
 --
 
 ALTER TABLE ONLY public.ordenes_compra
@@ -1102,7 +1102,7 @@ ALTER TABLE ONLY public.ordenes_compra
 
 
 --
--- Name: ordenes_compra ordenes_compra_proveedor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: adrianmartinlopez
+-- Name: ordenes_compra ordenes_compra_proveedor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
 --
 
 ALTER TABLE ONLY public.ordenes_compra
@@ -1200,6 +1200,4 @@ ALTER TABLE ONLY public.stock_moves
 --
 -- PostgreSQL database dump complete
 --
-
-\unrestrict 75WoGb4XVG402OYhiR0egkrJCZeC57njGiuIFIATX5hiJP0b2X1JaI2HBHaQ8dt
 

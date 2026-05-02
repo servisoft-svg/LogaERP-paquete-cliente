@@ -2,8 +2,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict Gb14cNr7ht16uQbryCjL5ErsoFa1uwFmEadF9SimM7WobdW3ecioGdrHbd2i34H
-
 -- Dumped from database version 16.13 (Homebrew)
 -- Dumped by pg_dump version 16.13 (Homebrew)
 
@@ -31,15 +29,16 @@ COPY public.configuracion_global (id, porcentaje_alerta, plantilla_email, email_
 -- Data for Name: usuarios; Type: TABLE DATA; Schema: public; Owner: loga
 --
 
+-- Passwords (bcryptjs $2b$10):
+--   admin@loga.es     -> Loga#Admin2026!
+--   operario@loga.es  -> Loga#Admin2026!  (mismo, cambiar tras primer login)
 COPY public.usuarios (id, nombre, email, password_hash, rol, activo, created_at) FROM stdin;
-459ccd75-dfb4-4a9d-9bfd-39f0c5e20a0f	Administrador	admin@loga.es	$2b$10$RrWjtdDw50FqbJxyKg/TTe7FEkG/eNxmRAper6S.mobTvxPRPB/qm	admin	t	2026-04-20 09:19:26.928596+02
-e5f9286a-5367-468a-9c4d-8321a02b90c7	Operario	operario@loga.es	$2b$10$aYAlKcHqSghqAwWiPRIFeuaUOmqOHQ0BqYnS3/fKMm/9oRf/i8Rpa	trabajador	t	2026-04-20 09:26:52.158412+02
+459ccd75-dfb4-4a9d-9bfd-39f0c5e20a0f	Administrador	admin@loga.es	$2b$10$YzYh9yKOZwMKLj8Ba7RI7OQjM9JuRd3LV1Mfc0kiK5QvmTFffVvyS	admin	t	2026-04-20 09:19:26.928596+02
+e5f9286a-5367-468a-9c4d-8321a02b90c7	Operario	operario@loga.es	$2b$10$YzYh9yKOZwMKLj8Ba7RI7OQjM9JuRd3LV1Mfc0kiK5QvmTFffVvyS	trabajador	t	2026-04-20 09:26:52.158412+02
 \.
 
 
 --
 -- PostgreSQL database dump complete
 --
-
-\unrestrict Gb14cNr7ht16uQbryCjL5ErsoFa1uwFmEadF9SimM7WobdW3ecioGdrHbd2i34H
 

@@ -20,7 +20,7 @@
 --
 -- IMPORTANTE: ejecutar con un usuario con SELECT sobre pedidos /
 -- ordenes_compra Y permisos sobre las secuencias. Típicamente el
--- owner de las tablas. En la BD local "adrianmartinlopez". En
+-- owner de las tablas. En la BD local "loga". En
 -- producción Railway/Postgres: el rol con el que se conecta la app.
 -- =============================================================
 
