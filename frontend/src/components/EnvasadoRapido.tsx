@@ -2,8 +2,9 @@
  * EnvasadoRapido — Flujo: Producto final → Cola (receta) → Envase → Materiales → Preview lotes → Animación
  */
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { X, Check, Package } from 'lucide-react';
+import { X, Check, Package, FileText } from 'lucide-react';
 import { produccionApi, productosApi, recetasApi } from '../api/client';
 import type { Producto, Receta } from '../types';
 import TanqueEnvasado from './TanqueEnvasado';
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export default function EnvasadoRapido({ open, onClose, onDone, initialProducto, initialCantidad }: Props) {
+  const navigate = useNavigate();
   const [productos, setProductos] = useState<Producto[]>([]);
   const [fase, setFase] = useState<'seleccion' | 'preview' | 'procesando' | 'completado' | 'error'>('seleccion');
   const [fillPct, setFillPct] = useState(0);
@@ -141,7 +143,14 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
       try { audioRef.current = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH2JkYuDe3J1eH+GjIuGgXx4eHyBhomLiYV/enh5fIGFiIqIhYB8eXl8gIWIioiGgX15eXyAhYiKiIaBfXl5fICEh4mIhoF9eXl8gISHiYiGgX15'); audioRef.current.volume = 0.15; audioRef.current.play().catch(() => {}); } catch {}
       const { data } = await produccionApi.confirmarEnvasado(ordenCreada);
       clearInterval(interval); setFillPct(100); setResultado(data);
-      const r = data as { producto_envasado?: string; cantidad?: number; lote?: string; peso_cola_consumido?: number };
+      const r = data as {
+        producto_envasado?: string; cantidad?: number; lote?: string; peso_cola_consumido?: number;
+        producto_envasado_id?: string; sugerir_crear_receta?: boolean;
+        cola_id?: string; envase_id?: string;
+      };
+      // Si el envasado creó/usó un PE sin receta envasado activa, sugerir crearla
+      // (Hallazgo #4 — auto-cost desde receta queda inactivo sin receta)
+      const sugerirReceta = r.sugerir_crear_receta && r.producto_envasado_id;
       notify.success('Envasado completado', {
         description: (
           <ToastBlock title={r.producto_envasado}>
@@ -151,6 +160,20 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
             <ToastField label="Lote" value={r.lote} />
           </ToastBlock>
         ),
+        ...(sugerirReceta ? {
+          button: {
+            title: 'Crear receta',
+            onClick: () => {
+              const params = new URLSearchParams({
+                nuevaEnvasado: r.producto_envasado_id!,
+                ...(r.cola_id ? { cola: r.cola_id } : {}),
+                ...(r.envase_id ? { envase: r.envase_id } : {}),
+              });
+              onClose();
+              navigate(`/recetas?${params.toString()}`);
+            },
+          },
+        } : {}),
       });
       setTimeout(() => setFase('completado'), 800);
     } catch (err: unknown) {
@@ -396,6 +419,34 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
                 <p className="text-xs text-gray-500">Cola consumida: {resultado.peso_cola_consumido?.toLocaleString('es-ES')} kg</p>
                 <p className="text-xs text-gray-500">Lote: <code className="bg-white rounded px-1">{resultado.lote}</code></p>
               </div>
+
+              {/* Sugerir crear receta envasado si el PE no tiene una activa */}
+              {resultado.sugerir_crear_receta && resultado.producto_envasado_id && (
+                <div className="rounded-xl bg-amber-50 border-2 border-amber-200 p-3.5 text-left space-y-2.5">
+                  <div className="flex items-start gap-2">
+                    <FileText size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="text-[13px] font-bold text-amber-900 leading-tight">Crea la receta para este producto</p>
+                      <p className="text-[11px] text-amber-700 mt-1">Sin receta de envasado, el coste no se calcula automáticamente. Crearla ahora rellena los próximos envasados al instante.</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const params = new URLSearchParams({
+                        nuevaEnvasado: resultado.producto_envasado_id,
+                        ...(resultado.cola_id ? { cola: resultado.cola_id } : {}),
+                        ...(resultado.envase_id ? { envase: resultado.envase_id } : {}),
+                      });
+                      onClose();
+                      navigate(`/recetas?${params.toString()}`);
+                    }}
+                    className="w-full rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[12px] font-bold py-2 transition-colors"
+                  >
+                    Crear receta de envasado
+                  </button>
+                </div>
+              )}
+
               <button onClick={() => { onDone(); onClose(); }}
                 className="w-full rounded-xl border border-gray-200 bg-white py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50">Cerrar</button>
             </motion.div>

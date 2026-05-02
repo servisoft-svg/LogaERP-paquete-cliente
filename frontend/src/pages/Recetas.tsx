@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Pencil, Trash2, ChefHat, Search, FlaskConical,
@@ -78,6 +78,7 @@ const EJEMPLO_IMPORTAR_RECETAS = JSON.stringify({
 
 export default function Recetas() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [recetas, setRecetas]               = useState<Receta[]>([]);
   const [productos, setProductos]           = useState<Producto[]>([]);
   const [loading, setLoading]               = useState(true);
@@ -237,6 +238,31 @@ export default function Recetas() {
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // Auto-abrir modal Nueva Receta Envasado si llega ?nuevaEnvasado=<producto_id>
+  // (viene desde EnvasadoRapido cuando creó/usó un PE sin receta).
+  useEffect(() => {
+    if (loading) return; // esperar a que productos estén cargados
+    const peId = searchParams.get('nuevaEnvasado');
+    if (!peId) return;
+    const cola = searchParams.get('cola') ?? '';
+    const envase = searchParams.get('envase') ?? '';
+    setTabActivo('envasado');
+    setEditandoEnv(null);
+    setEnvRecForm({
+      nombre: '',
+      producto_id: peId,
+      producto_nuevo_nombre: '',
+      cola_id: cola,
+      envase_id: envase,
+      materiales: [],
+    });
+    setModalEnv(true);
+    // Limpiar query params para que no se reabra al recargar
+    const next = new URLSearchParams(searchParams);
+    next.delete('nuevaEnvasado'); next.delete('cola'); next.delete('envase');
+    setSearchParams(next, { replace: true });
+  }, [loading, searchParams, setSearchParams]);
 
   const cargarDetalle = useCallback(async (id: string) => {
     try {

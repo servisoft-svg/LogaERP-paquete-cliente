@@ -176,6 +176,7 @@ router.post('/envasado-rapido', async (req, res) => {
     // Buscar o crear producto envasado (PE)
     const fmtLabel = formato_label || envase?.nombre || `${pesoEnvase}kg`;
     const peNombre = `${cola.nombre} ${fmtLabel}`;
+    let peCreado = false; // <-- flag para sugerir crear receta al frontend
     let { rows: [pe] } = await client.query(
       `SELECT id, nombre FROM productos WHERE nombre ILIKE $1 AND tipo = 'producto_envasado' LIMIT 1`,
       [`%${cola.nombre}%${fmtLabel.split(' ')[0]}%`]
@@ -198,7 +199,18 @@ router.post('/envasado-rapido', async (req, res) => {
         [codigo, peNombre, pesoEnvase, cola_id, costePE.toFixed(6)]
       );
       pe = nuevo;
+      peCreado = true;
     }
+
+    // Verificar si el PE tiene receta envasado activa (para sugerir crearla
+    // al frontend si falta — Hallazgo #4 auditoría coste auto desde receta)
+    const { rows: [recetaExiste] } = await client.query(
+      `SELECT 1 FROM recetas
+       WHERE producto_id = $1 AND tipo_receta = 'envasado' AND activa = TRUE
+       LIMIT 1`,
+      [pe.id]
+    );
+    const sugerirCrearReceta = !recetaExiste;
 
     // ── CREAR ORDEN DE PRODUCCIÓN para trazabilidad ──
     const notaOrden = multiplicador > 1
@@ -397,6 +409,9 @@ router.post('/envasado-rapido', async (req, res) => {
     return res.json({
       ok: true,
       producto_envasado: pe.nombre,
+      producto_envasado_id: pe.id,
+      producto_envasado_creado: peCreado, // <-- Hallazgo #4
+      sugerir_crear_receta: sugerirCrearReceta, // <-- prompt al frontend
       cantidad: totalUnidades,
       multiplicador,
       cajas_consumidas: multiplicador > 1 ? cantidadEnvases : undefined,
@@ -638,6 +653,7 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
 
     // Resolve producto final
     let pe: { id: string; nombre: string };
+    let peCreado = false; // <-- track si se acaba de crear (Hallazgo #4)
     if (orden.producto_final_id) {
       const { rows: [pf] } = await client.query(`SELECT id, nombre FROM productos WHERE id = $1`, [orden.producto_final_id]);
       if (!pf) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Producto final no encontrado.' }); }
@@ -655,9 +671,19 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
            VALUES ($1, $2, 'producto_envasado', 'ud', $3, $4, $5) RETURNING id, nombre`,
           [`PE-${String(nextNum).padStart(3, '0')}`, peNombre, calc.pesoUnitario, orden.cola_id, costePE.toFixed(6)]
         ));
+        peCreado = true;
       }
       pe = found;
     }
+
+    // Verificar si el PE tiene receta envasado activa (para sugerir crearla)
+    const { rows: [recetaExiste] } = await client.query(
+      `SELECT 1 FROM recetas
+       WHERE producto_id = $1 AND tipo_receta = 'envasado' AND activa = TRUE
+       LIMIT 1`,
+      [pe.id]
+    );
+    const sugerirCrearReceta = !recetaExiste;
 
     // Consume each item FIFO (within transaction)
     for (const c of calc.consumos) {
@@ -718,6 +744,11 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
     return res.json({
       ok: true,
       producto_envasado: pe.nombre,
+      producto_envasado_id: pe.id,
+      producto_envasado_creado: peCreado,        // <-- Hallazgo #4
+      sugerir_crear_receta: sugerirCrearReceta,  // <-- prompt al frontend
+      cola_id: orden.cola_id,
+      envase_id: orden.envase_id,
       cantidad: calc.totalUnidades,
       peso_cola_consumido: calc.pesoColaNecesario,
       envases_consumidos: calc.cantidadInput,

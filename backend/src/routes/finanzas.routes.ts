@@ -32,26 +32,36 @@ router.get('/resumen', async (_req, res) => {
       return cmpMap[productoId] ?? 0;
     }
 
-    // Cálculo recursivo de coste con desglose completo
-    // FIFO: usa precio del lote más antiguo con stock (el que usaría primero)
-    // Fabricación: coste_batch / rendimiento = coste por kg
-    // Envasado: cola granel (recursivo) + envase + etiqueta
+    // Coste por producto:
+    //   - Fuente única de verdad: productos.precio_unitario (mantenido por el
+    //     trigger fn_actualizar_coste_si_no_manual de migración 026).
+    //     Si el producto tiene receta y modo auto → es el coste recursivo real.
+    //     Si está en modo manual → es el valor que el usuario configuró.
+    //   - El desglose visual (tabla "Rentabilidad por producto" expandible)
+    //     se construye aquí iterando ingredientes con sus CMPs, SOLO para
+    //     mostrar al usuario qué compone el coste. La cifra final NO se
+    //     recalcula — viene de productos.precio_unitario.
     interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
     interface CosteResult { coste_ud: number; coste_batch: number; rendimiento: number; desglose: DesgloseItem[] }
     const costeCache: Record<string, CosteResult> = {};
 
+    // Pre-load todos los precios autoritativos (precio_unitario)
+    const precioMap: Record<string, number> = {};
+    for (const r of allCmps) precioMap[r.id] = parseFloat(r.cmp ?? '0');
+    // Sobrescribir con precio_unitario real del producto (que ya incluye
+    // cálculo recursivo via trigger 026 cuando es auto)
+    const { rows: prodPrecios } = await pool.query(
+      `SELECT id, COALESCE(precio_unitario, 0) AS precio FROM productos WHERE activo = TRUE`
+    );
+    for (const r of prodPrecios) precioMap[r.id] = parseFloat(r.precio ?? '0');
+
     async function calcularCosteProducto(productoId: string): Promise<CosteResult> {
       if (costeCache[productoId]) return costeCache[productoId];
 
-      // Cargar producto para saber qué tipo de receta buscar:
-      //   - producto_envasado  → tipo_receta='envasado'
-      //   - producto_fabricado → tipo_receta='fabricacion'
-      // Antes (bug): no filtraba tipo_receta. Si un producto envasado
-      // tenía dos recetas activas (ej: la real + una de prueba mal
-      // asignada), cogía la última por version sin discriminar tipo.
-      // Caso real: PT-CL-10L tenía receta correcta (10kg cola=29.35€) y
-      // receta huérfana "Garrafa rapida 10L" (1kg cola=4.05€) → mostraba
-      // 4.05€ con margen 91.6% imposible.
+      // 1. Coste autoritativo: productos.precio_unitario (mantenido por trigger BD)
+      const costeAutoritativo = precioMap[productoId] ?? getCMP(productoId);
+
+      // 2. Buscar receta activa para construir el desglose visual (si tiene)
       const { rows: [prodInfo] } = await pool.query<{ tipo: string }>(
         `SELECT tipo::text AS tipo FROM productos WHERE id = $1`, [productoId]
       );
@@ -61,24 +71,25 @@ router.get('/resumen', async (_req, res) => {
 
       const { rows: [receta] } = await pool.query(
         tipoEsperado
-          ? `SELECT id, rendimiento, tipo_receta FROM recetas
+          ? `SELECT id, rendimiento FROM recetas
              WHERE producto_id = $1 AND activa = TRUE AND tipo_receta = $2
              ORDER BY version DESC LIMIT 1`
-          : `SELECT id, rendimiento, tipo_receta FROM recetas
+          : `SELECT id, rendimiento FROM recetas
              WHERE producto_id = $1 AND activa = TRUE
              ORDER BY version DESC LIMIT 1`,
         tipoEsperado ? [productoId, tipoEsperado] : [productoId]
       );
 
+      // Sin receta: solo coste autoritativo, sin desglose
       if (!receta) {
-        // Sin receta: usar CMP (calculado recursivo desde lotes vía trigger
-        // C-4) o fallback a precio_unitario manual.
-        const c = getCMP(productoId);
-        const r: CosteResult = { coste_ud: c, coste_batch: c, rendimiento: 1, desglose: [] };
+        const r: CosteResult = { coste_ud: costeAutoritativo, coste_batch: costeAutoritativo, rendimiento: 1, desglose: [] };
         costeCache[productoId] = r;
         return r;
       }
 
+      const rendimiento = parseFloat(receta.rendimiento);
+
+      // 3. Construir desglose iterando ingredientes (solo visual)
       const { rows: ingredientes } = await pool.query(
         `SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id, p.nombre, p.tipo, p.unidad_medida
          FROM ingredientes_receta ir
@@ -86,22 +97,13 @@ router.get('/resumen', async (_req, res) => {
          WHERE ir.receta_id = $1`, [receta.id]
       );
 
-      let costeBatch = 0;
       const desglose: DesgloseItem[] = [];
-
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
-        let precioUd: number;
-
-        if (ing.tipo === 'producto_fabricado') {
-          const sub = await calcularCosteProducto(ing.materia_prima_id);
-          precioUd = sub.coste_ud;
-        } else {
-          precioUd = getCMP(ing.materia_prima_id);
-        }
-
+        // Precio del ingrediente: si es producto_fabricado, su precio ya incluye
+        // su propio cálculo recursivo (vía trigger). Si es MP/embalaje, CMP de lotes.
+        const precioUd = precioMap[ing.materia_prima_id] ?? getCMP(ing.materia_prima_id);
         const costeLinea = cantReal * precioUd;
-        costeBatch += costeLinea;
         desglose.push({
           nombre: ing.nombre,
           cantidad: Math.round(cantReal * 10000) / 10000,
@@ -111,10 +113,10 @@ router.get('/resumen', async (_req, res) => {
         });
       }
 
-      const rendimiento = parseFloat(receta.rendimiento);
-      const costeUd = rendimiento > 0 ? costeBatch / rendimiento : costeBatch;
+      // coste_batch = coste_ud autoritativo × rendimiento (consistente con BD)
+      const costeBatch = costeAutoritativo * rendimiento;
       const r: CosteResult = {
-        coste_ud: Math.round(costeUd * 10000) / 10000,
+        coste_ud: Math.round(costeAutoritativo * 10000) / 10000,
         coste_batch: Math.round(costeBatch * 10000) / 10000,
         rendimiento,
         desglose,
