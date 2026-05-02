@@ -2,27 +2,48 @@
 REM ============================================================
 REM ERP Loga - Lanzador del instalador Windows
 REM ============================================================
-REM Doble-clic en este archivo. Eleva permisos y lanza install.ps1
+REM Doble-clic O clic derecho > Ejecutar como administrador.
+REM Si no estamos elevados, pedimos elevacion.
 REM ============================================================
 
-setlocal
-
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-REM Comprobar PowerShell
+REM --- Verificar PowerShell -----------------------------------
 where powershell >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] PowerShell no encontrado.
-    echo Necesitas Windows 10 o superior.
+    echo [ERROR] PowerShell no encontrado. Necesitas Windows 10 o superior.
     pause
     exit /b 1
 )
 
-echo Lanzando instalador en PowerShell...
-echo Si Windows pide permisos de administrador, pulsa "Si".
+REM --- Comprobar si ya somos administrador --------------------
+net session >nul 2>&1
+if %errorlevel% NEQ 0 (
+    echo No estas como administrador. Pidiendo elevacion...
+    echo Acepta el aviso UAC ^(Si^).
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b 0
+)
+
+REM --- Ya somos admin: lanzamos install.ps1 EN ESTA ventana ---
+echo.
+echo ============================================================
+echo   ERP Loga - Instalador Windows
+echo   Ejecutando como administrador
+echo ============================================================
 echo.
 
-REM Pedir admin con UAC y ejecutar install.ps1
-powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','%~dp0install.ps1'"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+set EXITCODE=%errorlevel%
 
-endlocal
+echo.
+if %EXITCODE% NEQ 0 (
+    echo [ERROR] El instalador termino con codigo %EXITCODE%
+) else (
+    echo [OK] Instalador finalizado correctamente.
+)
+echo.
+echo Pulsa una tecla para cerrar esta ventana...
+pause >nul
+exit /b %EXITCODE%

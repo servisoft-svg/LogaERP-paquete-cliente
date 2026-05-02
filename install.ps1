@@ -1,4 +1,4 @@
-# =============================================================
+﻿# =============================================================
 # ERP Loga - Instalador todo-en-uno para Windows 10/11
 # =============================================================
 # Uso:  doble-clic en install.bat  o desde PowerShell:
@@ -18,24 +18,40 @@
 
 $ErrorActionPreference = "Stop"
 
-function Write-Step($msg)  { Write-Host "▶ $msg" -ForegroundColor Blue }
-function Write-Ok($msg)    { Write-Host "✓ $msg" -ForegroundColor Green }
-function Write-Warn($msg)  { Write-Host "⚠ $msg" -ForegroundColor Yellow }
-function Write-Err($msg)   { Write-Host "✗ $msg" -ForegroundColor Red }
+# Forzar UTF-8 en la consola para que los acentos/dashes salgan bien
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+    chcp 65001 | Out-Null
+} catch { }
 
-# Directorio del proyecto
-$ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+function Write-Step($msg)  { Write-Host "[*] $msg" -ForegroundColor Blue }
+function Write-Ok($msg)    { Write-Host "[OK] $msg" -ForegroundColor Green }
+function Write-Warn($msg)  { Write-Host "[!] $msg" -ForegroundColor Yellow }
+function Write-Err($msg)   { Write-Host "[X] $msg" -ForegroundColor Red }
+
+# Directorio del proyecto — usar PSCommandPath si existe (más fiable)
+if ($PSCommandPath) {
+    $ProjectDir = Split-Path -Parent $PSCommandPath
+} elseif ($MyInvocation.MyCommand.Path) {
+    $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+} else {
+    $ProjectDir = (Get-Location).Path
+}
 Set-Location $ProjectDir
+
+# Wrapper try/catch para que cualquier error quede VISIBLE en la ventana
+try {
 
 $DbName = "loga_erp"
 $DbUser = "postgres"
 $DbPass = "loga_local_$(Get-Random -Maximum 999999)"  # password local solo
 
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════════"
-Write-Host "   ERP Loga — Instalación automática (Windows)"
+Write-Host "==========================================================="
+Write-Host "   ERP Loga - Instalacion automatica (Windows)"
 Write-Host "   Directorio: $ProjectDir"
-Write-Host "═══════════════════════════════════════════════════════════"
+Write-Host "==========================================================="
 Write-Host ""
 
 # -------------------------------------------------------------
@@ -239,9 +255,9 @@ Write-Ok "ERP arrancando en segundo plano"
 # Resumen
 # -------------------------------------------------------------
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════════"
-Write-Host "  Instalación completada" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════════════════"
+Write-Host "===========================================================" -ForegroundColor Green
+Write-Host "  Instalacion completada" -ForegroundColor Green
+Write-Host "===========================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Backend:   http://localhost:3001"
 Write-Host "  Frontend:  http://localhost:4173"
@@ -250,11 +266,32 @@ Write-Host "  Login admin (cambiar tras primer acceso):"
 Write-Host "    Email:    admin@loga.es"
 Write-Host "    Password: admin123"
 Write-Host ""
-Write-Host "  Comandos útiles:"
-Write-Host "    .\start.bat        — arrancar manual"
-Write-Host "    .\stop.bat         — parar todo"
-Write-Host "    .\uninstall.bat    — desinstalar arranque automático"
+Write-Host "  Comandos utiles:"
+Write-Host "    .\start.bat        - arrancar manual"
+Write-Host "    .\stop.bat         - parar todo"
+Write-Host "    .\uninstall.bat    - desinstalar arranque automatico"
 Write-Host "    Get-Content logs\backend.log -Tail 30 -Wait"
 Write-Host ""
-Write-Host "  Se arrancará solo cada vez que inicies sesión en Windows."
-Write-Host "═══════════════════════════════════════════════════════════"
+Write-Host "  Se arrancara solo cada vez que inicies sesion en Windows."
+Write-Host "==========================================================="
+
+} catch {
+    Write-Host ""
+    Write-Host "==========================================================" -ForegroundColor Red
+    Write-Host " ERROR durante la instalacion" -ForegroundColor Red
+    Write-Host "==========================================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Mensaje:" -ForegroundColor Yellow
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Linea: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
+    Write-Host "Comando que fallo:" -ForegroundColor Yellow
+    Write-Host "  $($_.InvocationInfo.Line.Trim())" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Stack trace:" -ForegroundColor DarkGray
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "Pulsa Enter para cerrar..." -ForegroundColor Yellow
+    Read-Host
+    exit 1
+}
