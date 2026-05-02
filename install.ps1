@@ -256,27 +256,60 @@ New-Item -ItemType Directory -Force -Path "$ProjectDir\logs" | Out-Null
 # -------------------------------------------------------------
 # 8. Tarea programada — arranque al iniciar sesión
 # -------------------------------------------------------------
-Write-Step "Configurando arranque automático (Programador de tareas)..."
+Write-Step "Configurando arranque automatico (Programador de tareas)..."
 
 $TaskName = "ERPLoga"
 $StartScript = "$ProjectDir\start.ps1"
 
-# Borrar tarea previa si existe
-schtasks /query /tn $TaskName 2>$null | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    schtasks /delete /tn $TaskName /f | Out-Null
+# Borrar tarea previa si existe (Unregister-ScheduledTask es robusto)
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existing) {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-# Crear nueva tarea: trigger AtLogon, ocultas ventanas
-$action = "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
-schtasks /create /tn $TaskName /tr $action /sc onlogon /rl highest /f | Out-Null
-Write-Ok "Tarea '$TaskName' creada — arrancará al iniciar sesión"
+# Crear con cmdlets PowerShell — manejan rutas con espacios automaticamente
+# y especifican correctamente el token de admin (RunLevel Highest).
+$psExe = (Get-Command powershell.exe).Source
+$action = New-ScheduledTaskAction `
+    -Execute $psExe `
+    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`"" `
+    -WorkingDirectory $ProjectDir
+
+# Trigger: al iniciar sesion del usuario actual
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+
+# Settings: permitir relanzar si falla, no parar al pasar a bateria, sin tiempo limite
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
+    -RestartCount 5 `
+    -RestartInterval (New-TimeSpan -Minutes 1)
+
+# Principal: ejecutar como usuario actual con privilegios elevados
+$principal = New-ScheduledTaskPrincipal `
+    -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType Interactive `
+    -RunLevel Highest
+
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -Principal $principal `
+    -Description "ERP Loga - arranque automatico al iniciar sesion" `
+    -Force | Out-Null
+
+Write-Ok "Tarea '$TaskName' creada - arrancara al iniciar sesion como $env:USERNAME"
 
 # -------------------------------------------------------------
 # 9. Arrancar ahora
 # -------------------------------------------------------------
 Write-Step "Arrancando ERP..."
-Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartScript`""
+# Lanzamos disparando la tarea recien creada — usa la misma config y permisos
+Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 3
 Write-Ok "ERP arrancando en segundo plano"
 
