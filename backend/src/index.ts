@@ -26,6 +26,7 @@ import { queuesHealthy } from './queues/index';
 import { logger }        from './lib/logger';
 import { automatizacionesService } from './services/automatizaciones.service';
 import automatizacionesRoutes from './routes/automatizaciones.routes';
+import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
 
 dotenv.config();
 
@@ -122,7 +123,25 @@ app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
     const redis = await queuesHealthy().catch(() => false);
-    res.json({ status: 'ok', db: 'connected', redis: redis ? 'connected' : 'unavailable', uptime: process.uptime(), timestamp: new Date().toISOString() });
+    // Estado secuencias gestionadas (read-only). Si alguna unhealthy,
+    // el INSERT seguirá funcionando vía trigger defensivo runtime,
+    // pero esto sirve a monitoring para alertar.
+    const sequences = await inspectAllSequences().catch(() => []);
+    const sequencesHealthy = sequences.length > 0 && sequences.every(s => s.healthy);
+    res.json({
+      status: sequencesHealthy ? 'ok' : 'degraded',
+      db: 'connected',
+      redis: redis ? 'connected' : 'unavailable',
+      sequences: sequences.map(s => ({
+        name: s.name,
+        seqValue: s.seqValue,
+        maxReal: s.maxReal,
+        healthy: s.healthy,
+        ...(s.error ? { error: s.error } : {}),
+      })),
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+    });
   } catch {
     res.status(500).json({ status: 'error', message: 'Database connection failed' });
   }
@@ -183,9 +202,31 @@ queuesHealthy().then((ok) => {
 
 const server = http.createServer(app);
 
-server.listen(PORT, () => {
-  logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
-});
+// Bootstrap DB SIEMPRE en cada arranque: garantiza que secuencias y
+// funciones trigger defensivas están en estado correcto, sin depender
+// de que un operario haya aplicado las migraciones manualmente.
+// Idempotente, fail-soft (logea pero no impide arrancar — el trigger
+// defensivo runtime sigue siendo red de seguridad si esto falla).
+// Override: BOOTSTRAP_DB=false para saltarlo (útil en debugging).
+async function startup() {
+  if (process.env.BOOTSTRAP_DB !== 'false') {
+    try {
+      const result = await bootstrapDatabase();
+      if (!result.ok) {
+        logger.warn(`[startup] bootstrap completó con avisos (${result.errors.length} errores). Backend arranca igualmente — trigger defensivo runtime activo.`);
+      }
+    } catch (err) {
+      logger.error('[startup] bootstrap fallo total — backend arranca igualmente', { err });
+    }
+  } else {
+    logger.info('[startup] bootstrap DESACTIVADO por BOOTSTRAP_DB=false');
+  }
+
+  server.listen(PORT, () => {
+    logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
+  });
+}
+startup();
 
 // Cron interno: reintentar emails de automatización cada 5 min
 const RETRY_INTERVAL_MS = 5 * 60 * 1000;
