@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
+import { invalidarCacheFinanzas } from './finanzas.routes';
 
 const router = Router();
 
@@ -217,6 +218,7 @@ router.post('/', async (req, res) => {
       }
     }
 
+    invalidarCacheFinanzas();
     return res.status(201).json(receta);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
@@ -260,6 +262,7 @@ router.put('/:id', async (req, res) => {
        producto_id ?? null]
     );
     if (!receta) return res.status(404).json({ error: 'Receta no encontrada' });
+    invalidarCacheFinanzas();
     return res.json(receta);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -270,6 +273,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     await pool.query(`UPDATE recetas SET activa = FALSE WHERE id = $1`, [req.params.id]);
+    invalidarCacheFinanzas();
     return res.json({ ok: true });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -302,6 +306,7 @@ router.post('/:id/ingredientes', async (req, res) => {
         unidad_medida ?? 'kg',
       ]
     );
+    invalidarCacheFinanzas();
     return res.status(201).json(ing);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -328,6 +333,7 @@ router.put('/:id/ingredientes/:ingId', async (req, res) => {
       ]
     );
     if (!ing) return res.status(404).json({ error: 'Ingrediente no encontrado' });
+    invalidarCacheFinanzas();
     return res.json(ing);
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -341,6 +347,7 @@ router.delete('/:id/ingredientes/:ingId', async (req, res) => {
       `DELETE FROM ingredientes_receta WHERE id = $1 AND receta_id = $2`,
       [req.params.ingId, req.params.id]
     );
+    invalidarCacheFinanzas();
     return res.json({ ok: true });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });

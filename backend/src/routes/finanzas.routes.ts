@@ -32,24 +32,17 @@ router.get('/resumen', async (_req, res) => {
       return cmpMap[productoId] ?? 0;
     }
 
-    // Coste por producto:
-    //   - Fuente única de verdad: productos.precio_unitario (mantenido por el
-    //     trigger fn_actualizar_coste_si_no_manual de migración 026).
-    //     Si el producto tiene receta y modo auto → es el coste recursivo real.
-    //     Si está en modo manual → es el valor que el usuario configuró.
-    //   - El desglose visual (tabla "Rentabilidad por producto" expandible)
-    //     se construye aquí iterando ingredientes con sus CMPs, SOLO para
-    //     mostrar al usuario qué compone el coste. La cifra final NO se
-    //     recalcula — viene de productos.precio_unitario.
+    // Coste por producto — Rentabilidad muestra COSTE ACTUAL REAL:
+    //   precio_unitario almacenado (auto-mantenido por trigger 026 desde
+    //   CMP de lotes existentes). Misma cifra que se ve en pantalla
+    //   Productos. La sección "Variación de margen" usa coste futuro
+    //   proyectado (fn_calcular_coste_receta_futuro de migración 028).
     interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
     interface CosteResult { coste_ud: number; coste_batch: number; rendimiento: number; desglose: DesgloseItem[] }
     const costeCache: Record<string, CosteResult> = {};
 
-    // Pre-load todos los precios autoritativos (precio_unitario)
     const precioMap: Record<string, number> = {};
     for (const r of allCmps) precioMap[r.id] = parseFloat(r.cmp ?? '0');
-    // Sobrescribir con precio_unitario real del producto (que ya incluye
-    // cálculo recursivo via trigger 026 cuando es auto)
     const { rows: prodPrecios } = await pool.query(
       `SELECT id, COALESCE(precio_unitario, 0) AS precio FROM productos WHERE activo = TRUE`
     );
@@ -58,7 +51,7 @@ router.get('/resumen', async (_req, res) => {
     async function calcularCosteProducto(productoId: string): Promise<CosteResult> {
       if (costeCache[productoId]) return costeCache[productoId];
 
-      // 1. Coste autoritativo: productos.precio_unitario (mantenido por trigger BD)
+      // 1. Coste actual real: productos.precio_unitario (mantenido por trigger 026)
       const costeAutoritativo = precioMap[productoId] ?? getCMP(productoId);
 
       // 2. Buscar receta activa para construir el desglose visual (si tiene)
@@ -100,8 +93,7 @@ router.get('/resumen', async (_req, res) => {
       const desglose: DesgloseItem[] = [];
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
-        // Precio del ingrediente: si es producto_fabricado, su precio ya incluye
-        // su propio cálculo recursivo (vía trigger). Si es MP/embalaje, CMP de lotes.
+        // Precio actual del ingrediente: precio_unitario almacenado o CMP
         const precioUd = precioMap[ing.materia_prima_id] ?? getCMP(ing.materia_prima_id);
         const costeLinea = cantReal * precioUd;
         desglose.push({
@@ -113,7 +105,7 @@ router.get('/resumen', async (_req, res) => {
         });
       }
 
-      // coste_batch = coste_ud autoritativo × rendimiento (consistente con BD)
+      // coste_batch = coste_ud actual × rendimiento
       const costeBatch = costeAutoritativo * rendimiento;
       const r: CosteResult = {
         coste_ud: Math.round(costeAutoritativo * 10000) / 10000,
@@ -456,10 +448,11 @@ router.get('/historial-precios', async (req, res) => {
   }
 });
 
-// GET /api/finanzas/impacto-costes — dynamic margin variation: compares historical PVP+cost vs current PVP+cost
+// GET /api/finanzas/impacto-costes — variación margen anterior vs FUTURO proyectado
+// Coste actual = futuro proyectado (fn_028) — refleja lo que costará al recomprar MP a precio ficha.
+// Coste anterior = mismo cálculo pero con precio_anterior de historial_precios para las MP que cambiaron.
 router.get('/impacto-costes', async (_req, res) => {
   try {
-    // 1. Impacto por receta: margen anterior (PVP_ant + coste_ant) vs margen actual (PVP_act + coste_act)
     const { rows: recetas } = await pool.query(`
       SELECT r.id, r.nombre AS receta_nombre, r.rendimiento,
              pt.id AS producto_id, pt.nombre AS producto_nombre, pt.codigo AS producto_codigo,
@@ -471,10 +464,10 @@ router.get('/impacto-costes', async (_req, res) => {
 
     const impactoRecetas = [];
     for (const receta of recetas) {
-      // Get ingredient costs: current price + oldest price from last 90 days (= "anterior")
+      // Ingredientes: precio actual = precio_unitario ficha (futuro); precio anterior = historial
       const { rows: ingredientes } = await pool.query(`
         SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id,
-               mp.nombre AS mp_nombre, mp.precio_unitario AS precio_actual,
+               mp.nombre AS mp_nombre, mp.tipo AS mp_tipo, mp.precio_unitario AS precio_actual,
                (SELECT hp.precio_anterior FROM historial_precios hp
                 WHERE hp.producto_id = ir.materia_prima_id AND hp.tipo = 'compra'
                 AND hp.created_at >= NOW() - INTERVAL '90 days'
@@ -484,7 +477,6 @@ router.get('/impacto-costes', async (_req, res) => {
         WHERE ir.receta_id = $1
       `, [receta.id]);
 
-      // Get historical PVP: the oldest venta price change in last 90 days = PVP before changes
       const { rows: [pvpHist] } = await pool.query(`
         SELECT hp.precio_anterior
         FROM historial_precios hp
@@ -493,17 +485,32 @@ router.get('/impacto-costes', async (_req, res) => {
         ORDER BY hp.created_at ASC LIMIT 1
       `, [receta.producto_id]);
 
-      let costeActual = 0;
-      let costeAnterior = 0;
+      // Coste actual = futuro proyectado por unidad (recursivo, ya divide por rendimiento)
+      const { rows: [costeFutRow] } = await pool.query(
+        `SELECT public.fn_calcular_coste_receta_futuro($1) AS coste`,
+        [receta.producto_id]
+      );
+      const costePorKgActual = parseFloat(costeFutRow?.coste ?? '0');
+
+      // Coste anterior: mismo cálculo recursivo pero sustituyendo precio de las MP que cambiaron
+      // por su precio_anterior. Para fabricados anidados usamos también su futuro (aproximación).
+      let costeAnteriorBatch = 0;
       const detalleMP: { nombre: string; cantidad: number; precio_anterior: number | null; precio_actual: number; diff: number }[] = [];
 
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
-        const pActual = parseFloat(ing.precio_actual);
+        const esIntermedio = ing.mp_tipo === 'producto_fabricado' || ing.mp_tipo === 'producto_envasado';
+        let pActual: number;
+        if (esIntermedio) {
+          const { rows: [r2] } = await pool.query(
+            `SELECT public.fn_calcular_coste_receta_futuro($1) AS c`, [ing.materia_prima_id]
+          );
+          pActual = parseFloat(r2?.c ?? ing.precio_actual ?? '0');
+        } else {
+          pActual = parseFloat(ing.precio_actual);
+        }
         const pAnterior = ing.precio_anterior ? parseFloat(ing.precio_anterior) : pActual;
-
-        costeActual += cantReal * pActual;
-        costeAnterior += cantReal * pAnterior;
+        costeAnteriorBatch += cantReal * pAnterior;
         detalleMP.push({
           nombre: ing.mp_nombre,
           cantidad: cantReal,
@@ -514,8 +521,7 @@ router.get('/impacto-costes', async (_req, res) => {
       }
 
       const rendimiento = parseFloat(receta.rendimiento);
-      const costePorKgActual = rendimiento > 0 ? costeActual / rendimiento : 0;
-      const costePorKgAnterior = rendimiento > 0 ? costeAnterior / rendimiento : 0;
+      const costePorKgAnterior = rendimiento > 0 ? costeAnteriorBatch / rendimiento : 0;
 
       // Dynamic margin: use historical PVP for anterior, current PVP for actual
       const pvpActual = parseFloat(receta.precio_venta ?? '0');

@@ -312,9 +312,10 @@ export default function Finanzas() {
           ╚══════════════════════════════════════════════════════════╝ */}
       <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
         <SectionHeader
-          label="Rentabilidad"
+          label="Rentabilidad · coste actual"
           title="Por producto"
           icon={Layers}
+          hint="Coste real de los lotes en almacén"
           extra={
             <div className="flex items-center gap-3">
               <div className="relative">
@@ -668,7 +669,7 @@ export default function Finanzas() {
           ╚══════════════════════════════════════════════════════════╝ */}
       {impactoRecetas.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
-          <SectionHeader label="Impacto" title="Variación de margen" hint="PVP + coste anterior vs actual" icon={Activity} />
+          <SectionHeader label="Impacto · coste futuro" title="Variación de margen" hint="PVP + coste anterior vs futuro proyectado (precios ficha MP)" icon={Activity} />
 
           <div className="mt-6 border-t border-zinc-200 dark:border-white/10">
             {impactoRecetas.map((r) => {

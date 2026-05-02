@@ -19,6 +19,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
 import { checkStockBajo } from '../lib/stockAlerts';
+import { withAuthToken } from '../lib/uploadsUrl';
 import Paginacion from '../components/Paginacion';
 import SearchSelect from '../components/SearchSelect';
 
@@ -1452,10 +1453,10 @@ export default function OrdenesFabricacion() {
                           {fotos.slice(0, 3).map((url, i) => (
                             <img
                               key={i}
-                              src={url}
+                              src={withAuthToken(url)}
                               alt={`Foto ${i + 1}`}
                               className="h-16 w-16 rounded-lg object-cover border border-gray-200 cursor-pointer hover:scale-105 transition-transform"
-                              onClick={() => window.open(url, '_blank')}
+                              onClick={() => window.open(withAuthToken(url), '_blank')}
                               title="Ver imagen completa"
                             />
                           ))}

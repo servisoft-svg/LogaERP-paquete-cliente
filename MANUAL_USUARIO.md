@@ -685,11 +685,11 @@ Barras que muestran facturacion mensual:
 - **Linea punteada**: media mensual
 - Tooltip al pasar el raton: total, pedidos, % vs media
 
-### Rentabilidad por producto
+### Rentabilidad por producto · coste actual
 
 Tabla con todos los productos vendibles:
 - **Precio venta**: lo que cobras
-- **Precio coste**: calculado recursivamente (materias primas → cola granel → producto envasado)
+- **Precio coste**: coste **real actual** del producto — el mismo valor que aparece en la pantalla **Productos** (calculado desde el CMP de los lotes que tienes en almacén)
 - **Margen %**: (venta - coste) / venta x 100
   - Verde: >40%
   - Naranja: 20-40%
@@ -697,6 +697,8 @@ Tabla con todos los productos vendibles:
 - Pulsar en una fila para ver **desglose de coste** por ingrediente
 
 Se puede filtrar por: Todos / Granel / Envasado
+
+> Esta sección responde a: *"¿Cuánto gano hoy con cada producto, según los costes reales que ya he pagado?"*
 
 ### Valor inventario por tipo (donut)
 
@@ -710,9 +712,19 @@ Distribucion del valor del stock entre:
 
 Los 10 productos con mas valor en stock, usando el CMP (Coste Medio Ponderado) real de los lotes.
 
-### Impacto de precios
+### Impacto de precios · coste futuro
 
-Muestra como las subidas/bajadas de precio de materias primas afectan al margen de cada receta. Expandir para ver detalle por ingrediente.
+Muestra cómo las subidas/bajadas de precio de materias primas afectarán al margen de cada receta. Expandir para ver detalle por ingrediente.
+
+A diferencia de la tabla de Rentabilidad (que usa el coste **actual** de los lotes en almacén), esta sección usa el coste **futuro proyectado**: lo que costará producir cuando los lotes actuales se agoten y haya que recomprar las materias primas a los precios ficha vigentes (los que aparecen en la pantalla de cada producto/MP).
+
+- **Coste anterior**: con los precios anteriores de las MP (historial últimos 90 días)
+- **Coste actual**: futuro proyectado con precios ficha de hoy
+- **Δ Margen**: variación en puntos porcentuales
+
+> Ejemplo: si una MP subió de 2 €/kg a 3 €/kg pero todavía tienes lotes viejos comprados a 2 €/kg en almacén, la **Rentabilidad** seguirá mostrando el coste bajo (real), mientras que **Impacto** ya muestra el coste alto (futuro) — para que veas el aviso antes de quedarte sin stock barato.
+
+> Esta sección responde a: *"¿Cuánto voy a ganar cuando se acaben los lotes baratos y tenga que comprar al precio actual?"*
 
 ### Exportar datos
 
@@ -1037,6 +1049,8 @@ Al fabricar un lote o anadir stock, el icono de **escaner** abre la camara del m
 |---------|------------|
 | **FEFO** | First Expiry, First Out — primero que caduca, primero que se usa (variante de FIFO optimizada para productos con caducidad) |
 | **CMP** | Coste Medio Ponderado — media ponderada del precio de compra de todos los lotes en stock |
+| **Coste actual** | Coste real basado en el CMP de los lotes que tienes ahora en almacén. Lo que se ve en pantalla **Productos** y en la tabla **Rentabilidad** de Finanzas |
+| **Coste futuro** | Coste proyectado usando el precio ficha de las materias primas (lo que costará la próxima compra). Se usa en **Impacto · Variación de margen** de Finanzas |
 | **Merma** | Diferencia entre cantidad planificada y real producida (perdida en el proceso) |
 | **Granel** | Cola sin envasar, directamente del reactor |
 | **Trazabilidad** | Rastreo completo de un lote: de que materias primas viene, en que pedido acabo |

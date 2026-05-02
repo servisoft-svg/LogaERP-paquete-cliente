@@ -16,6 +16,7 @@ import SearchSelect from './SearchSelect';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from './ToastFields';
 import { checkStockBajo } from '../lib/stockAlerts';
+import { withAuthToken } from '../lib/uploadsUrl';
 
 interface Props {
   orden: OrdenProduccion | null;
@@ -478,7 +479,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                         {ing.nombre_mp}
                                       </p>
                                       {ing.sds_url && (
-                                        <a href={`${ing.sds_url}?token=${localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token')}`}
+                                        <a href={withAuthToken(ing.sds_url)}
                                           target="_blank" rel="noopener noreferrer"
                                           className="shrink-0 rounded p-1 text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Ficha de seguridad (SDS)">
                                           <FileText size={14} />
@@ -641,7 +642,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                 {ing.nombre_mp}
                               </p>
                               {ing.sds_url && (
-                                <a href={`${ing.sds_url}?token=${localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token')}`}
+                                <a href={withAuthToken(ing.sds_url)}
                                   target="_blank" rel="noopener noreferrer"
                                   className="shrink-0 rounded p-0.5 text-red-400 hover:text-red-600 hover:bg-red-50" title="Ficha SDS">
                                   <FileText size={12} />
