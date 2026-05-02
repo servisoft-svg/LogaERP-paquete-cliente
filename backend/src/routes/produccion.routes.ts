@@ -112,10 +112,10 @@ router.post('/envasado-rapido', async (req, res) => {
     }
 
     // Lock cola + envase en una sola query (orden determinístico evita deadlocks)
-    interface ProdLock { id: string; nombre: string; codigo: string; stock_actual: string; coste_medio_actual: string | null; precio_unitario: string | null }
+    interface ProdLock { id: string; nombre: string; codigo: string; stock_actual: string; coste_medio_actual: string | null; precio_unitario: string | null; unidades_por_envase: number | null }
     const lockIds = envase_id ? [cola_id, envase_id] : [cola_id];
     const { rows: lockedRows } = await client.query<ProdLock>(
-      `SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario
+      `SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario, unidades_por_envase
        FROM productos WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`,
       [lockIds]
     );
@@ -131,11 +131,19 @@ router.post('/envasado-rapido', async (req, res) => {
       return res.status(404).json({ error: 'Envase no encontrado.' });
     }
 
-    // ── Box/Pallet multiplier: detect "Caja 18" or "Palé 60" in envase name ──
+    // ── Multiplicador caja/palé (Fix C-1) ──
+    // Fuente primaria: campo explícito productos.unidades_por_envase.
+    // Fallback (compatibilidad): regex sobre nombre solo si la columna es NULL.
+    // El backfill de migración 023 ya rellenó los envases existentes con
+    // patrón válido; los nuevos deben setear el campo en la UI.
     let multiplicador = 1;
     if (envase) {
-      const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
-      if (multMatch) multiplicador = parseInt(multMatch[1], 10);
+      if (envase.unidades_por_envase && envase.unidades_por_envase > 1) {
+        multiplicador = envase.unidades_por_envase;
+      } else {
+        const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
+        if (multMatch) multiplicador = parseInt(multMatch[1], 10);
+      }
     }
     const totalUnidades = cantidad_unidades * multiplicador; // actual units to produce
     const cantidadEnvases = cantidad_unidades; // boxes/pallets consumed
@@ -389,7 +397,7 @@ router.post('/envasado-planificar', async (req, res) => {
 // Helper: calculate envasado consumption from an order
 async function calcularConsumoEnvasado(orden: any) {
   const { rows: [cola] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [orden.cola_id]);
-  const { rows: [envase] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [orden.envase_id]);
+  const { rows: [envase] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario, unidades_por_envase FROM productos WHERE id = $1`, [orden.envase_id]);
   if (!cola || !envase) throw new Error('Producto no encontrado.');
 
   // Get peso from producto_final (not envase!)
@@ -407,10 +415,14 @@ async function calcularConsumoEnvasado(orden: any) {
 
   const cantidadInput = parseFloat(orden.cantidad_planificada);
 
-  // Detect multiplier from envase name: "Caja 18", "Palé 60", etc.
+  // Multiplicador caja/palé (Fix C-1): campo explícito → fallback regex.
   let multiplicador = 1;
-  const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
-  if (multMatch) multiplicador = parseInt(multMatch[1], 10);
+  if (envase.unidades_por_envase && envase.unidades_por_envase > 1) {
+    multiplicador = envase.unidades_por_envase;
+  } else {
+    const multMatch = envase.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
+    if (multMatch) multiplicador = parseInt(multMatch[1], 10);
+  }
 
   const totalUnidades = cantidadInput * multiplicador;
   const pesoColaNecesario = totalUnidades * pesoUnitario;
