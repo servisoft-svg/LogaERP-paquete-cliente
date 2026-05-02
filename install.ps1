@@ -26,6 +26,19 @@ function Refresh-Path {
                 [System.Environment]::GetEnvironmentVariable("Path","User")
 }
 
+# Descarga rapida con WebClient (mucho mas rapido que Invoke-WebRequest para >100MB)
+function Download-File($url, $dest) {
+    $wc = New-Object System.Net.WebClient
+    try {
+        $wc.DownloadFile($url, $dest)
+    } finally {
+        $wc.Dispose()
+    }
+    if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {
+        throw "Descarga fallida: $url"
+    }
+}
+
 # Localizar PSScriptRoot de forma fiable
 if ($PSCommandPath) {
     $ProjectDir = Split-Path -Parent $PSCommandPath
@@ -77,8 +90,8 @@ if (-not $nodeVer -or [int](($nodeVer -replace 'v','').Split('.')[0]) -lt 20) {
     Write-Step "Descargando Node.js 20 LTS (~30MB)..."
     $nodeUrl = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi"
     $nodeMsi = "$env:TEMP\node-v20-x64.msi"
-    Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeMsi -UseBasicParsing
-    Write-Ok "Descarga completa"
+    Download-File $nodeUrl $nodeMsi
+    Write-Ok "Descarga completa ($([math]::Round((Get-Item $nodeMsi).Length/1MB)) MB)"
     Write-Step "Instalando Node.js (silencioso, ~1 min)..."
     $proc = Start-Process msiexec.exe -ArgumentList "/i `"$nodeMsi`" /qn /norestart" -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
@@ -106,21 +119,21 @@ foreach ($v in 17,16,15,14) {
 }
 
 if (-not $pgPath) {
-    Write-Step "Descargando PostgreSQL $PgVersion (~300MB, paciencia)..."
-    # URL oficial EnterpriseDB - instalador unattended-friendly
+    Write-Step "Descargando PostgreSQL $PgVersion (~325MB, puede tardar 1-3 min)..."
     $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.6-1-windows-x64.exe"
     $pgExe = "$env:TEMP\postgresql-installer.exe"
-    Invoke-WebRequest -Uri $pgUrl -OutFile $pgExe -UseBasicParsing
+    Download-File $pgUrl $pgExe
     Write-Ok "Descarga completa ($([math]::Round((Get-Item $pgExe).Length/1MB)) MB)"
 
     Write-Step "Instalando PostgreSQL en modo unattended (3-7 min, sin prompts)..."
+    # NetworkService no necesita password (cuenta del sistema). Usar
+    # --servicepassword con NetworkService confunde al instalador.
     $pgInstallArgs = @(
         "--mode","unattended",
         "--unattendedmodeui","none",
         "--superpassword","$PgPass",
         "--servicename","postgresql-x64-$PgVersion",
         "--serviceaccount","NetworkService",
-        "--servicepassword","$PgPass",
         "--serverport",$PgPort,
         "--disable-components","stackbuilder,pgAdmin"
     )
@@ -144,7 +157,8 @@ if (-not $pgPath) {
         $PgPass = (Get-Content "$ProjectDir\.postgres_password.txt").Trim()
         Write-Ok "Password leido de .postgres_password.txt"
     } else {
-        Write-Warn "PG pre-existente, probaremos varios passwords automaticamente."
+        Write-Warn "PG pre-existente sin .postgres_password.txt — probare passwords comunes automaticamente."
+        # NO guardar todavia; lo haremos cuando uno funcione
     }
 }
 
@@ -162,15 +176,16 @@ function Test-PgConnection($pass) {
     return ($LASTEXITCODE -eq 0)
 }
 
-# Esperar al servicio
+# Esperar al servicio (recien instalado tarda en arrancar)
 $svc = Get-Service "postgresql-x64-$PgVersion" -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne "Running") {
+    Write-Host "  Iniciando servicio postgresql-x64-$PgVersion..." -ForegroundColor DarkGray
     Start-Service "postgresql-x64-$PgVersion"
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 8
 }
 
 $ok = $false
-for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
+for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
     if (Test-PgConnection $PgPass) { $ok = $true; break }
     Start-Sleep -Seconds 2
 }
@@ -267,33 +282,31 @@ if (-not (Test-Path $feEnv)) {
 # =============================================================
 Refresh-Path
 
-Write-Step "Instalando dependencias backend (puede tardar)..."
-Push-Location "$ProjectDir\backend"
-& npm install --no-audit --no-fund --loglevel=error 2>&1 | Where-Object { $_ -match "error|warn" } | Select-Object -First 5
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "npm install backend fallo" }
-Pop-Location
-Write-Ok "Backend deps OK"
+function Run-Npm($workdir, $cmd, $label) {
+    Write-Step "$label..."
+    Push-Location $workdir
+    try {
+        # Redirigir a archivo log para no saturar la consola pero capturar errores
+        $logFile = "$ProjectDir\logs\npm-$($label -replace '\s','_').log"
+        & npm @cmd 2>&1 | Tee-Object -FilePath $logFile | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Tail del log:" -ForegroundColor Red
+            Get-Content $logFile -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+            throw "$label fallo (exit=$LASTEXITCODE). Log: $logFile"
+        }
+    } finally {
+        Pop-Location
+    }
+    Write-Ok "$label OK"
+}
 
-Write-Step "Instalando dependencias frontend (puede tardar)..."
-Push-Location "$ProjectDir\frontend"
-& npm install --no-audit --no-fund --loglevel=error 2>&1 | Where-Object { $_ -match "error|warn" } | Select-Object -First 5
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "npm install frontend fallo" }
-Pop-Location
-Write-Ok "Frontend deps OK"
+# Crear logs antes de los npm install que escriben ahi
+New-Item -ItemType Directory -Force -Path "$ProjectDir\logs" | Out-Null
 
-Write-Step "Compilando backend..."
-Push-Location "$ProjectDir\backend"
-& npm run build
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Build backend fallo" }
-Pop-Location
-Write-Ok "Backend compilado"
-
-Write-Step "Compilando frontend..."
-Push-Location "$ProjectDir\frontend"
-& npm run build
-if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Build frontend fallo" }
-Pop-Location
-Write-Ok "Frontend compilado"
+Run-Npm "$ProjectDir\backend"  @("install","--no-audit","--no-fund","--loglevel=error") "Backend npm install"
+Run-Npm "$ProjectDir\frontend" @("install","--no-audit","--no-fund","--loglevel=error") "Frontend npm install"
+Run-Npm "$ProjectDir\backend"  @("run","build") "Backend build"
+Run-Npm "$ProjectDir\frontend" @("run","build") "Frontend build"
 
 # Carpetas runtime
 New-Item -ItemType Directory -Force -Path "$ProjectDir\backend\uploads" | Out-Null

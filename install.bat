@@ -22,7 +22,8 @@ net session >nul 2>&1
 if %errorlevel% NEQ 0 (
     echo No estas como administrador. Pidiendo elevacion...
     echo Acepta el aviso UAC ^(Si^).
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    REM Doble comillas + escape para rutas con espacios
+    powershell -NoProfile -Command "Start-Process -FilePath \"%~f0\" -Verb RunAs"
     exit /b 0
 )
 
