@@ -3,7 +3,15 @@
 # =============================================================
 # 100% automatico, sin prompts. Usa password fijo conocido para
 # que la instalacion sea reproducible en cualquier maquina.
+#
+# Parametros:
+#   -Fresh    Borra y recrea la base de datos desde cero (perdida
+#             total de datos). Util para empezar limpio.
 # =============================================================
+
+param(
+    [switch]$Fresh
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # winget va mas rapido sin progress bar
@@ -37,6 +45,60 @@ function Download-File($url, $dest) {
     if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {
         throw "Descarga fallida: $url"
     }
+}
+
+# Reset password de postgres editando pg_hba.conf temporalmente a 'trust'.
+# Necesario cuando hay PostgreSQL pre-instalado con password desconocido.
+function Reset-PostgresPassword($pgVersion, $newPass, $serviceName) {
+    $dataDir = "C:\Program Files\PostgreSQL\$pgVersion\data"
+    $pgHba = "$dataDir\pg_hba.conf"
+    $psqlExe = "C:\Program Files\PostgreSQL\$pgVersion\bin\psql.exe"
+
+    if (-not (Test-Path $pgHba)) {
+        throw "pg_hba.conf no encontrado en $pgHba"
+    }
+
+    Write-Step "Reseteando password de postgres via pg_hba.conf (trust temporal)..."
+
+    # 1. Backup
+    Copy-Item $pgHba "$pgHba.backup" -Force
+
+    # 2. Reescribir TODAS las lineas host/local con metodo trust
+    $original = Get-Content $pgHba
+    $modified = $original | ForEach-Object {
+        if ($_ -match '^\s*#' -or $_ -match '^\s*$') {
+            $_  # comentarios y blancos sin tocar
+        } elseif ($_ -match '^\s*(host|hostssl|hostnossl|local)\s+') {
+            # Cambiar el ultimo campo (metodo) por trust
+            $parts = $_ -split '\s+'
+            $parts[-1] = 'trust'
+            ($parts -join ' ')
+        } else {
+            $_
+        }
+    }
+    $modified | Set-Content $pgHba -Encoding ASCII
+
+    # 3. Reload del servicio (reload basta, no hace falta restart)
+    Restart-Service $serviceName -Force
+    Start-Sleep -Seconds 6
+
+    # 4. Cambiar password con trust
+    $env:PGPASSWORD = ""
+    & $psqlExe -U postgres -d postgres -c "ALTER USER postgres WITH PASSWORD '$newPass';" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Copy-Item "$pgHba.backup" $pgHba -Force
+        Restart-Service $serviceName -Force
+        throw "ALTER USER fallo. pg_hba restaurado."
+    }
+
+    # 5. Restaurar pg_hba con autenticacion normal
+    Copy-Item "$pgHba.backup" $pgHba -Force
+    Remove-Item "$pgHba.backup" -Force
+    Restart-Service $serviceName -Force
+    Start-Sleep -Seconds 6
+
+    Write-Ok "Password de postgres reseteado a '$newPass'"
 }
 
 # Localizar PSScriptRoot de forma fiable
@@ -193,7 +255,7 @@ for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
 if (-not $ok) {
     # Probar passwords comunes por si PG estaba pre-instalado
     Write-Warn "Password '$PgPass' no funciono. Probando alternativas..."
-    foreach ($try in @("postgres","postgres123","admin","loga123","Admin123")) {
+    foreach ($try in @("postgres","postgres123","admin","loga123","Admin123","admin123")) {
         if (Test-PgConnection $try) {
             $PgPass = $try
             $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
@@ -204,8 +266,24 @@ if (-not $ok) {
     }
 }
 
+# Si NADA funciona, reset automatico via pg_hba.conf trust
 if (-not $ok) {
-    throw "No se conecta a PostgreSQL. Verifica el servicio: Get-Service postgresql-x64-$PgVersion. Si el password es distinto, escribelo en .postgres_password.txt y relanza."
+    Write-Warn "Ningun password comun funciona. Reseteo automatico..."
+    try {
+        Reset-PostgresPassword $PgVersion $PgPass "postgresql-x64-$PgVersion"
+        # Reintentar conexion
+        if (Test-PgConnection $PgPass) {
+            $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
+            $ok = $true
+            Write-Ok "Reset exitoso. Password ahora: $PgPass"
+        }
+    } catch {
+        throw "Reset automatico fallido: $($_.Exception.Message)"
+    }
+}
+
+if (-not $ok) {
+    throw "No se conecta a PostgreSQL despues del reset. Verifica el servicio: Get-Service postgresql-x64-$PgVersion"
 }
 Write-Ok "PostgreSQL responde"
 
@@ -227,7 +305,18 @@ if ($userExists -and $userExists.Trim() -eq "1") {
 # =============================================================
 $dbExists = & $psql -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'" 2>$null
 if ($dbExists -and $dbExists.Trim() -eq "1") {
-    Write-Ok "Base de datos '$DbName' ya existe"
+    if ($Fresh) {
+        Write-Step "Modo -Fresh: borrando base de datos '$DbName' existente..."
+        # Cerrar conexiones activas antes de DROP
+        & $psql -U $PgUser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DbName' AND pid<>pg_backend_pid();" 2>$null | Out-Null
+        & $psql -U $PgUser -d postgres -c "DROP DATABASE IF EXISTS $DbName;" 2>$null | Out-Null
+        Write-Ok "Base de datos anterior eliminada"
+        Write-Step "Creando base de datos '$DbName' limpia..."
+        & $createdb -U $PgUser -O $AppUser $DbName
+        Write-Ok "Base de datos creada"
+    } else {
+        Write-Ok "Base de datos '$DbName' ya existe (usa -Fresh para recrear desde 0)"
+    }
 } else {
     Write-Step "Creando base de datos '$DbName'..."
     & $createdb -U $PgUser -O $AppUser $DbName
