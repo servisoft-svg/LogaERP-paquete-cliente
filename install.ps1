@@ -116,13 +116,21 @@ try {
 # =============================================================
 # CONSTANTES
 # =============================================================
-$DbName  = "loga_erp"
-$AppUser = "loga"          # usuario de aplicacion (igual que macOS)
-$AppPass = "loga123"
-$PgUser  = "postgres"      # superuser PostgreSQL
-$PgPass  = "Loga_postgres_2024!"   # password fijo - instalado por este script
+# Instancia PostgreSQL DEDICADA a Loga (no toca ninguna existente):
+#   - Servicio Windows:  postgresql-loga
+#   - Puerto:            5433  (5432 es el estandar, lo dejamos libre)
+#   - Carpeta:           C:\LogaERP\postgresql
+#   - Password postgres: Loga_postgres_2024! (fijo, conocido)
+$DbName    = "loga_erp"
+$AppUser   = "loga"
+$AppPass   = "loga123"
+$PgUser    = "postgres"
+$PgPass    = "Loga_postgres_2024!"
 $PgVersion = "16"
-$PgPort  = "5432"
+$PgPort    = "5433"
+$PgServiceName = "postgresql-loga"
+$PgInstallDir  = "C:\LogaERP\postgresql"
+$PgDataDir     = "C:\LogaERP\pgdata"
 
 Write-Host ""
 Write-Host "==========================================================="
@@ -172,60 +180,70 @@ if (-not $nodeVer -or [int](($nodeVer -replace 'v','').Split('.')[0]) -lt 20) {
 }
 
 # =============================================================
-# 2. PostgreSQL 16 - descarga directa EDB, install unattended
+# 2. PostgreSQL DEDICADO para Loga (instancia aislada)
 # =============================================================
-$pgPath = $null
-foreach ($v in 17,16,15,14) {
-    $candidate = "C:\Program Files\PostgreSQL\$v\bin"
-    if (Test-Path "$candidate\psql.exe") { $pgPath = $candidate; break }
-}
+# Instalamos en C:\LogaERP\postgresql con servicio propio "postgresql-loga"
+# y puerto 5433. NO interferimos con ningun PostgreSQL existente que
+# pudiera haber en C:\Program Files\PostgreSQL\.
+$pgPath = "$PgInstallDir\bin"
+$psql = "$pgPath\psql.exe"
+$createdb = "$pgPath\createdb.exe"
 
-if (-not $pgPath) {
-    Write-Step "Descargando PostgreSQL $PgVersion (~325MB, puede tardar 1-3 min)..."
+$pgInstalled = (Test-Path $psql) -and (Get-Service $PgServiceName -ErrorAction SilentlyContinue)
+
+if (-not $pgInstalled) {
+    Write-Step "Descargando PostgreSQL $PgVersion (~325MB, paciencia 1-3 min)..."
     $pgUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.6-1-windows-x64.exe"
     $pgExe = "$env:TEMP\postgresql-installer.exe"
     Download-File $pgUrl $pgExe
     Write-Ok "Descarga completa ($([math]::Round((Get-Item $pgExe).Length/1MB)) MB)"
 
-    Write-Step "Instalando PostgreSQL en modo unattended (3-7 min, sin prompts)..."
-    # NetworkService no necesita password (cuenta del sistema). Usar
-    # --servicepassword con NetworkService confunde al instalador.
+    # Limpiar instalacion incompleta previa si la hay
+    if (Test-Path $PgInstallDir) {
+        Write-Warn "Limpiando $PgInstallDir previo..."
+        Stop-Service $PgServiceName -Force -ErrorAction SilentlyContinue
+        Remove-Item $PgInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $PgDataDir) {
+        Remove-Item $PgDataDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Force -Path "C:\LogaERP" | Out-Null
+
+    Write-Step "Instalando PostgreSQL DEDICADO (puerto $PgPort, servicio $PgServiceName)..."
+    Write-Host "  Carpeta:  $PgInstallDir" -ForegroundColor DarkGray
+    Write-Host "  Datos:    $PgDataDir" -ForegroundColor DarkGray
+    Write-Host "  No toca ningun PostgreSQL existente" -ForegroundColor DarkGray
+
     $pgInstallArgs = @(
         "--mode","unattended",
         "--unattendedmodeui","none",
-        "--superpassword","$PgPass",
-        "--servicename","postgresql-x64-$PgVersion",
+        "--prefix",$PgInstallDir,
+        "--datadir",$PgDataDir,
+        "--superpassword",$PgPass,
+        "--servicename",$PgServiceName,
         "--serviceaccount","NetworkService",
         "--serverport",$PgPort,
-        "--disable-components","stackbuilder,pgAdmin"
+        "--disable-components","stackbuilder,pgAdmin",
+        "--enable-components","server,commandlinetools"
     )
     $proc = Start-Process $pgExe -ArgumentList $pgInstallArgs -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
-        throw "Instalacion PostgreSQL fallida (exit=$($proc.ExitCode)). Log: $env:TEMP\install-postgresql.log"
+        $logFile = "$env:TEMP\install-postgresql.log"
+        $tail = if (Test-Path $logFile) { Get-Content $logFile -Tail 30 -ErrorAction SilentlyContinue } else { "(sin log)" }
+        throw "Instalacion PostgreSQL fallida (exit=$($proc.ExitCode)). Tail del log:`n$($tail -join "`n")"
     }
     Remove-Item $pgExe -ErrorAction SilentlyContinue
 
-    $pgPath = "C:\Program Files\PostgreSQL\$PgVersion\bin"
-    if (-not (Test-Path "$pgPath\psql.exe")) {
-        throw "PostgreSQL instalado pero psql.exe no encontrado en $pgPath"
+    if (-not (Test-Path $psql)) {
+        throw "PostgreSQL instalado pero psql.exe no esta en $psql"
     }
-    Write-Ok "PostgreSQL instalado en $pgPath"
-
-    $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
+    Write-Ok "PostgreSQL DEDICADO instalado en $PgInstallDir"
 } else {
-    Write-Ok "PostgreSQL ya instalado en $pgPath"
-
-    if (Test-Path "$ProjectDir\.postgres_password.txt") {
-        $PgPass = (Get-Content "$ProjectDir\.postgres_password.txt").Trim()
-        Write-Ok "Password leido de .postgres_password.txt"
-    } else {
-        Write-Warn "PG pre-existente sin .postgres_password.txt — probare passwords comunes automaticamente."
-        # NO guardar todavia; lo haremos cuando uno funcione
-    }
+    Write-Ok "PostgreSQL DEDICADO ya instalado en $PgInstallDir (servicio $PgServiceName)"
 }
 
-$psql = Join-Path $pgPath "psql.exe"
-$createdb = Join-Path $pgPath "createdb.exe"
+# Guardar password
+$PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
 
 # =============================================================
 # 3. Conexion como postgres - intentar varios passwords si hace falta
@@ -234,18 +252,22 @@ Write-Step "Verificando conexion a PostgreSQL..."
 
 function Test-PgConnection($pass) {
     $env:PGPASSWORD = $pass
-    & $psql -U $PgUser -d postgres -c "\q" 2>$null
+    & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "\q" 2>$null
     return ($LASTEXITCODE -eq 0)
 }
 
-# Esperar al servicio (recien instalado tarda en arrancar)
-$svc = Get-Service "postgresql-x64-$PgVersion" -ErrorAction SilentlyContinue
-if ($svc -and $svc.Status -ne "Running") {
-    Write-Host "  Iniciando servicio postgresql-x64-$PgVersion..." -ForegroundColor DarkGray
-    Start-Service "postgresql-x64-$PgVersion"
+# Asegurar que el servicio esta corriendo
+$svc = Get-Service $PgServiceName -ErrorAction SilentlyContinue
+if (-not $svc) {
+    throw "Servicio $PgServiceName no existe. Reinstala con install-fresh.bat"
+}
+if ($svc.Status -ne "Running") {
+    Write-Host "  Iniciando servicio $PgServiceName..." -ForegroundColor DarkGray
+    Start-Service $PgServiceName
     Start-Sleep -Seconds 8
 }
 
+# Esperar conexion - hasta 60 reintentos de 2s = 120s
 $ok = $false
 for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
     if (Test-PgConnection $PgPass) { $ok = $true; break }
@@ -253,73 +275,42 @@ for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
 }
 
 if (-not $ok) {
-    # Probar passwords comunes por si PG estaba pre-instalado
-    Write-Warn "Password '$PgPass' no funciono. Probando alternativas..."
-    foreach ($try in @("postgres","postgres123","admin","loga123","Admin123","admin123")) {
-        if (Test-PgConnection $try) {
-            $PgPass = $try
-            $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
-            $ok = $true
-            Write-Ok "Conectado con password '$try' (guardado)"
-            break
-        }
-    }
+    throw "PostgreSQL DEDICADO no responde en puerto $PgPort. Verifica: Get-Service $PgServiceName"
 }
-
-# Si NADA funciona, reset automatico via pg_hba.conf trust
-if (-not $ok) {
-    Write-Warn "Ningun password comun funciona. Reseteo automatico..."
-    try {
-        Reset-PostgresPassword $PgVersion $PgPass "postgresql-x64-$PgVersion"
-        # Reintentar conexion
-        if (Test-PgConnection $PgPass) {
-            $PgPass | Out-File -Encoding ASCII "$ProjectDir\.postgres_password.txt"
-            $ok = $true
-            Write-Ok "Reset exitoso. Password ahora: $PgPass"
-        }
-    } catch {
-        throw "Reset automatico fallido: $($_.Exception.Message)"
-    }
-}
-
-if (-not $ok) {
-    throw "No se conecta a PostgreSQL despues del reset. Verifica el servicio: Get-Service postgresql-x64-$PgVersion"
-}
-Write-Ok "PostgreSQL responde"
+Write-Ok "PostgreSQL responde en puerto $PgPort"
 
 # =============================================================
 # 4. Crear usuario loga
 # =============================================================
 $env:PGPASSWORD = $PgPass
-$userExists = & $psql -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$AppUser'" 2>$null
+$userExists = & $psql -h localhost -p $PgPort -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$AppUser'" 2>$null
 if ($userExists -and $userExists.Trim() -eq "1") {
     Write-Ok "Usuario '$AppUser' ya existe"
 } else {
     Write-Step "Creando usuario '$AppUser'..."
-    & $psql -U $PgUser -d postgres -c "CREATE USER $AppUser WITH PASSWORD '$AppPass' CREATEDB SUPERUSER;" | Out-Null
+    & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "CREATE USER $AppUser WITH PASSWORD '$AppPass' CREATEDB SUPERUSER;" | Out-Null
     Write-Ok "Usuario '$AppUser' creado (con CREATEDB y SUPERUSER)"
 }
 
 # =============================================================
 # 5. Crear base de datos
 # =============================================================
-$dbExists = & $psql -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'" 2>$null
+$dbExists = & $psql -h localhost -p $PgPort -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DbName'" 2>$null
 if ($dbExists -and $dbExists.Trim() -eq "1") {
     if ($Fresh) {
         Write-Step "Modo -Fresh: borrando base de datos '$DbName' existente..."
-        # Cerrar conexiones activas antes de DROP
-        & $psql -U $PgUser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DbName' AND pid<>pg_backend_pid();" 2>$null | Out-Null
-        & $psql -U $PgUser -d postgres -c "DROP DATABASE IF EXISTS $DbName;" 2>$null | Out-Null
+        & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DbName' AND pid<>pg_backend_pid();" 2>$null | Out-Null
+        & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "DROP DATABASE IF EXISTS $DbName;" 2>$null | Out-Null
         Write-Ok "Base de datos anterior eliminada"
         Write-Step "Creando base de datos '$DbName' limpia..."
-        & $createdb -U $PgUser -O $AppUser $DbName
+        & $createdb -h localhost -p $PgPort -U $PgUser -O $AppUser $DbName
         Write-Ok "Base de datos creada"
     } else {
         Write-Ok "Base de datos '$DbName' ya existe (usa -Fresh para recrear desde 0)"
     }
 } else {
     Write-Step "Creando base de datos '$DbName'..."
-    & $createdb -U $PgUser -O $AppUser $DbName
+    & $createdb -h localhost -p $PgPort -U $PgUser -O $AppUser $DbName
     Write-Ok "Base de datos creada"
 }
 
@@ -330,7 +321,7 @@ Write-Step "Aplicando migraciones SQL..."
 $env:PGPASSWORD = $AppPass
 $applied = 0
 Get-ChildItem "$ProjectDir\backend\database\migrations\*.sql" | Sort-Object Name | ForEach-Object {
-    & $psql -U $AppUser -d $DbName -f $_.FullName 2>&1 | Out-Null
+    & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -f $_.FullName 2>&1 | Out-Null
     $applied++
 }
 Write-Ok "Procesadas $applied migraciones"
@@ -346,7 +337,8 @@ if (-not (Test-Path $envFile)) {
     $whk = -join ((1..48) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
     @"
 # Generado por install.ps1 - $(Get-Date)
-DATABASE_URL=postgresql://${AppUser}:${AppPass}@localhost:5432/$DbName
+# PostgreSQL DEDICADO en puerto $PgPort (servicio $PgServiceName)
+DATABASE_URL=postgresql://${AppUser}:${AppPass}@localhost:${PgPort}/$DbName
 JWT_SECRET=$jwt
 BACKUP_PASSWORD=$bkp
 WEBHOOK_TOKEN=$whk
@@ -355,9 +347,9 @@ PORT=3001
 NODE_ENV=production
 LOG_LEVEL=info
 "@ | Out-File -Encoding ASCII $envFile
-    Write-Ok "backend\.env creado"
+    Write-Ok "backend\.env creado (DATABASE_URL apunta a localhost:$PgPort)"
 } else {
-    Write-Ok "backend\.env ya existe"
+    Write-Warn "backend\.env ya existe — verifica que DATABASE_URL apunte a localhost:$PgPort"
 }
 
 $feEnv = "$ProjectDir\frontend\.env"
@@ -470,6 +462,10 @@ Write-Host "  Login admin (cambiar tras primer acceso):"
 Write-Host "    Email:    admin@loga.es"
 Write-Host "    Password: admin123"
 Write-Host ""
+Write-Host "  PostgreSQL DEDICADO (instancia aislada de Loga):"
+Write-Host "    Servicio:  $PgServiceName"
+Write-Host "    Puerto:    $PgPort  (5432 sigue libre para otras BDs)"
+Write-Host "    Carpeta:   $PgInstallDir"
 Write-Host "  Passwords (guardados en .postgres_password.txt):"
 Write-Host "    postgres (superuser): $PgPass"
 Write-Host "    loga (app):           $AppPass"
