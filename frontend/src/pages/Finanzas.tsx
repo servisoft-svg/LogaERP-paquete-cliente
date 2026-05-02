@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download, ArrowUpRight, ArrowDownRight, Search, ChevronDown,
-  AlertTriangle, Plus, Minus,
+  AlertTriangle, Plus, Minus, Activity, TrendingUp,
+  Factory, Warehouse, Package, Layers, Beaker, Zap,
+  type LucideIcon,
 } from 'lucide-react';
 import { finanzasApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
@@ -48,16 +50,10 @@ interface ImpactoReceta {
 }
 interface MPPrecio { codigo: string; nombre: string; unidad_medida: string; precio_actual: string; precio_anterior: string | null; variacion_pct: string }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── Helpers — SIN ABREVIATURAS K/M ──────────────────────────────────
 const fmt = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtInt = (n: number) => n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
-const fmtCompact = (n: number) => {
-  if (n >= 1_000_000) return (n / 1_000_000).toLocaleString('es-ES', { maximumFractionDigits: 2 }) + 'M';
-  if (n >= 1_000) return (n / 1_000).toLocaleString('es-ES', { maximumFractionDigits: 1 }) + 'K';
-  return n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
-};
 
-// Animations: ease lineal, sin spring/bounce
 const FADE = {
   initial: { opacity: 0, y: 6 },
   animate: { opacity: 1, y: 0 },
@@ -137,7 +133,7 @@ export default function Finanzas() {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center space-y-2">
-          <AlertTriangle size={24} className="mx-auto text-zinc-400" strokeWidth={1.5} />
+          <AlertTriangle size={24} className="mx-auto text-loga-red" strokeWidth={1.5} />
           <p className="text-zinc-500 text-xs">Acceso restringido a administradores</p>
         </div>
       </div>
@@ -168,14 +164,20 @@ export default function Finanzas() {
     <div className="animate-fade-in -mx-4 sm:-mx-6 -mt-4 sm:-mt-6">
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  TOP BAR — ultra fina con título + acciones              ║
+          ║  TOP BAR — con presencia de rojo                         ║
           ╚══════════════════════════════════════════════════════════╝ */}
-      <div className="border-b border-zinc-200 dark:border-white/10 px-6 sm:px-10 h-14 flex items-center justify-between gap-4">
+      <div className="border-b border-zinc-200 dark:border-white/10 bg-white dark:bg-zinc-900 px-6 sm:px-10 h-14 flex items-center justify-between gap-4 sticky top-0 z-30 backdrop-blur-md bg-white/95 dark:bg-zinc-900/95">
         <div className="flex items-center gap-3">
-          <div className="w-1.5 h-1.5 rounded-full bg-loga-red" />
+          <div className="rounded-md bg-loga-red p-1.5">
+            <Activity size={11} className="text-white" strokeWidth={2.5} />
+          </div>
           <h1 className="text-[13px] font-semibold text-zinc-900 dark:text-white tracking-tight">Finanzas</h1>
-          <span className="text-[11px] text-zinc-400">/</span>
+          <span className="text-[11px] text-zinc-300 dark:text-zinc-700">/</span>
           <span className="text-[11px] text-zinc-500">Resumen</span>
+          <span className="ml-2 inline-flex items-center gap-1.5 rounded-full bg-loga-red/10 px-2 py-0.5 text-[10px] font-semibold text-loga-red">
+            <span className="w-1 h-1 rounded-full bg-loga-red animate-pulse" />
+            Live
+          </span>
         </div>
         <div className="flex items-center gap-1">
           {[
@@ -184,14 +186,14 @@ export default function Finanzas() {
             { tipo: 'inventario',  label: 'Inventario' },
           ].map(({ tipo, label }) => (
             <button key={tipo} onClick={() => exportar(tipo)}
-              className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 rounded-md transition-colors">
+              className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-loga-red hover:bg-loga-red/5 rounded-md transition-colors">
               {label}
               <Download size={10} strokeWidth={2} className="opacity-50 group-hover:opacity-100 transition-opacity" />
             </button>
           ))}
           <div className="w-px h-4 bg-zinc-200 dark:bg-white/10 mx-1" />
           <select id="plastico-year" defaultValue={new Date().getFullYear()}
-            className="bg-transparent text-[11px] font-medium text-zinc-600 dark:text-zinc-400 outline-none px-1.5 h-7 rounded-md hover:bg-zinc-100 dark:hover:bg-white/5">
+            className="bg-transparent text-[11px] font-medium text-zinc-600 dark:text-zinc-400 outline-none px-1.5 h-7 rounded-md hover:bg-loga-red/5 hover:text-loga-red transition-colors">
             {Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - i).map(y => (
               <option key={y} value={y}>{y}</option>
             ))}
@@ -210,7 +212,7 @@ export default function Finanzas() {
               })
               .catch(e => console.error('Error:', e));
           }}
-            className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5 rounded-md transition-colors">
+            className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-loga-red hover:bg-loga-red/5 rounded-md transition-colors">
             Plástico {new Date().getFullYear()}
             <Download size={10} strokeWidth={2} className="opacity-50 group-hover:opacity-100 transition-opacity" />
           </button>
@@ -218,23 +220,27 @@ export default function Finanzas() {
       </div>
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  HERO — números grandes, asimétrico, definido            ║
+          ║  HERO — número grande con red accent line                ║
           ╚══════════════════════════════════════════════════════════╝ */}
-      <motion.section {...FADE} className="px-6 sm:px-10 pt-10 sm:pt-14 pb-10">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-y-8 gap-x-10">
+      <motion.section {...FADE} className="relative px-6 sm:px-10 pt-10 sm:pt-14 pb-10 overflow-hidden">
+        {/* Subtle red glow background */}
+        <div className="absolute -top-32 -right-32 w-96 h-96 rounded-full bg-loga-red/[0.04] blur-3xl pointer-events-none" />
+
+        <div className="relative grid grid-cols-1 lg:grid-cols-12 gap-y-8 gap-x-10">
 
           {/* Facturación principal */}
           <div className="lg:col-span-7">
             <div className="flex items-center gap-2 mb-3">
-              <span className="text-[10px] uppercase tracking-[0.16em] font-semibold text-zinc-500">Facturación</span>
-              <span className="text-[10px] text-zinc-400 tabular-nums">· {fmtInt(data.ventas.num_pedidos)} pedidos</span>
+              <span className="w-1 h-3 rounded-sm bg-loga-red" />
+              <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-loga-red">Facturación</span>
+              <span className="text-[10px] text-zinc-400 tabular-nums">· {fmtInt(data.ventas.num_pedidos)} pedidos completados</span>
             </div>
             <div className="flex items-baseline gap-3 flex-wrap">
-              <h2 className="text-[64px] sm:text-[88px] font-semibold text-zinc-900 dark:text-white tracking-[-0.04em] leading-none tabular-nums">
+              <h2 className="text-[56px] sm:text-[80px] font-bold text-zinc-900 dark:text-white tracking-[-0.04em] leading-none tabular-nums">
                 {fmt(data.ventas.facturacion_total).split(',')[0]}
-                <span className="text-zinc-300 dark:text-zinc-600">,{fmt(data.ventas.facturacion_total).split(',')[1] ?? '00'}</span>
+                <span className="text-zinc-300 dark:text-zinc-600 font-normal">,{fmt(data.ventas.facturacion_total).split(',')[1] ?? '00'}</span>
               </h2>
-              <span className="text-sm font-medium text-zinc-400 tracking-tight">EUR</span>
+              <span className="text-base font-bold text-loga-red tracking-tight">EUR</span>
             </div>
           </div>
 
@@ -242,49 +248,56 @@ export default function Finanzas() {
           <div className="lg:col-span-5 grid grid-cols-3 lg:flex lg:flex-col lg:justify-end gap-y-5 gap-x-4 lg:gap-y-4 lg:border-l lg:border-zinc-200 lg:dark:border-white/10 lg:pl-10">
             <HeroStat
               label="Beneficio bruto"
-              value={fmtCompact(beneficioBruto)}
-              hint={`${margenPct.toFixed(1)}%`}
+              value={fmtInt(beneficioBruto)}
+              hint={`${margenPct.toFixed(1)}% margen`}
               positive={beneficioBruto >= 0}
+              icon={TrendingUp}
+              accent="emerald"
             />
             <HeroStat
               label="Coste producción"
-              value={fmtCompact(data.costeProd.coste_total)}
-              hint={`${fmtInt(data.costeProd.num_ordenes)} órd`}
+              value={fmtInt(data.costeProd.coste_total)}
+              hint={`${fmtInt(data.costeProd.num_ordenes)} órdenes`}
+              icon={Factory}
+              accent="amber"
             />
             <HeroStat
               label="Inmovilizado"
-              value={fmtCompact(data.inmovilizado.valor_total)}
-              hint="stock"
+              value={fmtInt(data.inmovilizado.valor_total)}
+              hint="stock total"
+              icon={Warehouse}
+              accent="red"
             />
           </div>
         </div>
       </motion.section>
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  KPI INLINE — banda densa estilo Bloomberg               ║
+          ║  KPI INLINE — banda con accents coloreados               ║
           ╚══════════════════════════════════════════════════════════╝ */}
-      <section className="border-y border-zinc-200 dark:border-white/10 bg-zinc-50/50 dark:bg-white/[0.02]">
-        <div className="px-6 sm:px-10 py-4 grid grid-cols-2 sm:grid-cols-4 divide-x divide-zinc-200 dark:divide-white/10">
-          <Inline label="Ticket medio" value={data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0'} unit="€/pedido" />
-          <Inline label="Coste/orden" value={data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0'} unit="€/orden" />
-          <Inline label="Rechazada" value={fmtCompact(data.rechazos.valor_rechazado)} unit={`${data.rechazos.ordenes_canceladas} órd`} accent="red" />
-          <Inline label="Mermas" value={`${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')}`} unit={`kg · ${fmtCompact(data.mermas?.total_eur ?? 0)} €`} />
+      <section className="border-y-2 border-zinc-900 dark:border-white bg-zinc-50 dark:bg-white/[0.02]">
+        <div className="px-6 sm:px-10 py-5 grid grid-cols-2 sm:grid-cols-4 divide-x divide-zinc-200 dark:divide-white/10">
+          <Inline label="Ticket medio" value={data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0'} unit="€/pedido" color="violet" />
+          <Inline label="Coste/orden" value={data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0'} unit="€/orden" color="amber" />
+          <Inline label="Rechazada" value={fmtInt(data.rechazos.valor_rechazado)} unit={`${data.rechazos.ordenes_canceladas} órd · ${data.rechazos.lotes_rechazados} lotes`} color="red" />
+          <Inline label="Mermas" value={`${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')}`} unit={`kg · ${fmtInt(data.mermas?.total_eur ?? 0)} €`} color="orange" />
         </div>
       </section>
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  CHART EVOLUCIÓN — line precision                         ║
+          ║  CHART EVOLUCIÓN — line precision con red brand          ║
           ╚══════════════════════════════════════════════════════════╝ */}
       {data.ventasMes.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
           <SectionHeader
             label="Evolución"
             title={`${data.ventasMes.length} meses`}
+            icon={TrendingUp}
             extra={
-              <div className="flex items-center gap-6 text-[11px]">
-                <Stat sub="Pico" value={fmtCompact(maxMes)} />
-                <Stat sub="Media" value={fmtCompact(avgMes)} />
-                <Stat sub="Total" value={fmtCompact(totalEvolucion)} accent />
+              <div className="flex items-center gap-5 text-[11px]">
+                <Stat sub="Pico" value={fmtInt(maxMes)} />
+                <Stat sub="Media" value={fmtInt(avgMes)} />
+                <Stat sub="Total" value={fmtInt(totalEvolucion)} accent />
               </div>
             }
           />
@@ -295,12 +308,13 @@ export default function Finanzas() {
       )}
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  RENTABILIDAD — tabla densa precision                     ║
+          ║  RENTABILIDAD                                              ║
           ╚══════════════════════════════════════════════════════════╝ */}
       <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
         <SectionHeader
           label="Rentabilidad"
           title="Por producto"
+          icon={Layers}
           extra={
             <div className="flex items-center gap-3">
               <div className="relative">
@@ -310,7 +324,7 @@ export default function Finanzas() {
                   placeholder="Buscar"
                   value={rentaSearch}
                   onChange={(e) => setRentaSearch(e.target.value)}
-                  className="w-32 sm:w-40 h-7 bg-zinc-100 dark:bg-white/5 border-0 pl-7 pr-2 text-[11px] outline-none focus:bg-white dark:focus:bg-white/10 rounded-md placeholder:text-zinc-400 transition-colors"
+                  className="w-32 sm:w-40 h-7 bg-zinc-100 dark:bg-white/5 border-0 pl-7 pr-2 text-[11px] outline-none focus:bg-white dark:focus:bg-white/10 focus:ring-2 focus:ring-loga-red/30 rounded-md placeholder:text-zinc-400 transition-all"
                 />
               </div>
               <div className="flex items-center text-[11px] font-medium">
@@ -330,11 +344,11 @@ export default function Finanzas() {
                         idx === 1 && 'border-y',
                         idx > 0 && 'border-l',
                         active
-                          ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 border-zinc-900 dark:border-white'
-                          : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-white/5'
+                          ? 'bg-loga-red text-white border-loga-red'
+                          : 'border-zinc-200 dark:border-white/10 text-zinc-600 dark:text-zinc-400 hover:bg-loga-red/5 hover:text-loga-red'
                       )}>
                       {l}
-                      <span className={clsx('text-[10px] tabular-nums', active ? 'opacity-70' : 'text-zinc-400')}>{count}</span>
+                      <span className={clsx('text-[10px] tabular-nums', active ? 'opacity-80' : 'text-zinc-400')}>{count}</span>
                     </button>
                   );
                 })}
@@ -343,23 +357,30 @@ export default function Finanzas() {
           }
         />
 
-        <div className="mt-6 border-t border-zinc-200 dark:border-white/10">
+        <div className="mt-6 border-t-2 border-zinc-900 dark:border-white">
           <table className="w-full">
             <thead>
-              <tr className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-500">
-                <th className="text-left py-3 pr-3 w-[40%]">Producto</th>
-                <Sort label="Venta" k={rentaSort.key} active={rentaSort.key === 'venta'} dir={rentaSort.dir} onClick={() => ordenarPor('venta')} />
-                <Sort label="Coste" k={rentaSort.key} active={rentaSort.key === 'coste'} dir={rentaSort.dir} onClick={() => ordenarPor('coste')} />
-                <Sort label="Margen" k={rentaSort.key} active={rentaSort.key === 'margen'} dir={rentaSort.dir} onClick={() => ordenarPor('margen')} />
+              <tr className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-500 bg-zinc-50/50 dark:bg-white/[0.02]">
+                <th className="text-left py-3 px-3 w-[40%]">Producto</th>
+                <Sort label="Venta" active={rentaSort.key === 'venta'} dir={rentaSort.dir} onClick={() => ordenarPor('venta')} />
+                <Sort label="Coste" active={rentaSort.key === 'coste'} dir={rentaSort.dir} onClick={() => ordenarPor('coste')} />
+                <Sort label="Margen" active={rentaSort.key === 'margen'} dir={rentaSort.dir} onClick={() => ordenarPor('margen')} />
                 <th className="text-right py-3 px-3 w-16">Δ</th>
-                <Sort label="Beneficio" k={rentaSort.key} active={rentaSort.key === 'beneficio'} dir={rentaSort.dir} onClick={() => ordenarPor('beneficio')} />
+                <Sort label="Beneficio" active={rentaSort.key === 'beneficio'} dir={rentaSort.dir} onClick={() => ordenarPor('beneficio')} />
               </tr>
             </thead>
             <tbody>
               {rentabilidadFiltrada.map((r, i) => {
                 const margen = parseFloat(String(r.margen_pct));
                 const isOpen = desgloseId === r.id;
-                const margenColor = margen < 20 ? 'text-loga-red' : margen < 40 ? 'text-zinc-900 dark:text-white' : 'text-emerald-600 dark:text-emerald-400';
+                const margenStyle = margen < 20
+                  ? { text: 'text-loga-red', bg: 'bg-loga-red/10', dot: 'bg-loga-red' }
+                  : margen < 40
+                  ? { text: 'text-amber-700 dark:text-amber-400', bg: 'bg-amber-500/10', dot: 'bg-amber-500' }
+                  : { text: 'text-emerald-700 dark:text-emerald-400', bg: 'bg-emerald-500/10', dot: 'bg-emerald-500' };
+                const tipoStyle = r.tipo === 'producto_fabricado'
+                  ? { text: 'text-loga-red', bg: 'bg-loga-red/10', label: 'Granel' }
+                  : { text: 'text-emerald-700 dark:text-emerald-400', bg: 'bg-emerald-500/10', label: 'Envasado' };
                 return (
                   <React.Fragment key={r.id}>
                     <motion.tr
@@ -367,24 +388,34 @@ export default function Finanzas() {
                       onClick={() => setDesgloseId(isOpen ? null : r.id)}
                       className={clsx(
                         'border-t border-zinc-100 dark:border-white/5 cursor-pointer group transition-colors',
-                        isOpen ? 'bg-zinc-50 dark:bg-white/[0.03]' : 'hover:bg-zinc-50/60 dark:hover:bg-white/[0.02]'
+                        isOpen ? 'bg-loga-red/[0.03] dark:bg-loga-red/[0.08]' : 'hover:bg-zinc-50/60 dark:hover:bg-white/[0.02]'
                       )}
                     >
-                      <td className="py-2.5 pr-3">
+                      <td className="py-2.5 px-3">
                         <div className="flex items-center gap-2.5">
-                          <span className="text-zinc-300 dark:text-zinc-600 group-hover:text-loga-red transition-colors shrink-0">
-                            {isOpen ? <Minus size={10} strokeWidth={2.5} /> : <Plus size={10} strokeWidth={2.5} />}
+                          <span className={clsx(
+                            'transition-colors shrink-0',
+                            isOpen ? 'text-loga-red' : 'text-zinc-300 dark:text-zinc-600 group-hover:text-loga-red'
+                          )}>
+                            {isOpen ? <Minus size={11} strokeWidth={2.5} /> : <Plus size={11} strokeWidth={2.5} />}
                           </span>
+                          <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', margenStyle.dot)} />
                           <div className="min-w-0">
-                            <p className="text-[12px] text-zinc-900 dark:text-white truncate">{r.nombre}</p>
-                            <p className="text-[10px] text-zinc-400 mt-px tabular-nums">
-                              {r.codigo} · {r.tipo === 'producto_fabricado' ? 'Granel' : 'Envasado'}
-                            </p>
+                            <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{r.nombre}</p>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <span className="text-[10px] text-zinc-400 tabular-nums">{r.codigo}</span>
+                              <span className={clsx('rounded px-1.5 py-px text-[9px] font-bold uppercase tracking-wider', tipoStyle.bg, tipoStyle.text)}>
+                                {tipoStyle.label}
+                              </span>
+                              {r.precio_kg != null && (
+                                <span className="text-[10px] text-zinc-500 tabular-nums">· {fmt(r.precio_kg)} €/kg</span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white">{fmt(r.precio_venta)}</p>
+                        <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{fmt(r.precio_venta)}</p>
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/{r.unidad_medida}</p>
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -392,12 +423,14 @@ export default function Finanzas() {
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/{r.unidad_medida}</p>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <p className={clsx('text-[13px] font-medium tabular-nums', margenColor)}>{margen.toFixed(1)}<span className="text-[10px] text-zinc-400 ml-0.5">%</span></p>
+                        <span className={clsx('inline-flex items-center rounded-md px-2 py-1 text-[12px] font-bold tabular-nums', margenStyle.bg, margenStyle.text)}>
+                          {margen.toFixed(1)}%
+                        </span>
                       </td>
                       <td className="py-2.5 px-3 text-right">
                         {r.diff_margen != null && r.diff_margen !== 0 ? (
                           <span className={clsx(
-                            'inline-flex items-center gap-0.5 text-[11px] tabular-nums font-medium',
+                            'inline-flex items-center gap-0.5 text-[11px] tabular-nums font-bold',
                             r.diff_margen > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-loga-red'
                           )}>
                             {r.diff_margen > 0 ? <ArrowUpRight size={9} strokeWidth={2.5} /> : <ArrowDownRight size={9} strokeWidth={2.5} />}
@@ -405,8 +438,8 @@ export default function Finanzas() {
                           </span>
                         ) : <span className="text-zinc-300 text-[11px]">—</span>}
                       </td>
-                      <td className="py-2.5 pl-3 text-right">
-                        <p className="text-[12px] tabular-nums font-medium text-zinc-900 dark:text-white">{fmt(r.beneficio_ud)}</p>
+                      <td className="py-2.5 px-3 text-right">
+                        <p className="text-[12px] tabular-nums font-bold text-zinc-900 dark:text-white">{fmt(r.beneficio_ud)}</p>
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/ud</p>
                       </td>
                     </motion.tr>
@@ -417,37 +450,38 @@ export default function Finanzas() {
                             <motion.div
                               initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
                               exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }}
-                              className="bg-zinc-50/80 dark:bg-white/[0.02] border-t border-zinc-200 dark:border-white/10"
+                              className="bg-gradient-to-b from-loga-red/[0.03] to-transparent dark:from-loga-red/[0.08] border-t border-loga-red/20"
                             >
                               <div className="px-9 py-4">
                                 <div className="flex items-center gap-2 mb-3">
-                                  <span className="text-[10px] uppercase tracking-[0.12em] font-semibold text-zinc-500">Desglose de coste</span>
-                                  <span className="h-px flex-1 bg-zinc-200 dark:bg-white/10" />
+                                  <Layers size={11} className="text-loga-red" strokeWidth={2.5} />
+                                  <span className="text-[10px] uppercase tracking-[0.14em] font-bold text-loga-red">Desglose de coste</span>
+                                  <span className="h-px flex-1 bg-loga-red/20" />
                                 </div>
-                                <div className="grid grid-cols-12 gap-3 text-[10px] uppercase tracking-[0.1em] font-semibold text-zinc-400 mb-1.5 pb-1.5 border-b border-zinc-200 dark:border-white/10">
+                                <div className="grid grid-cols-12 gap-3 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
                                   <span className="col-span-5">Ingrediente</span>
                                   <span className="col-span-3 text-right">Cantidad</span>
                                   <span className="col-span-2 text-right">Precio</span>
                                   <span className="col-span-2 text-right">Línea</span>
                                 </div>
                                 {r.desglose.map((d, j) => (
-                                  <div key={j} className="grid grid-cols-12 gap-3 text-[11px] py-1 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
-                                    <span className="col-span-5 text-zinc-700 dark:text-zinc-300">{d.nombre}</span>
+                                  <div key={j} className="grid grid-cols-12 gap-3 text-[11px] py-1.5 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
+                                    <span className="col-span-5 text-zinc-700 dark:text-zinc-300 font-medium">{d.nombre}</span>
                                     <span className="col-span-3 text-right tabular-nums text-zinc-500">{d.cantidad.toLocaleString('es-ES', { maximumFractionDigits: 4 })} {d.unidad}</span>
                                     <span className="col-span-2 text-right tabular-nums text-zinc-500">{fmt(d.precio_ud)}</span>
-                                    <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-medium">{fmt(d.coste_linea)}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-bold">{fmt(d.coste_linea)}</span>
                                   </div>
                                 ))}
-                                <div className="grid grid-cols-12 gap-3 text-[11px] pt-2.5 mt-1.5 border-t border-zinc-300 dark:border-white/20">
-                                  <span className="col-span-10 font-medium text-zinc-900 dark:text-white">
+                                <div className="grid grid-cols-12 gap-3 text-[11px] pt-2.5 mt-1.5 border-t border-zinc-300 dark:border-white/20 font-bold">
+                                  <span className="col-span-10 text-zinc-900 dark:text-white">
                                     Total batch{r.rendimiento && r.rendimiento > 1 ? ` · ${r.rendimiento} ${r.unidad_medida}` : ''}
                                   </span>
-                                  <span className="col-span-2 text-right tabular-nums font-medium text-zinc-900 dark:text-white">{fmt(r.coste_batch ?? r.precio_coste)} €</span>
+                                  <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white">{fmt(r.coste_batch ?? r.precio_coste)} €</span>
                                 </div>
                                 {r.rendimiento && r.rendimiento > 1 && (
-                                  <div className="grid grid-cols-12 gap-3 text-[11px] pt-1">
-                                    <span className="col-span-10 text-loga-red font-medium">Coste por {r.unidad_medida}</span>
-                                    <span className="col-span-2 text-right tabular-nums text-loga-red font-medium">{fmt(r.precio_coste)} €</span>
+                                  <div className="grid grid-cols-12 gap-3 text-[11px] pt-1.5 mt-1.5 bg-loga-red/10 -mx-2 px-2 py-1.5 rounded font-bold text-loga-red">
+                                    <span className="col-span-10">Coste por {r.unidad_medida}</span>
+                                    <span className="col-span-2 text-right tabular-nums">{fmt(r.precio_coste)} €</span>
                                   </div>
                                 )}
                               </div>
@@ -464,7 +498,7 @@ export default function Finanzas() {
               )}
             </tbody>
           </table>
-          <div className="border-t border-zinc-200 dark:border-white/10" />
+          <div className="border-t-2 border-zinc-900 dark:border-white" />
         </div>
       </motion.section>
 
@@ -476,15 +510,15 @@ export default function Finanzas() {
 
           {/* Distribución (5 cols) */}
           <div className="lg:col-span-5">
-            <SectionHeader label="Distribución" title="Por categoría" />
+            <SectionHeader label="Distribución" title="Por categoría" icon={Package} />
 
             <div className="mt-6 space-y-0">
               {([
-                { label: 'Materia prima', value: data.inmovilizado.valor_mp,  color: '#18181b' },
-                { label: 'Fabricado',     value: data.inmovilizado.valor_fab, color: '#FF0000' },
-                { label: 'Envasado',      value: data.inmovilizado.valor_env, color: '#71717a' },
-                { label: 'Embalaje',      value: data.inmovilizado.valor_emb, color: '#d4d4d8' },
-              ]).map(({ label, value, color }, i) => {
+                { label: 'Materia prima', value: data.inmovilizado.valor_mp,  color: '#3b82f6', icon: Beaker },
+                { label: 'Fabricado',     value: data.inmovilizado.valor_fab, color: '#FF0000', icon: Zap },
+                { label: 'Envasado',      value: data.inmovilizado.valor_env, color: '#10b981', icon: Package },
+                { label: 'Embalaje',      value: data.inmovilizado.valor_emb, color: '#f59e0b', icon: Package },
+              ]).map(({ label, value, color, icon: Icon }, i) => {
                 const pct = data.inmovilizado.valor_total > 0 ? (value / data.inmovilizado.valor_total) * 100 : 0;
                 return (
                   <motion.div
@@ -494,21 +528,31 @@ export default function Finanzas() {
                   >
                     <div className="flex items-baseline justify-between py-2.5 border-t border-zinc-200 dark:border-white/10 first:border-t-0">
                       <div className="flex items-center gap-2.5">
-                        <span className="w-1 h-3.5 rounded-sm" style={{ backgroundColor: color }} />
-                        <span className="text-[12px] text-zinc-900 dark:text-white">{label}</span>
+                        <div className="rounded p-1" style={{ backgroundColor: `${color}15` }}>
+                          <Icon size={10} style={{ color }} strokeWidth={2.5} />
+                        </div>
+                        <span className="text-[12px] font-medium text-zinc-900 dark:text-white">{label}</span>
                       </div>
                       <div className="flex items-baseline gap-3">
-                        <span className="text-[10px] tabular-nums text-zinc-400 font-medium">{pct.toFixed(1)}%</span>
-                        <span className="text-[13px] font-medium tabular-nums text-zinc-900 dark:text-white w-24 text-right">{fmtCompact(value)} <span className="text-[10px] text-zinc-400 font-normal">€</span></span>
+                        <span className="text-[10px] tabular-nums text-zinc-400 font-bold">{pct.toFixed(1)}%</span>
+                        <span className="text-[13px] font-bold tabular-nums text-zinc-900 dark:text-white w-32 text-right">{fmtInt(value)} <span className="text-[10px] text-zinc-400 font-normal">€</span></span>
                       </div>
+                    </div>
+                    <div className="h-1 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
+                      <motion.div
+                        initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
+                        transition={{ delay: 0.2 + i * 0.04, duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+                        style={{ backgroundColor: color, transformOrigin: 'left' }}
+                        className="h-full rounded-full"
+                      />
                     </div>
                   </motion.div>
                 );
               })}
-              <div className="flex items-baseline justify-between py-3 border-t-2 border-zinc-900 dark:border-white">
-                <span className="text-[10px] uppercase tracking-[0.16em] font-semibold text-zinc-500">Total</span>
-                <span className="text-[18px] font-semibold tabular-nums text-zinc-900 dark:text-white">
-                  {fmt(data.inmovilizado.valor_total)} <span className="text-[11px] text-zinc-400 font-normal">EUR</span>
+              <div className="flex items-baseline justify-between py-3 border-t-2 border-loga-red mt-2">
+                <span className="text-[10px] uppercase tracking-[0.16em] font-bold text-loga-red">Total inventario</span>
+                <span className="text-[20px] font-bold tabular-nums text-zinc-900 dark:text-white">
+                  {fmtInt(data.inmovilizado.valor_total)} <span className="text-[12px] text-loga-red font-bold">EUR</span>
                 </span>
               </div>
             </div>
@@ -519,6 +563,7 @@ export default function Finanzas() {
             <SectionHeader
               label="Inmovilizado"
               title={`Top ${data.topInmovilizado.length > 10 ? 10 : data.topInmovilizado.length}`}
+              icon={Layers}
             />
 
             <ol className="mt-6 border-t border-zinc-200 dark:border-white/10">
@@ -526,29 +571,38 @@ export default function Finanzas() {
                 const val = parseFloat(String(p.valor));
                 const maxVal = data.topInmovilizado[0] ? parseFloat(String(data.topInmovilizado[0].valor)) : 1;
                 const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
-                const isLoga = p.tipo === 'producto_fabricado';
+                const tipoConfig = p.tipo === 'producto_fabricado'
+                  ? { color: '#FF0000', label: 'Granel' }
+                  : p.tipo === 'producto_envasado'
+                  ? { color: '#10b981', label: 'Envasado' }
+                  : p.tipo === 'materia_prima'
+                  ? { color: '#3b82f6', label: 'MP' }
+                  : { color: '#f59e0b', label: 'Embalaje' };
                 return (
                   <motion.li
                     key={i}
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.05 + i * 0.025, duration: 0.2 }}
-                    className="grid grid-cols-12 gap-3 items-center py-2.5 border-b border-zinc-100 dark:border-white/5 group hover:bg-zinc-50/40 dark:hover:bg-white/[0.02] transition-colors px-2 -mx-2 rounded"
+                    className="grid grid-cols-12 gap-3 items-center py-2.5 border-b border-zinc-100 dark:border-white/5 group hover:bg-loga-red/[0.02] transition-colors px-2 -mx-2 rounded"
                   >
-                    <span className="col-span-1 text-[10px] text-zinc-400 tabular-nums font-medium">{String(i + 1).padStart(2, '0')}</span>
-                    <div className="col-span-5 min-w-0">
-                      <p className="text-[12px] text-zinc-900 dark:text-white truncate">{p.nombre}</p>
-                      <p className="text-[10px] text-zinc-400 tabular-nums">{fmtInt(parseFloat(String(p.stock_actual)))} {p.unidad_medida}</p>
+                    <span className="col-span-1 text-[10px] text-zinc-400 group-hover:text-loga-red tabular-nums font-bold transition-colors">{String(i + 1).padStart(2, '0')}</span>
+                    <div className="col-span-5 min-w-0 flex items-center gap-2">
+                      <span className="w-1 h-3.5 rounded-sm shrink-0" style={{ backgroundColor: tipoConfig.color }} />
+                      <div className="min-w-0">
+                        <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{p.nombre}</p>
+                        <p className="text-[10px] text-zinc-400 tabular-nums">{fmtInt(parseFloat(String(p.stock_actual)))} {p.unidad_medida}</p>
+                      </div>
                     </div>
                     <div className="col-span-4 hidden sm:block">
-                      <div className="h-px bg-zinc-100 dark:bg-white/5 relative">
+                      <div className="h-1 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
                         <motion.div
                           initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
                           transition={{ delay: 0.2 + i * 0.025, duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-                          style={{ transformOrigin: 'left', backgroundColor: isLoga ? '#FF0000' : '#18181b' }}
-                          className="absolute inset-0 dark:!bg-white"
+                          style={{ transformOrigin: 'left', backgroundColor: tipoConfig.color }}
+                          className="h-full rounded-full"
                         />
                       </div>
                     </div>
-                    <span className="col-span-2 text-right text-[12px] font-medium tabular-nums text-zinc-900 dark:text-white">{fmtCompact(val)} <span className="text-[9px] text-zinc-400">€</span></span>
+                    <span className="col-span-2 text-right text-[12px] font-bold tabular-nums text-zinc-900 dark:text-white">{fmtInt(val)} <span className="text-[9px] text-zinc-400 font-normal">€</span></span>
                   </motion.li>
                 );
               })}
@@ -558,11 +612,11 @@ export default function Finanzas() {
       </motion.section>
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  TOP VENTAS — lista numerada precision                    ║
+          ║  TOP VENTAS                                                ║
           ╚══════════════════════════════════════════════════════════╝ */}
       {data.ventasProducto.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
-          <SectionHeader label="Ventas" title="Top productos" />
+          <SectionHeader label="Ventas" title="Top productos" icon={TrendingUp} />
 
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-x-10">
             {data.ventasProducto.map((v, i) => {
@@ -571,30 +625,36 @@ export default function Finanzas() {
               const maxFact = parseFloat(String(data.ventasProducto[0]?.facturacion ?? 1));
               const pct = maxFact > 0 ? (fact / maxFact) * 100 : 0;
               const precioEf = cantidad > 0 ? fact / cantidad : 0;
+              const isTop3 = i < 3;
               return (
                 <motion.div
                   key={i}
                   initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.04 * i, duration: 0.2 }}
-                  className="grid grid-cols-12 gap-3 items-center py-3 border-t border-zinc-100 dark:border-white/5 first:border-t-0 lg:first:border-t lg:[&:nth-child(2)]:border-t group"
+                  className="grid grid-cols-12 gap-3 items-center py-3 border-t border-zinc-100 dark:border-white/5 first:border-t-0 lg:[&:nth-child(2)]:border-t-0 group hover:bg-loga-red/[0.02] transition-colors px-2 -mx-2 rounded"
                 >
-                  <span className="col-span-1 text-[10px] text-zinc-400 tabular-nums font-medium">{String(i + 1).padStart(2, '0')}</span>
+                  <span className={clsx(
+                    'col-span-1 inline-flex items-center justify-center w-6 h-6 rounded-md text-[10px] tabular-nums font-bold',
+                    isTop3 ? 'bg-loga-red text-white' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500'
+                  )}>
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
                   <div className="col-span-7 min-w-0">
-                    <p className="text-[12px] text-zinc-900 dark:text-white truncate">{v.nombre}</p>
-                    <p className="text-[10px] text-zinc-400 tabular-nums mt-0.5">
+                    <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{v.nombre}</p>
+                    <p className="text-[10px] text-zinc-500 tabular-nums mt-0.5">
                       {fmtInt(cantidad)} {v.unidad_medida} · {fmt(precioEf)} €/{v.unidad_medida}
                     </p>
-                    <div className="h-px bg-zinc-100 dark:bg-white/5 mt-2 relative overflow-hidden">
+                    <div className="h-1 bg-zinc-100 dark:bg-zinc-800 mt-2 relative overflow-hidden rounded-full">
                       <motion.div
                         initial={{ scaleX: 0 }} animate={{ scaleX: pct / 100 }}
                         transition={{ delay: 0.15 + i * 0.04, duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
                         style={{ transformOrigin: 'left' }}
-                        className="absolute inset-0 bg-loga-red"
+                        className="absolute inset-0 bg-gradient-to-r from-loga-red to-red-400 rounded-full"
                       />
                     </div>
                   </div>
                   <div className="col-span-4 text-right">
-                    <p className="text-[14px] font-medium tabular-nums text-zinc-900 dark:text-white">{fmtCompact(fact)}</p>
-                    <p className="text-[9px] text-zinc-400 uppercase tracking-wider">EUR</p>
+                    <p className="text-[14px] font-bold tabular-nums text-zinc-900 dark:text-white">{fmtInt(fact)}</p>
+                    <p className="text-[9px] text-loga-red font-bold uppercase tracking-wider">EUR</p>
                   </div>
                 </motion.div>
               );
@@ -608,7 +668,7 @@ export default function Finanzas() {
           ╚══════════════════════════════════════════════════════════╝ */}
       {impactoRecetas.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
-          <SectionHeader label="Impacto" title="Variación de margen" hint="PVP + coste anterior vs actual" />
+          <SectionHeader label="Impacto" title="Variación de margen" hint="PVP + coste anterior vs actual" icon={Activity} />
 
           <div className="mt-6 border-t border-zinc-200 dark:border-white/10">
             {impactoRecetas.map((r) => {
@@ -617,14 +677,17 @@ export default function Finanzas() {
               const diffNegativo = r.diff_margen < 0;
               const pvpCambio = r.pvp_anterior && r.pvp_actual && Math.abs(r.pvp_actual - r.pvp_anterior) > 0.01;
               const margenColor = r.margen_actual > 40 ? 'text-emerald-600 dark:text-emerald-400'
-                : r.margen_actual > 20 ? 'text-zinc-900 dark:text-white' : 'text-loga-red';
+                : r.margen_actual > 20 ? 'text-amber-700 dark:text-amber-400' : 'text-loga-red';
               return (
                 <div key={r.receta_nombre} className="border-b border-zinc-100 dark:border-white/5">
                   <button
                     onClick={() => setExpandedReceta(expanded ? null : r.receta_nombre)}
                     className={clsx(
                       'w-full grid grid-cols-12 gap-3 items-center py-3 text-left transition-colors px-2 -mx-2 rounded',
-                      expanded ? 'bg-zinc-50 dark:bg-white/[0.03]' : 'hover:bg-zinc-50/60 dark:hover:bg-white/[0.02]'
+                      expanded
+                        ? 'bg-loga-red/[0.04] dark:bg-loga-red/[0.08]'
+                        : diffNegativo ? 'hover:bg-loga-red/[0.02]'
+                        : 'hover:bg-zinc-50/60 dark:hover:bg-white/[0.02]'
                     )}
                   >
                     <span className={clsx(
@@ -632,33 +695,33 @@ export default function Finanzas() {
                       diffNegativo ? 'bg-loga-red' : diffPositivo ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'
                     )} />
                     <div className="col-span-12 sm:col-span-6 min-w-0">
-                      <p className="text-[12px] text-zinc-900 dark:text-white truncate">{r.producto_nombre}</p>
-                      <p className="text-[10px] text-zinc-400 mt-0.5 tabular-nums truncate">
+                      <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{r.producto_nombre}</p>
+                      <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums truncate">
                         {r.receta_nombre}
-                        {r.pvp_actual !== undefined && <span> · {r.pvp_actual.toFixed(2)} €/{r.unidad_medida}</span>}
-                        {pvpCambio && <span className="text-zinc-300"> (ant {r.pvp_anterior?.toFixed(2)})</span>}
+                        {r.pvp_actual !== undefined && <span> · <span className="font-medium text-zinc-700 dark:text-zinc-300">{fmt(r.pvp_actual)}</span> €/{r.unidad_medida}</span>}
+                        {pvpCambio && <span className="text-zinc-400"> (ant {fmt(r.pvp_anterior!)})</span>}
                       </p>
                     </div>
                     <div className="col-span-6 sm:col-span-2 text-right">
-                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-medium">Coste</p>
-                      <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white">{r.coste_actual.toFixed(4)}</p>
+                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Coste</p>
+                      <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{r.coste_actual.toFixed(4)}</p>
                       {r.diff_coste !== 0 && (
-                        <p className={clsx('text-[10px] tabular-nums', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
+                        <p className={clsx('text-[10px] tabular-nums font-bold', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
                           {r.diff_coste > 0 ? '+' : ''}{r.diff_coste.toFixed(4)}
                         </p>
                       )}
                     </div>
                     <div className="col-span-5 sm:col-span-2 text-right">
-                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-medium">Margen</p>
-                      <p className={clsx('text-[14px] font-medium tabular-nums', margenColor)}>{r.margen_actual.toFixed(1)}%</p>
+                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Margen</p>
+                      <p className={clsx('text-[14px] font-bold tabular-nums', margenColor)}>{r.margen_actual.toFixed(1)}%</p>
                       {r.diff_margen !== 0 && (
-                        <p className={clsx('text-[10px] tabular-nums inline-flex items-center gap-0.5', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
+                        <p className={clsx('text-[10px] tabular-nums inline-flex items-center gap-0.5 font-bold', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
                           {diffPositivo ? <ArrowUpRight size={9} strokeWidth={2.5} /> : <ArrowDownRight size={9} strokeWidth={2.5} />}
                           {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
                         </p>
                       )}
                     </div>
-                    <ChevronDown size={12} className={clsx('col-span-1 justify-self-end text-zinc-400 transition-transform', expanded && 'rotate-180')} strokeWidth={2.5} />
+                    <ChevronDown size={12} className={clsx('col-span-1 justify-self-end transition-transform', expanded ? 'rotate-180 text-loga-red' : 'text-zinc-400')} strokeWidth={2.5} />
                   </button>
 
                   <AnimatePresence>
@@ -666,27 +729,27 @@ export default function Finanzas() {
                       <motion.div
                         initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }}
-                        className="overflow-hidden bg-zinc-50/60 dark:bg-white/[0.02]"
+                        className="overflow-hidden bg-gradient-to-b from-loga-red/[0.03] to-transparent dark:from-loga-red/[0.08]"
                       >
                         <div className="px-9 py-4">
                           {r.salud && (
-                            <p className="text-[11px] text-zinc-600 dark:text-zinc-400 mb-3 italic border-l-2 border-zinc-300 dark:border-white/20 pl-3">
+                            <p className="text-[11px] text-zinc-700 dark:text-zinc-300 mb-3 italic border-l-2 border-loga-red pl-3 font-medium">
                               {r.salud}
                             </p>
                           )}
-                          <div className="grid grid-cols-12 gap-3 text-[10px] uppercase tracking-[0.1em] font-semibold text-zinc-400 mb-1.5 pb-1.5 border-b border-zinc-200 dark:border-white/10">
+                          <div className="grid grid-cols-12 gap-3 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
                             <span className="col-span-6">Materia prima</span>
                             <span className="col-span-2 text-right">Anterior</span>
                             <span className="col-span-2 text-right">Actual</span>
                             <span className="col-span-2 text-right">Impacto</span>
                           </div>
                           {r.detalle_mp.map((mp, i) => (
-                            <div key={i} className="grid grid-cols-12 gap-3 text-[11px] py-1 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
-                              <span className="col-span-6 text-zinc-700 dark:text-zinc-300">{mp.nombre} <span className="text-zinc-400 tabular-nums">({mp.cantidad.toFixed(2)})</span></span>
+                            <div key={i} className="grid grid-cols-12 gap-3 text-[11px] py-1.5 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
+                              <span className="col-span-6 text-zinc-700 dark:text-zinc-300 font-medium">{mp.nombre} <span className="text-zinc-400 tabular-nums">({mp.cantidad.toFixed(2)})</span></span>
                               <span className="col-span-2 text-right tabular-nums text-zinc-500">{mp.precio_anterior?.toFixed(4) ?? '—'}</span>
-                              <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-medium">{mp.precio_actual.toFixed(4)}</span>
+                              <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-bold">{mp.precio_actual.toFixed(4)}</span>
                               <span className={clsx(
-                                'col-span-2 text-right tabular-nums font-medium',
+                                'col-span-2 text-right tabular-nums font-bold',
                                 mp.diff > 0 ? 'text-loga-red' : mp.diff < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-300'
                               )}>
                                 {mp.diff !== 0 ? `${mp.diff > 0 ? '+' : ''}${mp.diff.toFixed(2)}` : '—'}
@@ -705,11 +768,11 @@ export default function Finanzas() {
       )}
 
       {/* ╔══════════════════════════════════════════════════════════╗
-          ║  MATERIAS PRIMAS — lista densa                            ║
+          ║  MATERIAS PRIMAS — heatmap intensity                      ║
           ╚══════════════════════════════════════════════════════════╝ */}
       {mpPrecios.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
-          <SectionHeader label="Materias primas" title="Variación 90 días" hint="Ordenadas por volatilidad" />
+          <SectionHeader label="Materias primas" title="Variación 90 días" hint="Ordenadas por volatilidad" icon={Beaker} />
 
           <div className="mt-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-8">
             {[...mpPrecios]
@@ -719,23 +782,33 @@ export default function Finanzas() {
                 const isUp = variacion > 0;
                 const ant = item.precio_anterior ? parseFloat(item.precio_anterior) : null;
                 const act = parseFloat(item.precio_actual);
+                const intensity = Math.min(Math.abs(variacion) / 30, 1);
                 return (
                   <motion.div
                     key={i}
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.025 * i, duration: 0.2 }}
-                    className="grid grid-cols-12 items-baseline gap-2 py-2.5 border-t border-zinc-100 dark:border-white/5 first:border-t-0 md:[&:nth-child(2)]:border-t-0 lg:[&:nth-child(3)]:border-t-0 group"
+                    className="grid grid-cols-12 items-baseline gap-2 py-2.5 border-t border-zinc-100 dark:border-white/5 first:border-t-0 md:[&:nth-child(2)]:border-t-0 lg:[&:nth-child(3)]:border-t-0 group rounded px-2 -mx-2 transition-colors hover:bg-zinc-50/60 dark:hover:bg-white/[0.02] relative overflow-hidden"
                   >
-                    <div className="col-span-7 min-w-0">
-                      <p className="text-[12px] text-zinc-900 dark:text-white truncate">{item.nombre}</p>
-                      <p className="text-[10px] text-zinc-400 tabular-nums mt-0.5">
-                        {ant ? ant.toFixed(4) : '—'} → <span className="text-zinc-700 dark:text-zinc-300 font-medium">{act.toFixed(4)}</span> €/{item.unidad_medida}
+                    {/* Background tint según variación */}
+                    {variacion !== 0 && (
+                      <div
+                        className="absolute inset-0 pointer-events-none opacity-50"
+                        style={{
+                          background: `linear-gradient(90deg, transparent 0%, ${isUp ? '#FF0000' : '#10b981'}${Math.round(intensity * 12).toString(16).padStart(2, '0')} 100%)`,
+                        }}
+                      />
+                    )}
+                    <div className="col-span-7 min-w-0 relative">
+                      <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{item.nombre}</p>
+                      <p className="text-[10px] text-zinc-500 tabular-nums mt-0.5">
+                        {ant ? ant.toFixed(4) : '—'} → <span className="text-zinc-900 dark:text-white font-bold">{act.toFixed(4)}</span> €/{item.unidad_medida}
                       </p>
                     </div>
-                    <div className="col-span-5 text-right">
+                    <div className="col-span-5 text-right relative">
                       {item.precio_anterior && variacion !== 0 ? (
                         <span className={clsx(
-                          'inline-flex items-center gap-0.5 text-[12px] tabular-nums font-medium',
-                          isUp ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400'
+                          'inline-flex items-center gap-0.5 rounded-md px-2 py-1 text-[12px] tabular-nums font-bold',
+                          isUp ? 'bg-loga-red/15 text-loga-red' : 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
                         )}>
                           {isUp ? <ArrowUpRight size={11} strokeWidth={2.5} /> : <ArrowDownRight size={11} strokeWidth={2.5} />}
                           {isUp ? '+' : ''}{variacion.toFixed(1)}%
@@ -757,20 +830,32 @@ export default function Finanzas() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// COMPONENTES AUXILIARES — definidos, sin decoración
+// COMPONENTES AUXILIARES
 // ═══════════════════════════════════════════════════════════════════════
 
-function HeroStat({ label, value, hint, positive }: { label: string; value: string; hint?: string; positive?: boolean }) {
+function HeroStat({ label, value, hint, positive, icon: Icon, accent }: {
+  label: string; value: string; hint?: string; positive?: boolean;
+  icon: LucideIcon;
+  accent: 'red' | 'emerald' | 'amber';
+}) {
+  const accentClass = accent === 'red' ? 'text-loga-red bg-loga-red/10'
+    : accent === 'emerald' ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10'
+    : 'text-amber-600 dark:text-amber-400 bg-amber-500/10';
   return (
     <div>
-      <p className="text-[10px] uppercase tracking-[0.16em] font-semibold text-zinc-500 mb-1.5">{label}</p>
-      <p className="text-[28px] font-semibold text-zinc-900 dark:text-white tabular-nums leading-none tracking-tight">
+      <div className="flex items-center gap-2 mb-1.5">
+        <div className={clsx('rounded p-1', accentClass)}>
+          <Icon size={10} strokeWidth={2.5} />
+        </div>
+        <p className="text-[10px] uppercase tracking-[0.16em] font-bold text-zinc-500">{label}</p>
+      </div>
+      <p className="text-[26px] font-bold text-zinc-900 dark:text-white tabular-nums leading-none tracking-tight">
         {value}
         <span className="text-[12px] font-normal text-zinc-400 ml-1.5">€</span>
       </p>
       {hint && (
         <p className={clsx(
-          'text-[11px] tabular-nums mt-1.5 inline-flex items-center gap-0.5',
+          'text-[11px] tabular-nums mt-1.5 inline-flex items-center gap-0.5 font-medium',
           positive === true ? 'text-emerald-600 dark:text-emerald-400'
             : positive === false ? 'text-loga-red'
             : 'text-zinc-500'
@@ -784,26 +869,51 @@ function HeroStat({ label, value, hint, positive }: { label: string; value: stri
   );
 }
 
-function Inline({ label, value, unit, accent }: { label: string; value: string; unit: string; accent?: 'red' }) {
+function Inline({ label, value, unit, color }: {
+  label: string; value: string; unit: string; color: 'red' | 'violet' | 'amber' | 'orange'
+}) {
+  const accentMap = {
+    red:    'text-loga-red',
+    violet: 'text-violet-600 dark:text-violet-400',
+    amber:  'text-amber-600 dark:text-amber-400',
+    orange: 'text-orange-600 dark:text-orange-400',
+  };
+  const dotMap = {
+    red:    'bg-loga-red',
+    violet: 'bg-violet-500',
+    amber:  'bg-amber-500',
+    orange: 'bg-orange-500',
+  };
   return (
     <div className="px-4 first:pl-0 last:pr-0">
-      <p className="text-[10px] uppercase tracking-[0.14em] font-semibold text-zinc-500 mb-1">{label}</p>
-      <p className={clsx('text-[18px] font-medium tabular-nums leading-none', accent === 'red' ? 'text-loga-red' : 'text-zinc-900 dark:text-white')}>
-        {value}
-      </p>
-      <p className="text-[10px] text-zinc-400 tabular-nums mt-1">{unit}</p>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <span className={clsx('w-1 h-1 rounded-full', dotMap[color])} />
+        <p className="text-[10px] uppercase tracking-[0.14em] font-bold text-zinc-500">{label}</p>
+      </div>
+      <p className={clsx('text-[18px] font-bold tabular-nums leading-none', accentMap[color])}>{value}</p>
+      <p className="text-[10px] text-zinc-400 tabular-nums mt-1 truncate">{unit}</p>
     </div>
   );
 }
 
-function SectionHeader({ label, title, extra, hint }: { label: string; title: string; extra?: React.ReactNode; hint?: string }) {
+function SectionHeader({ label, title, extra, hint, icon: Icon }: {
+  label: string; title: string; extra?: React.ReactNode; hint?: string;
+  icon?: LucideIcon;
+}) {
   return (
     <div className="flex items-end justify-between gap-4 flex-wrap">
-      <div className="flex items-baseline gap-3">
-        <span className="text-[10px] uppercase tracking-[0.18em] font-semibold text-zinc-500">{label}</span>
-        <span className="h-px w-6 bg-zinc-300 dark:bg-white/20" />
-        <h2 className="text-[20px] font-semibold text-zinc-900 dark:text-white tracking-tight">{title}</h2>
-        {hint && <p className="text-[11px] text-zinc-400 hidden sm:block">{hint}</p>}
+      <div className="flex items-center gap-3">
+        {Icon && (
+          <div className="rounded-md bg-loga-red/10 p-1.5">
+            <Icon size={12} className="text-loga-red" strokeWidth={2.5} />
+          </div>
+        )}
+        <div className="flex items-baseline gap-3">
+          <span className="text-[10px] uppercase tracking-[0.18em] font-bold text-loga-red">{label}</span>
+          <span className="h-px w-6 bg-loga-red/40" />
+          <h2 className="text-[20px] font-bold text-zinc-900 dark:text-white tracking-tight">{title}</h2>
+          {hint && <p className="text-[11px] text-zinc-500 hidden sm:block">{hint}</p>}
+        </div>
       </div>
       {extra}
     </div>
@@ -813,18 +923,18 @@ function SectionHeader({ label, title, extra, hint }: { label: string; title: st
 function Stat({ sub, value, accent }: { sub: string; value: string; accent?: boolean }) {
   return (
     <div className="text-right">
-      <p className="text-[9px] uppercase tracking-[0.14em] font-semibold text-zinc-400">{sub}</p>
-      <p className={clsx('text-[13px] font-medium tabular-nums', accent ? 'text-loga-red' : 'text-zinc-900 dark:text-white')}>{value}</p>
+      <p className="text-[9px] uppercase tracking-[0.14em] font-bold text-zinc-400">{sub}</p>
+      <p className={clsx('text-[13px] font-bold tabular-nums', accent ? 'text-loga-red' : 'text-zinc-900 dark:text-white')}>{value}</p>
     </div>
   );
 }
 
-function Sort({ label, active, dir, onClick }: { label: string; k?: string; active: boolean; dir: 'asc' | 'desc'; onClick: () => void }) {
+function Sort({ label, active, dir, onClick }: { label: string; active: boolean; dir: 'asc' | 'desc'; onClick: () => void }) {
   return (
     <th className="text-right py-3 px-3">
       <button onClick={onClick} className={clsx(
-        'inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.12em] font-semibold transition-colors',
-        active ? 'text-loga-red' : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white'
+        'inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.12em] font-bold transition-colors',
+        active ? 'text-loga-red' : 'text-zinc-500 hover:text-loga-red'
       )}>
         {label}
         <ChevronDown size={9} strokeWidth={2.5} className={clsx('transition-all', active ? 'opacity-100' : 'opacity-30', active && dir === 'asc' && 'rotate-180')} />
@@ -834,13 +944,13 @@ function Sort({ label, active, dir, onClick }: { label: string; k?: string; acti
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// PRECISION CHART — line + area, sin glows ni filtros
+// PRECISION CHART — más vivo con red brand
 // ═══════════════════════════════════════════════════════════════════════
 function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; maxMes: number; minMes: number; avgMes: number }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const W = 1000;
   const H = 240;
-  const padL = 48;
+  const padL = 64;
   const padR = 12;
   const padT = 12;
   const padB = 28;
@@ -870,29 +980,32 @@ function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; ma
     <div className="relative w-full">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" preserveAspectRatio="none" style={{ minHeight: 200 }}>
         <defs>
-          <linearGradient id="pchart-area" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#FF0000" stopOpacity="0.10" />
+          <linearGradient id="pchart-area-v5" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#FF0000" stopOpacity="0.18" />
             <stop offset="100%" stopColor="#FF0000" stopOpacity="0" />
           </linearGradient>
         </defs>
 
-        {/* Y ticks (3 hairlines) */}
+        {/* Y ticks */}
         {yTicks.map((t, i) => (
           <g key={i}>
             <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="currentColor" strokeWidth="0.5" className="text-zinc-200 dark:text-white/10" />
             <text x={padL - 8} y={t.y + 3} textAnchor="end" className="text-[9px] fill-zinc-400 tabular-nums font-medium">
-              {fmtCompact(t.value)}
+              {fmtInt(t.value)}
             </text>
           </g>
         ))}
 
         {/* Avg line */}
-        <line x1={padL} y1={avgY} x2={W - padR} y2={avgY} stroke="currentColor" strokeWidth="0.5" strokeDasharray="2 3" className="text-zinc-400 dark:text-white/30" />
+        <line x1={padL} y1={avgY} x2={W - padR} y2={avgY} stroke="#FF0000" strokeWidth="0.5" strokeDasharray="3 3" opacity="0.4" />
+        <text x={W - padR - 4} y={avgY - 5} textAnchor="end" className="text-[9px] fill-loga-red font-bold uppercase tracking-wider">
+          Media
+        </text>
 
         {/* X labels */}
         {points.map((p, i) => (
           <text key={i} x={p.x} y={H - 8} textAnchor="middle"
-            className={clsx('text-[10px] tabular-nums', hoverIdx === i ? 'fill-loga-red font-semibold' : 'fill-zinc-400')}>
+            className={clsx('text-[10px] tabular-nums', hoverIdx === i ? 'fill-loga-red font-bold' : 'fill-zinc-500 font-medium')}>
             {p.m.mes_label.split(' ')[0]}
           </text>
         ))}
@@ -900,30 +1013,31 @@ function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; ma
         {/* Área */}
         <motion.path
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.6 }}
-          d={areaPath} fill="url(#pchart-area)"
+          d={areaPath} fill="url(#pchart-area-v5)"
         />
 
         {/* Línea */}
         <motion.path
           initial={{ pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: 1.2, ease: [0.65, 0, 0.35, 1] }}
-          d={linePath} fill="none" stroke="#FF0000" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+          d={linePath} fill="none" stroke="#FF0000" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
         />
 
         {/* Dots */}
         {points.map((p, i) => {
           const isHover = hoverIdx === i;
+          const isAboveAvg = p.v > avgMes;
           return (
             <g key={i}>
               {isHover && (
-                <line x1={p.x} y1={p.y} x2={p.x} y2={H - padB} stroke="#FF0000" strokeWidth="0.5" strokeDasharray="2 2" opacity="0.4" />
+                <line x1={p.x} y1={p.y} x2={p.x} y2={H - padB} stroke="#FF0000" strokeWidth="1" strokeDasharray="2 2" opacity="0.5" />
               )}
               <motion.circle
                 initial={{ scale: 0 }} animate={{ scale: 1 }}
                 transition={{ delay: 1.2 + i * 0.03, duration: 0.2 }}
-                cx={p.x} cy={p.y} r={isHover ? 4 : 2.5}
-                fill="white"
-                stroke="#FF0000" strokeWidth={isHover ? 2 : 1.5}
-                className="transition-all dark:fill-zinc-900"
+                cx={p.x} cy={p.y} r={isHover ? 5 : 3}
+                fill={isAboveAvg ? '#FF0000' : 'white'}
+                stroke="#FF0000" strokeWidth={isHover ? 2.5 : 2}
+                className={clsx('transition-all', !isAboveAvg && 'dark:fill-zinc-900')}
               />
               <rect
                 x={p.x - innerW / data.length / 2}
@@ -940,22 +1054,23 @@ function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; ma
         })}
       </svg>
 
-      {/* Tooltip preciso */}
+      {/* Tooltip */}
       <AnimatePresence>
         {hovered && (
           <motion.div
             initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 4 }}
             transition={{ duration: 0.12 }}
-            className="absolute pointer-events-none bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 px-3 py-2 border border-zinc-900 dark:border-white"
+            className="absolute pointer-events-none bg-loga-red text-white px-3 py-2 rounded-md shadow-xl"
             style={{
               left: `${(hovered.x / W) * 100}%`,
               top: `${(hovered.y / H) * 100}%`,
               transform: 'translate(-50%, calc(-100% - 12px))',
             }}
           >
-            <p className="text-[9px] uppercase tracking-[0.16em] opacity-60 font-semibold">{hovered.m.mes_label}</p>
-            <p className="text-[18px] font-semibold tabular-nums leading-tight">{fmt(hovered.v)} <span className="text-[10px] font-normal opacity-60">EUR</span></p>
-            <p className="text-[10px] tabular-nums opacity-60 mt-0.5">{hovered.m.num_pedidos} pedidos · {hovered.v > avgMes ? '+' : ''}{((hovered.v / avgMes - 1) * 100).toFixed(0)}%</p>
+            <p className="text-[9px] uppercase tracking-[0.16em] opacity-80 font-bold">{hovered.m.mes_label}</p>
+            <p className="text-[18px] font-bold tabular-nums leading-tight">{fmtInt(hovered.v)} <span className="text-[10px] font-normal opacity-80">EUR</span></p>
+            <p className="text-[10px] tabular-nums opacity-90 mt-0.5">{hovered.m.num_pedidos} pedidos · {hovered.v > avgMes ? '+' : ''}{((hovered.v / avgMes - 1) * 100).toFixed(0)}%</p>
+            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-2 h-2 bg-loga-red rotate-45" />
           </motion.div>
         )}
       </AnimatePresence>
