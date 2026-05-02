@@ -1,7 +1,7 @@
 import express from 'express';
 import cors    from 'cors';
 import helmet  from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import compression from 'compression';
 import dotenv  from 'dotenv';
 import path    from 'path';
@@ -158,8 +158,11 @@ const webhookLimiter = rateLimit({
   max: 5,
   message: { error: 'Demasiadas peticiones webhook para este email. Espera 1 min.' },
   keyGenerator: (req) => {
+    // Preferir cliente_email del body. Fallback a IP NORMALIZADA con
+    // ipKeyGenerator (express-rate-limit v8 lo exige para evitar bypass
+    // por usuarios IPv6 distintos del mismo /64 — el helper agrupa /64).
     const email = (req.body?.cliente_email || req.body?.email || '').toString().toLowerCase().trim();
-    return email || req.ip || 'unknown';
+    return email || ipKeyGenerator(req.ip ?? '');
   },
   standardHeaders: true,
   legacyHeaders: false,
