@@ -7,6 +7,7 @@ import fs                    from 'fs';
 import path                  from 'path';
 import { invalidarCacheFinanzas } from '../routes/finanzas.routes';
 import { alertaService }          from '../services/alerta.service';
+import { logger }                 from '../lib/logger';
 
 export const produccionController = {
   async crear(req: Request, res: Response) {
@@ -26,6 +27,7 @@ export const produccionController = {
         fecha_planificada,
         notas,
         operario_id,
+        creado_por_id: (req as any).user?.id,
         cliente,
         cliente_id,
       });
@@ -574,14 +576,54 @@ export const produccionController = {
       const { id } = req.params;
 
       const { rows: [orden] } = await pool.query(
-        `SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre, p.unidad_medida
+        `SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre, p.unidad_medida,
+                u.nombre AS operario_nombre, u.rol AS operario_rol,
+                CASE
+                  WHEN op.fecha_inicio IS NOT NULL AND op.fecha_fin IS NOT NULL
+                  THEN EXTRACT(EPOCH FROM (op.fecha_fin - op.fecha_inicio))::INT
+                  ELSE NULL
+                END AS duracion_segundos,
+                -- Media histórica de duración de esta receta:
+                -- todas las órdenes completadas de la MISMA receta con fecha_inicio
+                -- y fecha_fin válidas y duración > 30s (filtra envasados rápidos / órdenes
+                -- pre-feature que tienen fecha_inicio = fecha_fin = NOW()).
+                (SELECT AVG(EXTRACT(EPOCH FROM (fecha_fin - fecha_inicio)))::INT
+                 FROM ordenes_produccion
+                 WHERE receta_id = op.receta_id
+                   AND estado = 'completada'
+                   AND fecha_inicio IS NOT NULL
+                   AND fecha_fin IS NOT NULL
+                   AND fecha_fin - fecha_inicio > INTERVAL '5 seconds'
+                ) AS media_duracion_receta_segundos,
+                (SELECT COUNT(*)::INT
+                 FROM ordenes_produccion
+                 WHERE receta_id = op.receta_id
+                   AND estado = 'completada'
+                   AND fecha_inicio IS NOT NULL
+                   AND fecha_fin IS NOT NULL
+                   AND fecha_fin - fecha_inicio > INTERVAL '5 seconds'
+                ) AS num_ordenes_media
          FROM ordenes_produccion op
          JOIN recetas r ON r.id = op.receta_id
          JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN usuarios u ON u.id = op.operario_id
          WHERE op.id = $1`,
         [id]
       );
       if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+      // Solo admin ve quién la hizo y cuánto tardó. Operario recibe el resto
+      // del detalle igual pero sin esos campos. Defensa server-side: aunque el
+      // frontend filtre, un operario inspeccionando Network no verá los datos.
+      const userRol = (req as any).user?.rol;
+      if (userRol !== 'admin') {
+        delete (orden as any).operario_id;
+        delete (orden as any).operario_nombre;
+        delete (orden as any).operario_rol;
+        delete (orden as any).duracion_segundos;
+        delete (orden as any).media_duracion_receta_segundos;
+        delete (orden as any).num_ordenes_media;
+      }
 
       // Consumos por materia prima + lote (usa precio_compra del lote si existe, si no precio del producto)
       const { rows: consumos } = await pool.query(
@@ -832,9 +874,31 @@ export const produccionController = {
   // DELETE /api/produccion/:id?modo=revertir|borrar
   // Sin modo o modo=revertir: borrador/confirmada borra directo, completada revierte stock
   // modo=borrar: borra/cancela sin revertir (solo marca cancelada)
+  //
+  // Política de permisos:
+  //   - admin: borra cualquier orden
+  //   - trabajador: solo borra órdenes que él creó (creado_por_id) o ejecutó (operario_id)
   async eliminar(req: Request, res: Response) {
     const { id } = req.params;
     const modo = String(req.query.modo ?? 'revertir');
+    const userId = (req as any).user?.id;
+    const userRol = (req as any).user?.rol;
+
+    // Pre-check de propiedad antes de cualquier operación destructiva.
+    // Si no es admin, verificar que la orden le pertenezca.
+    if (userRol !== 'admin') {
+      const { rows: [own] } = await pool.query<{ creado_por_id: string | null; operario_id: string | null }>(
+        `SELECT creado_por_id, operario_id FROM ordenes_produccion WHERE id = $1`,
+        [id]
+      );
+      if (!own) return res.status(404).json({ error: 'Orden no encontrada' });
+      const esSuya = own.creado_por_id === userId || own.operario_id === userId;
+      if (!esSuya) {
+        return res.status(403).json({
+          error: 'Solo puedes borrar órdenes que tú hayas creado o ejecutado. Pide al administrador que borre las ajenas.',
+        });
+      }
+    }
 
     // Modo borrar: simplemente cancelar sin revertir stock
     if (modo === 'borrar') {
@@ -852,6 +916,13 @@ export const produccionController = {
         } else {
           await pool.query(`UPDATE ordenes_produccion SET estado = 'cancelada' WHERE id = $1`, [id]);
         }
+        invalidarCacheFinanzas(); // [H1.3 audit v3] borrar/cancelar afecta KPIs producción
+        // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta.
+        pool.query(
+          `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+           VALUES ($1, 'ELIMINAR_ORDEN_PRODUCCION', 'ordenes_produccion', $2, $3)`,
+          [(req as any).user?.id ?? null, id, `Orden borrada/cancelada (modo=borrar) sin reversión de stock`]
+        ).catch((e: unknown) => logger.warn('[auditoria ELIMINAR_ORDEN_PRODUCCION]', { err: e instanceof Error ? e.message : e }));
         return res.json({ ok: true, revertido: false });
       } catch (err: unknown) {
         console.error('[produccion.eliminar:borrar]', err);
@@ -1005,6 +1076,13 @@ export const produccionController = {
       }
 
       await client.query('COMMIT');
+      invalidarCacheFinanzas(); // [H1.3 audit v3] revertir afecta coste producción + valor inventario
+      // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta.
+      pool.query(
+        `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+         VALUES ($1, 'REVERTIR_ORDEN_PRODUCCION', 'ordenes_produccion', $2, $3)`,
+        [(req as any).user?.id ?? null, id, `Orden ${orden.numero_orden} revertida — stock_moves de reversión generados`]
+      ).catch((e: unknown) => logger.warn('[auditoria REVERTIR_ORDEN_PRODUCCION]', { err: e instanceof Error ? e.message : e }));
       return res.json({ ok: true, revertido: true, numero_orden: orden.numero_orden });
     } catch (err: unknown) {
       await client.query('ROLLBACK');

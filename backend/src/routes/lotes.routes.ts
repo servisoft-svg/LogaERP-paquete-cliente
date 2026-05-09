@@ -34,6 +34,14 @@ router.get('/', async (req, res) => {
 
     sql += ` ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC LIMIT 500`;
     const { rows } = await pool.query(sql, params);
+    // Defensivo: trabajador no debe ver precio_compra ni en el JSON de Network.
+    // Filtrar server-side evita que un operario inspeccione el navegador y lo lea.
+    const user = (req as any).user as { rol?: string } | undefined;
+    if (user?.rol !== 'admin') {
+      for (const r of rows) {
+        delete r.precio_compra;
+      }
+    }
     res.json(rows);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';
@@ -100,13 +108,11 @@ router.post('/', async (req, res) => {
         precio_compra     ?? null,
       ]
     );
-    // Sincronizar stock del producto = suma de lotes aprobados
-    await pool.query(`
-      UPDATE productos SET stock_actual = (
-        SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes
-        WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-      ) WHERE id = $1
-    `, [producto_id]);
+    // [H2.1 audit v3] Eliminado UPDATE defensivo de stock_actual.
+    // El trigger fn_trg_lotes_stock_actual (migración 025) ya recalcula
+    // productos.stock_actual = SUM(lotes aprobados con stock>0) automáticamente
+    // tras el INSERT/UPDATE/DELETE de lotes. Doble escritura era redundante y
+    // creaba ventana de inconsistencia bajo concurrencia.
 
     // Auto-complete pending supplier order: match by product, mark as completado, calculate lead time
     // Side-effect — un fallo aquí (ej. tabla no migrada) NO debe romper la creación del lote.
@@ -218,12 +224,7 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    // Also sync product stock_actual = sum of lotes
-    await pool.query(`
-      UPDATE productos SET stock_actual = (
-        SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-      ) WHERE id = $1
-    `, [lote.producto_id]);
+    // [H2.1 audit v3] Eliminado UPDATE defensivo: trigger 025 ya recalcula stock_actual.
 
     // Audit
     await pool.query(
@@ -236,6 +237,57 @@ router.put('/:id', async (req, res) => {
     res.json(lote);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// GET /api/lotes/:id/historial-estado
+// Devuelve el historial de cambios de estado del lote desde tabla auditoria,
+// + el revisor/motivo permanente cuando el lote pasó por cuarentena → aprobado.
+// Permite al admin ver: quien lo aprobó, cuándo, y por qué (texto del motivo).
+router.get('/:id/historial-estado', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Datos del lote + revisor (si aplica)
+    const { rows: [lote] } = await pool.query(
+      `SELECT l.id, l.lote_interno, l.estado, l.revisor_id, l.revisado_at, l.motivo_revision,
+              u.nombre AS revisor_nombre, u.rol AS revisor_rol,
+              p.nombre AS producto_nombre, p.codigo AS producto_codigo
+       FROM lotes l
+       JOIN productos p ON p.id = l.producto_id
+       LEFT JOIN usuarios u ON u.id = l.revisor_id
+       WHERE l.id = $1`,
+      [id]
+    );
+    if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });
+
+    // Historial de cambios de estado: tabla auditoria filtrada por accion='CAMBIO_ESTADO_LOTE'
+    // y registro_id = id del lote. Devuelve motivo + usuario + timestamp.
+    const { rows: cambios } = await pool.query(
+      `SELECT a.id, a.accion, a.motivo, a.created_at,
+              u.nombre AS usuario_nombre, u.rol AS usuario_rol
+       FROM auditoria a
+       LEFT JOIN usuarios u ON u.id = a.usuario_id
+       WHERE a.tabla_afectada = 'lotes'
+         AND a.accion IN ('CAMBIO_ESTADO_LOTE', 'ENTRADA_STOCK', 'MODIFICAR_LOTE')
+         AND a.registro_id = $1
+       ORDER BY a.created_at DESC`,
+      [id]
+    );
+
+    return res.json({
+      lote,
+      revisor: lote.revisor_id ? {
+        id: lote.revisor_id,
+        nombre: lote.revisor_nombre,
+        rol: lote.revisor_rol,
+        revisado_at: lote.revisado_at,
+        motivo: lote.motivo_revision,
+      } : null,
+      cambios,
+    });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
 
@@ -277,19 +329,45 @@ router.patch('/:id/estado', async (req, res) => {
       return res.status(422).json({ error: `No se puede cambiar de "${actual.estado}" a "${estado}"` });
     }
 
-    const { rows: [lote] } = await pool.query(
-      `UPDATE lotes SET estado = $1 WHERE id = $2 RETURNING *`,
-      [estado, id]
-    );
+    const userId = (req as any).user?.id ?? null;
+    const userRol = (req as any).user?.rol ?? null;
+    const esAprobacionDeCuarentena = actual.estado === 'cuarentena' && estado === 'aprobado';
+
+    // Aprobación cuarentena → aprobado: SOLO ADMIN puede ejecutarla.
+    // Normativa REACH exige firma de responsable de calidad autorizado.
+    // Un operario aunque escriba un motivo válido no puede aprobar lotes
+    // desviados de QC (riesgo legal + producto fuera de spec a cliente).
+    if (esAprobacionDeCuarentena) {
+      if (userRol !== 'admin') {
+        return res.status(403).json({
+          error: 'Solo un administrador (responsable de calidad) puede aprobar un lote en cuarentena. Esta restricción cumple normativa REACH.',
+        });
+      }
+      const motivoTrim = String(motivo).trim();
+      if (motivoTrim.length < 10) {
+        return res.status(400).json({
+          error: 'Aprobar un lote en cuarentena requiere motivo de al menos 10 caracteres explicando por qué se aprueba pese a la desviación QC.',
+        });
+      }
+      if (!userId) {
+        return res.status(401).json({ error: 'Sesión no identificada — no se puede registrar revisor.' });
+      }
+    }
+
+    const { rows: [lote] } = esAprobacionDeCuarentena
+      ? await pool.query(
+          `UPDATE lotes SET estado = $1,
+             revisor_id = $3, revisado_at = NOW(), motivo_revision = $4
+           WHERE id = $2 RETURNING *`,
+          [estado, id, userId, String(motivo).trim()]
+        )
+      : await pool.query(
+          `UPDATE lotes SET estado = $1 WHERE id = $2 RETURNING *`,
+          [estado, id]
+        );
     if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });
 
-    // Sincronizar stock del producto
-    await pool.query(`
-      UPDATE productos SET stock_actual = (
-        SELECT COALESCE(SUM(cantidad_actual), 0) FROM lotes
-        WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-      ) WHERE id = $1
-    `, [lote.producto_id]);
+    // [H2.1 audit v3] Eliminado UPDATE defensivo: trigger 025 ya recalcula stock_actual al cambiar estado del lote.
 
     // Stock move for estado change (aprobado = stock entry, rechazado = stock exit)
     const cantLote = parseFloat(lote.cantidad_actual);

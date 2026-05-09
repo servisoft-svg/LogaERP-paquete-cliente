@@ -25,6 +25,7 @@ import { pool }          from './db/pool';
 import { queuesHealthy } from './queues/index';
 import { logger }        from './lib/logger';
 import { automatizacionesService } from './services/automatizaciones.service';
+import { cronHeartbeat } from './services/cron-heartbeat.service';
 import automatizacionesRoutes from './routes/automatizaciones.routes';
 import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
 
@@ -119,6 +120,103 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+// Health check de la BD: verifica triggers críticos + invariantes.
+// [H4.2 audit v3] Detecta drift silencioso tras restore mal aplicado, migración
+// fallida o trigger desactivado manualmente. Devuelve 503 si algo no cuadra.
+app.get('/api/health/db', authMiddleware, adminOnly, async (_req, res) => {
+  try {
+    // 1. Verifica que los triggers críticos están activos.
+    // NOTA: trg_alerta_stock fue sustituido por alertaService.checkStockMinimo()
+    // en código (sistema más fiable, no depende de NOTIFY+LISTEN). Lo retiramos
+    // de la lista de "críticos". Si necesitas restaurarlo, ver schema.sql.
+    const TRIGGERS_CRITICOS = [
+      'trg_lotes_stock_actual',  // 025 — sincroniza productos.stock_actual
+      'trg_lotes_cmp',            // 024 — sincroniza productos.coste_medio_actual
+      'trg_numero_orden',         // schema — correlativo OP
+      'trg_numero_pedido',        // schema — correlativo PED
+      'trg_stock_moves_immutable', // 015 — bloquea UPDATE/DELETE en stock_moves (legal trazabilidad)
+    ];
+    const { rows: triggers } = await pool.query<{ trigger_name: string }>(
+      `SELECT trigger_name FROM information_schema.triggers
+       WHERE trigger_schema = 'public' AND trigger_name = ANY($1::text[])`,
+      [TRIGGERS_CRITICOS]
+    );
+    const triggersActivos = new Set(triggers.map(t => t.trigger_name));
+    const triggersFaltantes = TRIGGERS_CRITICOS.filter(t => !triggersActivos.has(t));
+
+    // 2. Invariante: productos.stock_actual == SUM(lotes aprobados con stock>0)
+    // Comprobado sobre TODOS los productos activos (rápido, índice por producto_id)
+    const { rows: drift } = await pool.query<{ id: string; codigo: string; nombre: string; stock_actual: string; suma_lotes: string }>(
+      `SELECT p.id, p.codigo, p.nombre, p.stock_actual,
+              COALESCE((SELECT SUM(cantidad_actual) FROM lotes
+                        WHERE producto_id = p.id AND estado = 'aprobado' AND cantidad_actual > 0), 0) AS suma_lotes
+       FROM productos p
+       WHERE p.activo = TRUE
+         AND ABS(p.stock_actual - COALESCE((SELECT SUM(cantidad_actual) FROM lotes
+                                            WHERE producto_id = p.id AND estado = 'aprobado' AND cantidad_actual > 0), 0)) > 0.001`
+    );
+
+    // 3. Verifica tablas críticas existen
+    const TABLAS_CRITICAS = [
+      'productos', 'lotes', 'stock_moves', 'pedidos', 'ordenes_produccion',
+      'sesiones_revocadas', 'cron_heartbeat', 'auditoria',
+    ];
+    // Acepta r (regular table) y p (partitioned table). stock_moves es 'p'
+    // por la migración 004 (particiones por año).
+    const { rows: tablas } = await pool.query<{ relname: string }>(
+      `SELECT relname FROM pg_class WHERE relkind IN ('r','p') AND relname = ANY($1::text[])`,
+      [TABLAS_CRITICAS]
+    );
+    const tablasFaltantes = TABLAS_CRITICAS.filter(t => !tablas.find(r => r.relname === t));
+
+    const ok = triggersFaltantes.length === 0 && drift.length === 0 && tablasFaltantes.length === 0;
+    res.status(ok ? 200 : 503).json({
+      status: ok ? 'ok' : 'degraded',
+      triggers: {
+        esperados: TRIGGERS_CRITICOS,
+        activos: Array.from(triggersActivos),
+        faltantes: triggersFaltantes,
+      },
+      tablas: {
+        esperadas: TABLAS_CRITICAS,
+        faltantes: tablasFaltantes,
+      },
+      stock_drift: {
+        productos_descuadrados: drift.length,
+        muestra: drift.slice(0, 10).map(d => ({
+          codigo: d.codigo,
+          nombre: d.nombre,
+          stock_actual: parseFloat(d.stock_actual),
+          suma_lotes: parseFloat(d.suma_lotes),
+          delta: parseFloat(d.stock_actual) - parseFloat(d.suma_lotes),
+        })),
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: 'error',
+      message: err instanceof Error ? err.message : 'Error consultando salud BD',
+    });
+  }
+});
+
+// Health check de los crons internos. Frontend pollea para detectar
+// si algún cron lleva más tiempo que su umbral sin ejecutar (caído).
+app.get('/api/health/cron', authMiddleware, async (_req, res) => {
+  try {
+    const estado = await cronHeartbeat.getEstado();
+    const algunCaido = estado.some(c => c.caido);
+    res.status(algunCaido ? 503 : 200).json({
+      status: algunCaido ? 'degraded' : 'ok',
+      crons: estado,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -187,7 +285,7 @@ app.use('/api/clientes',      authMiddleware, clientesRoutes);
 app.use('/api/pedidos',       authMiddleware, pedidosRoutes);
 app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
-app.use('/api/automatizaciones', authMiddleware, automatizacionesRoutes);
+app.use('/api/automatizaciones', authMiddleware, adminOnly, automatizacionesRoutes);
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });
@@ -235,8 +333,14 @@ startup();
 const RETRY_INTERVAL_MS = 5 * 60 * 1000;
 const retryTimer = setInterval(() => {
   automatizacionesService.procesarReintentosEmail()
-    .then(n => { if (n > 0) logger.info(`[auto.retry] ${n} reintentos procesados`); })
-    .catch(err => logger.error('[auto.retry] error', { err }));
+    .then(n => {
+      if (n > 0) logger.info(`[auto.retry] ${n} reintentos procesados`);
+      return cronHeartbeat.tick('retry_email_proveedor', 'ok');
+    })
+    .catch(err => {
+      logger.error('[auto.retry] error', { err });
+      return cronHeartbeat.tick('retry_email_proveedor', 'error', err);
+    });
 }, RETRY_INTERVAL_MS);
 retryTimer.unref();
 
@@ -244,7 +348,11 @@ retryTimer.unref();
 const BACKUP_INTERVAL_MS = 60 * 1000;
 const backupTimer = setInterval(() => {
   automatizacionesService.tickBackupNocturno()
-    .catch(err => logger.error('[auto.backup] error', { err }));
+    .then(() => cronHeartbeat.tick('backup_nocturno_tick', 'ok'))
+    .catch(err => {
+      logger.error('[auto.backup] error', { err });
+      return cronHeartbeat.tick('backup_nocturno_tick', 'error', err);
+    });
 }, BACKUP_INTERVAL_MS);
 backupTimer.unref();
 
@@ -253,7 +361,11 @@ backupTimer.unref();
 const SWEEP_INTERVAL_MS = 90 * 1000;
 const sweepTimer = setInterval(() => {
   automatizacionesService.sweepPedidos()
-    .catch(err => logger.error('[auto.sweep] error', { err }));
+    .then(() => cronHeartbeat.tick('sweep_pedidos', 'ok'))
+    .catch(err => {
+      logger.error('[auto.sweep] error', { err });
+      return cronHeartbeat.tick('sweep_pedidos', 'error', err);
+    });
 }, SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
@@ -262,12 +374,17 @@ sweepTimer.unref();
 const STOCK_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const stockSweepTimer = setInterval(() => {
   automatizacionesService.sweepStockReglas()
-    .catch(err => logger.error('[auto.stock-sweep] error', { err }));
+    .then(() => cronHeartbeat.tick('sweep_stock_reglas', 'ok'))
+    .catch(err => {
+      logger.error('[auto.stock-sweep] error', { err });
+      return cronHeartbeat.tick('sweep_stock_reglas', 'error', err);
+    });
 }, STOCK_SWEEP_INTERVAL_MS);
 stockSweepTimer.unref();
 // Disparar una primera vez al arrancar (10s después para que la app esté lista)
 setTimeout(() => {
   automatizacionesService.sweepStockReglas()
+    .then(() => cronHeartbeat.tick('sweep_stock_reglas', 'ok'))
     .catch(err => logger.error('[auto.stock-sweep:initial] error', { err }));
 }, 10_000);
 

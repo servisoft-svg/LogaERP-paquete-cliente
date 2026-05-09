@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { pool } from '../db/pool';
-import { signToken, verifyToken, authMiddleware, adminOnly } from '../middleware/auth';
+import { signToken, verifyToken, authMiddleware, adminOnly, invalidateRevocadosCache } from '../middleware/auth';
 
 const router = Router();
 
@@ -180,7 +180,7 @@ router.post('/refresh', async (req, res) => {
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET ?? '';
     const JWT_VERIFY_OPTS = { algorithms: ['HS256' as const] };
-    let decoded: { id: string; rol: string; iat?: number; exp?: number };
+    let decoded: { id: string; rol: string; jti?: string; iat?: number; exp?: number };
     try {
       decoded = jwt.verify(auth, JWT_SECRET, JWT_VERIFY_OPTS) as typeof decoded;
     } catch (err: unknown) {
@@ -203,9 +203,54 @@ router.post('/refresh', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
 
     const token = signToken({ id: user.id, rol: user.rol });
+
+    // [H2.2 audit v3] Revocar el token viejo al emitir uno nuevo.
+    // Sin esto, el token previo sigue válido hasta su TTL natural (8h) → si
+    // alguien copió el token antes del refresh, tiene hasta 4h extras de uso.
+    // Coste: 1 INSERT por refresh (cada 4h por usuario). Cierra la ventana.
+    if (decoded.jti && decoded.exp) {
+      try {
+        await pool.query(
+          `INSERT INTO sesiones_revocadas (jti, usuario_id, expira_at, motivo)
+           VALUES ($1, $2, $3, 'refresh_rotacion')
+           ON CONFLICT (jti) DO NOTHING`,
+          [decoded.jti, user.id, new Date(decoded.exp * 1000)]
+        );
+        invalidateRevocadosCache();
+      } catch (e) {
+        // Fail-soft: si falla el INSERT (BD intermitente), seguimos emitiendo
+        // el token nuevo. El viejo expirará por TTL como mucho.
+        console.warn('[auth.refresh] no se pudo revocar jti viejo:', e instanceof Error ? e.message : e);
+      }
+    }
+
     return res.json({ token, usuario: user });
   } catch {
     return res.status(401).json({ error: 'Token invalido' });
+  }
+});
+
+// POST /api/auth/logout — revoca el jti actual server-side.
+// Tras logout, el token deja de valer aunque no haya expirado por TTL.
+router.post('/logout', authMiddleware, async (req, res) => {
+  try {
+    const user = (req as any).user as { id: string; jti?: string; exp?: number };
+    if (!user?.jti || !user.exp) {
+      // Token sistema o sin jti (tokens viejos pre-migración): respuesta OK
+      // para que el frontend siga su flujo, pero no se inserta nada.
+      return res.json({ ok: true });
+    }
+    const expiraAt = new Date(user.exp * 1000);
+    await pool.query(
+      `INSERT INTO sesiones_revocadas (jti, usuario_id, expira_at, motivo)
+       VALUES ($1, $2, $3, 'logout_usuario')
+       ON CONFLICT (jti) DO NOTHING`,
+      [user.jti, user.id, expiraAt]
+    );
+    invalidateRevocadosCache();
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
 

@@ -24,12 +24,36 @@ router.get('/resumen', async (req, res) => {
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       return res.json(cached.data);
     }
-    // 1. Rentabilidad — cálculo recursivo real:
-    //    Envasado: receta envasado (cola granel × peso + envase + etiqueta)
-    //    Cola granel: su coste viene de receta fabricación (MP × CMP de lotes)
-    //    MP: CMP = coste medio ponderado real de los lotes en stock
+    // 1. Rentabilidad — cálculo "cheapest-first":
+    //    Para cada ingrediente, asignar la cantidad necesaria empezando por
+    //    el lote APROBADO con precio_compra más bajo, y subir al siguiente
+    //    cuando ese lote se agote. Si no hay stock suficiente, completa con
+    //    el precio ficha (precio_unitario) del producto.
+    //
+    //    Ejemplo: receta necesita 10 kg de Persulfato.
+    //      Lote A: 5 kg a 3,66 €/kg
+    //      Lote B: 50 kg a 3,82 €/kg
+    //      → coste = 5 × 3,66 + 5 × 3,82 = 37,40 € → 3,74 €/kg efectivo
+    //
+    //    Esto sustituye el cálculo previo basado en CMP. Refleja el coste
+    //    REAL al que la siguiente fabricación arrancará.
 
-    // Pre-load ALL CMPs in one query (avoid N+1)
+    // Pre-load lotes aprobados con stock>0 ordenados por precio ASC.
+    // Una sola query → agrupados en memoria por producto.
+    const { rows: lotesAprobados } = await pool.query<{ producto_id: string; cantidad_actual: string; precio_compra: string | null }>(`
+      SELECT producto_id, cantidad_actual, precio_compra
+      FROM lotes
+      WHERE estado = 'aprobado' AND cantidad_actual > 0
+      ORDER BY producto_id, precio_compra ASC NULLS LAST, fecha_entrada ASC
+    `);
+    const lotesPorProducto: Record<string, Array<{ cantidad: number; precio: number }>> = {};
+    for (const l of lotesAprobados) {
+      const arr = lotesPorProducto[l.producto_id] ?? (lotesPorProducto[l.producto_id] = []);
+      const precio = l.precio_compra !== null ? parseFloat(l.precio_compra) : 0;
+      arr.push({ cantidad: parseFloat(l.cantidad_actual), precio });
+    }
+
+    // Pre-load CMP + precio ficha (fallback cuando no hay lotes suficientes).
     const { rows: allCmps } = await pool.query(`
       SELECT p.id,
         COALESCE(NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS cmp
@@ -41,15 +65,6 @@ router.get('/resumen', async (req, res) => {
       return cmpMap[productoId] ?? 0;
     }
 
-    // Coste por producto — Rentabilidad muestra COSTE ACTUAL REAL:
-    //   precio_unitario almacenado (auto-mantenido por trigger 026 desde
-    //   CMP de lotes existentes). Misma cifra que se ve en pantalla
-    //   Productos. La sección "Variación de margen" usa coste futuro
-    //   proyectado (fn_calcular_coste_receta_futuro de migración 028).
-    interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
-    interface CosteResult { coste_ud: number; coste_batch: number; rendimiento: number; desglose: DesgloseItem[] }
-    const costeCache: Record<string, CosteResult> = {};
-
     const precioMap: Record<string, number> = {};
     for (const r of allCmps) precioMap[r.id] = parseFloat(r.cmp ?? '0');
     const { rows: prodPrecios } = await pool.query(
@@ -57,13 +72,37 @@ router.get('/resumen', async (req, res) => {
     );
     for (const r of prodPrecios) precioMap[r.id] = parseFloat(r.precio ?? '0');
 
+    /**
+     * Asigna `cantNecesaria` del producto consumiendo lotes aprobados de más
+     * barato a más caro. Si no hay stock suficiente, completa el resto al
+     * precio ficha (fallback) — así el desglose nunca queda subvalorado.
+     * Devuelve { coste_total, precio_efectivo_por_unidad }.
+     */
+    function costeCheapestFirst(productoId: string, cantNecesaria: number): { coste: number; precioEfectivo: number } {
+      if (cantNecesaria <= 0) return { coste: 0, precioEfectivo: 0 };
+      const fallback = precioMap[productoId] ?? getCMP(productoId);
+      const lotes = lotesPorProducto[productoId] ?? [];
+      let restante = cantNecesaria;
+      let coste = 0;
+      for (const lote of lotes) {
+        if (restante <= 0) break;
+        const tomar = Math.min(lote.cantidad, restante);
+        // Si lote no tiene precio_compra (raro, lotes legacy), cae al fallback.
+        coste += tomar * (lote.precio > 0 ? lote.precio : fallback);
+        restante -= tomar;
+      }
+      if (restante > 0) coste += restante * fallback;
+      return { coste, precioEfectivo: coste / cantNecesaria };
+    }
+
+    interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
+    interface CosteResult { coste_ud: number; coste_batch: number; rendimiento: number; desglose: DesgloseItem[] }
+    const costeCache: Record<string, CosteResult> = {};
+
     async function calcularCosteProducto(productoId: string): Promise<CosteResult> {
       if (costeCache[productoId]) return costeCache[productoId];
 
-      // 1. Coste actual real: productos.precio_unitario (mantenido por trigger 026)
-      const costeAutoritativo = precioMap[productoId] ?? getCMP(productoId);
-
-      // 2. Buscar receta activa para construir el desglose visual (si tiene)
+      // Buscar receta activa
       const { rows: [prodInfo] } = await pool.query<{ tipo: string }>(
         `SELECT tipo::text AS tipo FROM productos WHERE id = $1`, [productoId]
       );
@@ -82,16 +121,18 @@ router.get('/resumen', async (req, res) => {
         tipoEsperado ? [productoId, tipoEsperado] : [productoId]
       );
 
-      // Sin receta: solo coste autoritativo, sin desglose
+      // Sin receta: usa precio ficha o CMP como coste (no hay desglose).
       if (!receta) {
-        const r: CosteResult = { coste_ud: costeAutoritativo, coste_batch: costeAutoritativo, rendimiento: 1, desglose: [] };
+        const c = precioMap[productoId] ?? getCMP(productoId);
+        const r: CosteResult = { coste_ud: c, coste_batch: c, rendimiento: 1, desglose: [] };
         costeCache[productoId] = r;
         return r;
       }
 
       const rendimiento = parseFloat(receta.rendimiento);
 
-      // 3. Construir desglose iterando ingredientes (solo visual)
+      // Construir desglose iterando ingredientes — coste por linea calculado
+      // por "cheapest-first" sobre los lotes aprobados disponibles.
       const { rows: ingredientes } = await pool.query(
         `SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id, p.nombre, p.tipo, p.unidad_medida
          FROM ingredientes_receta ir
@@ -100,24 +141,27 @@ router.get('/resumen', async (req, res) => {
       );
 
       const desglose: DesgloseItem[] = [];
+      let costeBatch = 0;
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
-        // Precio actual del ingrediente: precio_unitario almacenado o CMP
-        const precioUd = precioMap[ing.materia_prima_id] ?? getCMP(ing.materia_prima_id);
-        const costeLinea = cantReal * precioUd;
+        const { coste, precioEfectivo } = costeCheapestFirst(ing.materia_prima_id, cantReal);
+        costeBatch += coste;
         desglose.push({
           nombre: ing.nombre,
           cantidad: Math.round(cantReal * 10000) / 10000,
           unidad: ing.unidad_medida,
-          precio_ud: Math.round(precioUd * 10000) / 10000,
-          coste_linea: Math.round(costeLinea * 10000) / 10000,
+          // precio_ud mostrado = precio efectivo ponderado de los lotes consumidos.
+          precio_ud: Math.round(precioEfectivo * 10000) / 10000,
+          coste_linea: Math.round(coste * 10000) / 10000,
         });
       }
 
-      // coste_batch = coste_ud actual × rendimiento
-      const costeBatch = costeAutoritativo * rendimiento;
+      // coste_ud autoritativo = suma del desglose / rendimiento (NO el precio
+      // ficha del producto). Refleja el coste real de fabricar 1 unidad ahora
+      // mismo con los lotes que tienes en almacén.
+      const costeUd = rendimiento > 0 ? costeBatch / rendimiento : costeBatch;
       const r: CosteResult = {
-        coste_ud: Math.round(costeAutoritativo * 10000) / 10000,
+        coste_ud: Math.round(costeUd * 10000) / 10000,
         coste_batch: Math.round(costeBatch * 10000) / 10000,
         rendimiento,
         desglose,
@@ -472,13 +516,41 @@ router.get('/historial-precios', async (req, res) => {
 router.get('/impacto-costes', async (_req, res) => {
   try {
     const { rows: recetas } = await pool.query(`
-      SELECT r.id, r.nombre AS receta_nombre, r.rendimiento,
+      SELECT r.id, r.nombre AS receta_nombre, r.rendimiento, r.tipo_receta,
              pt.id AS producto_id, pt.nombre AS producto_nombre, pt.codigo AS producto_codigo,
-             pt.precio_venta, pt.unidad_medida
+             pt.tipo AS producto_tipo, pt.precio_venta, pt.unidad_medida
       FROM recetas r
       JOIN productos pt ON pt.id = r.producto_id
       WHERE r.activa = TRUE
     `);
+
+    // Precarga: por cada producto, MIN y MAX precio_compra de lotes aprobados
+    // con stock>0. Una sola query agregada para evitar N consultas en el bucle.
+    //   - precio_min  → lote más barato (es lo que consumes primero, cheapest-first)
+    //   - precio_max  → lote más caro disponible (lo que consumirás cuando los baratos
+    //                   se agoten, mientras sigan disponibles los actuales)
+    const { rows: stockPrices } = await pool.query<{
+      producto_id: string; precio_min: string | null; precio_max: string | null;
+    }>(`
+      SELECT producto_id,
+             MIN(precio_compra) AS precio_min,
+             MAX(precio_compra) AS precio_max
+      FROM lotes
+      WHERE estado = 'aprobado'
+        AND cantidad_actual > 0
+        AND precio_compra IS NOT NULL
+        AND precio_compra > 0
+      GROUP BY producto_id
+    `);
+    const stockPriceMap = new Map<string, { min: number; max: number }>();
+    for (const r of stockPrices) {
+      if (r.precio_min !== null && r.precio_max !== null) {
+        stockPriceMap.set(r.producto_id, {
+          min: parseFloat(r.precio_min),
+          max: parseFloat(r.precio_max),
+        });
+      }
+    }
 
     const impactoRecetas = [];
     for (const receta of recetas) {
@@ -512,8 +584,20 @@ router.get('/impacto-costes', async (_req, res) => {
 
       // Coste anterior: mismo cálculo recursivo pero sustituyendo precio de las MP que cambiaron
       // por su precio_anterior. Para fabricados anidados usamos también su futuro (aproximación).
+      // Además incluimos precio_stock_min/max (lote barato/caro actualmente en almacén).
       let costeAnteriorBatch = 0;
-      const detalleMP: { nombre: string; cantidad: number; precio_anterior: number | null; precio_actual: number; diff: number }[] = [];
+      let costeStockMinBatch = 0;
+      let costeStockMaxBatch = 0;
+      const detalleMP: {
+        nombre: string;
+        cantidad: number;
+        precio_anterior: number | null;
+        precio_actual: number;       // ficha / coste futuro recursivo
+        precio_stock_min: number;    // lote más barato (o ficha si sin stock)
+        precio_stock_max: number;    // lote más caro (o ficha si sin stock)
+        stock_source: 'lots' | 'recursive' | 'ficha';
+        diff: number;
+      }[] = [];
 
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
@@ -529,11 +613,82 @@ router.get('/impacto-costes', async (_req, res) => {
         }
         const pAnterior = ing.precio_anterior ? parseFloat(ing.precio_anterior) : pActual;
         costeAnteriorBatch += cantReal * pAnterior;
+
+        // Stock min/max del ingrediente.
+        //   1. Si el ingrediente tiene lotes propios en stock con precio_compra → usar MIN/MAX.
+        //      (Funciona tanto para MP como para granel/envasado producidos in-house.)
+        //   2. Si es intermedio sin lotes en stock → calcular recursivamente min/max
+        //      a partir de sus propias materias primas (caso "Cola Blanca Autoadhesiva
+        //      sin stock pero VAM tiene 2,20 - 3,20").
+        //   3. Fallback final: pActual (precio ficha) en ambos.
+        const stockP = stockPriceMap.get(ing.materia_prima_id);
+        let pStockMin: number;
+        let pStockMax: number;
+        let stockSource: 'lots' | 'recursive' | 'ficha';
+
+        if (stockP) {
+          pStockMin = stockP.min;
+          pStockMax = stockP.max;
+          stockSource = 'lots';
+        } else if (esIntermedio) {
+          // Recursivo: calcular el coste min/max del granel a partir de los precios
+          // de SUS materias primas (un nivel de profundidad — suficiente para granel→envasado).
+          const { rows: subIngs } = await pool.query<{
+            cantidad: string; porcentaje_merma: string; materia_prima_id: string;
+            precio_actual: string;
+          }>(
+            `SELECT ir.cantidad, ir.porcentaje_merma, ir.materia_prima_id,
+                    mp.precio_unitario AS precio_actual
+             FROM ingredientes_receta ir
+             JOIN productos mp ON mp.id = ir.materia_prima_id
+             WHERE ir.receta_id = (
+               SELECT id FROM recetas
+               WHERE producto_id = $1 AND activa = TRUE
+               ORDER BY version DESC LIMIT 1
+             )`,
+            [ing.materia_prima_id]
+          );
+          const { rows: [recetaSub] } = await pool.query<{ rendimiento: string }>(
+            `SELECT rendimiento FROM recetas WHERE producto_id = $1 AND activa = TRUE
+             ORDER BY version DESC LIMIT 1`,
+            [ing.materia_prima_id]
+          );
+          if (subIngs.length > 0 && recetaSub) {
+            let costeMinSub = 0;
+            let costeMaxSub = 0;
+            for (const si of subIngs) {
+              const cantSub = parseFloat(si.cantidad) * (1 + parseFloat(si.porcentaje_merma) / 100);
+              const subStock = stockPriceMap.get(si.materia_prima_id);
+              const sMin = subStock ? subStock.min : parseFloat(si.precio_actual ?? '0');
+              const sMax = subStock ? subStock.max : parseFloat(si.precio_actual ?? '0');
+              costeMinSub += cantSub * sMin;
+              costeMaxSub += cantSub * sMax;
+            }
+            const rendSub = parseFloat(recetaSub.rendimiento);
+            pStockMin = rendSub > 0 ? costeMinSub / rendSub : pActual;
+            pStockMax = rendSub > 0 ? costeMaxSub / rendSub : pActual;
+            stockSource = 'recursive';
+          } else {
+            pStockMin = pActual;
+            pStockMax = pActual;
+            stockSource = 'ficha';
+          }
+        } else {
+          pStockMin = pActual;
+          pStockMax = pActual;
+          stockSource = 'ficha';
+        }
+        costeStockMinBatch += cantReal * pStockMin;
+        costeStockMaxBatch += cantReal * pStockMax;
+
         detalleMP.push({
           nombre: ing.mp_nombre,
           cantidad: cantReal,
           precio_anterior: ing.precio_anterior ? pAnterior : null,
           precio_actual: pActual,
+          precio_stock_min: pStockMin,
+          precio_stock_max: pStockMax,
+          stock_source: stockSource,
           diff: (pActual - pAnterior) * cantReal,
         });
       }
@@ -559,22 +714,43 @@ router.get('/impacto-costes', async (_req, res) => {
       else if (!costeSubio && diffMargen > 0) salud = 'Costes estables o reducidos. Margen mejorado.';
       else                                    salud = 'Sin variacion significativa.';
 
+      // Coste por batch = coste/unidad × rendimiento. Misma lógica, solo agrego dato derivado.
+      const costeBatchActual = costePorKgActual * rendimiento;
+      // costeAnteriorBatch ya está calculado arriba (acumulador del bucle ingredientes).
+      const costeStockMinPorUd = rendimiento > 0 ? costeStockMinBatch / rendimiento : 0;
+      const costeStockMaxPorUd = rendimiento > 0 ? costeStockMaxBatch / rendimiento : 0;
+
       impactoRecetas.push({
         receta_nombre: receta.receta_nombre,
         producto_nombre: receta.producto_nombre,
         producto_codigo: receta.producto_codigo,
+        producto_tipo: receta.producto_tipo,        // 'producto_fabricado' | 'producto_envasado'
+        tipo_receta: receta.tipo_receta,            // 'fabricacion' | 'envasado'
         unidad_medida: receta.unidad_medida,
+        rendimiento,
         pvp_anterior: Math.round(pvpAnterior * 100) / 100,
         pvp_actual: Math.round(pvpActual * 100) / 100,
         precio_venta: pvpActual,
         coste_anterior: Math.round(costePorKgAnterior * 10000) / 10000,
         coste_actual: Math.round(costePorKgActual * 10000) / 10000,
+        coste_batch_anterior: Math.round(costeAnteriorBatch * 100) / 100,
+        coste_batch_actual: Math.round(costeBatchActual * 100) / 100,
+        // Coste con stock real actual (mín = barato, máx = caro):
+        coste_stock_min: Math.round(costeStockMinPorUd * 10000) / 10000,
+        coste_stock_max: Math.round(costeStockMaxPorUd * 10000) / 10000,
+        coste_stock_min_batch: Math.round(costeStockMinBatch * 100) / 100,
+        coste_stock_max_batch: Math.round(costeStockMaxBatch * 100) / 100,
         margen_anterior: Math.round(margenAnterior * 10) / 10,
         margen_actual: Math.round(margenActual * 10) / 10,
         diff_coste: Math.round((costePorKgActual - costePorKgAnterior) * 10000) / 10000,
         diff_margen: Math.round(diffMargen * 10) / 10,
         salud,
-        detalle_mp: detalleMP.filter(d => d.precio_anterior !== null),
+        // Devolvemos TODOS los ingredientes (no solo los que cambiaron). Para
+        // productos nuevos sin historial, el desglose sigue siendo útil:
+        // muestra coste de cola + envase + materiales con sus precios actuales.
+        // Frontend distingue: precio_anterior=null → "sin histórico", solo muestra
+        // precio actual y coste línea.
+        detalle_mp: detalleMP,
       });
     }
 
@@ -793,7 +969,10 @@ router.get('/predicciones', async (_req, res) => {
 });
 
 // ── INFORME PLÁSTICO (Ley 7/2022) ──────────────────────────
-// Includes weight calculation and 0.45 EUR/kg plastic tax
+// Cubre TODOS los productos tipo 'material_embalaje' con consumo en el periodo,
+// independientemente de si tienen peso_plastico configurado. Los que no lo tengan
+// aparecen marcados como "PESO NO CONFIGURADO" para que el admin sepa qué falta
+// declarar (anti-falsa-omisión Hacienda).
 router.get('/informe-plastico', async (req, res) => {
   try {
     const desde = req.query.desde as string || new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
@@ -803,7 +982,8 @@ router.get('/informe-plastico', async (req, res) => {
       SELECT
         p.codigo,
         p.nombre,
-        COALESCE(p.peso_plastico_kg, 0) AS peso_plastico_ud,
+        p.peso_plastico_kg,
+        p.unidades_por_envase,
         COALESCE(p.precio_unitario, 0) AS precio_ud,
         SUM(ABS(sm.cantidad::NUMERIC)) AS unidades_consumidas,
         COUNT(DISTINCT sm.orden_id) AS num_ordenes,
@@ -815,37 +995,69 @@ router.get('/informe-plastico', async (req, res) => {
         AND sm.tipo = 'produccion_consumo'
         AND sm.created_at >= $1::DATE
         AND sm.created_at <= ($2::DATE + INTERVAL '1 day')
-      GROUP BY p.id, p.codigo, p.nombre, p.peso_plastico_kg, p.precio_unitario
+      GROUP BY p.id, p.codigo, p.nombre, p.peso_plastico_kg, p.unidades_por_envase, p.precio_unitario
       ORDER BY unidades_consumidas DESC
     `, [desde, hasta]);
 
+    // Multiplicador caja: si un envase tiene unidades_por_envase > 1 (ej. caja
+    // de 40 botes), las unidades plásticas reales son consumo × unidades_por_envase.
+    // Para envases sueltos (bidón, garrafa) el multiplicador es 1.
+    const calcMultBote = (r: any): number => {
+      const upe = r.unidades_por_envase;
+      return upe !== null && upe !== undefined && Number(upe) > 0 ? Number(upe) : 1;
+    };
+
     const TASA_PLASTICO = 0.45; // EUR/kg (tasa vigente Ley 7/2022)
-    const totalUds = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas), 0);
-    const totalKgPlastico = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas) * parseFloat(r.peso_plastico_ud), 0);
+    // Total de botes plásticos individuales (ya expandido por unidades_por_envase).
+    const totalBotes = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas) * calcMultBote(r), 0);
+    const totalEnvases = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas), 0);
+    const totalKgPlastico = rows.reduce(
+      (s, r) => s + parseFloat(r.unidades_consumidas) * calcMultBote(r) * (r.peso_plastico_kg !== null && r.peso_plastico_kg !== undefined ? parseFloat(r.peso_plastico_kg) : 0),
+      0,
+    );
     const totalCoste = rows.reduce((s, r) => s + parseFloat(r.unidades_consumidas) * parseFloat(r.precio_ud), 0);
     const impuestoPlastico = totalKgPlastico * TASA_PLASTICO;
 
+    // Materiales sin peso configurado → riesgo declaración incompleta.
+    const sinPesoConfigurado = rows
+      .filter(r => r.peso_plastico_kg === null || r.peso_plastico_kg === undefined)
+      .map(r => `${r.codigo} (${r.nombre})`);
+
     const BOM = '\uFEFF';
     const sep = ';';
-    const headers = ['Codigo', 'Material', 'Peso plastico/ud (kg)', 'Unidades consumidas', 'Kg plastico total', 'Coste material (EUR)', 'Num ordenes', 'Primera fecha', 'Ultima fecha'];
+    const headers = ['Codigo', 'Material', 'Botes/uds por envase', 'Peso plastico/bote (kg)', 'Envases consumidos', 'Botes plasticos totales', 'Kg plastico total', 'Coste material (EUR)', 'Num ordenes', 'Primera fecha', 'Ultima fecha'];
     const lines = rows.map(r => {
-      const uds = parseFloat(r.unidades_consumidas);
-      const pesoUd = parseFloat(r.peso_plastico_ud);
+      const envases = parseFloat(r.unidades_consumidas);
+      const mult = calcMultBote(r);
+      const botesTotal = envases * mult;
+      const tienePeso = r.peso_plastico_kg !== null && r.peso_plastico_kg !== undefined;
+      const pesoBote = tienePeso ? parseFloat(r.peso_plastico_kg) : 0;
+      const pesoLabel = tienePeso ? pesoBote.toFixed(4) : 'PESO NO CONFIGURADO';
+      const kgTotalLabel = tienePeso ? (botesTotal * pesoBote).toFixed(4) : 'REVISAR';
       return [
         r.codigo, r.nombre,
-        pesoUd.toFixed(4),
-        uds.toFixed(0),
-        (uds * pesoUd).toFixed(4),
-        (uds * parseFloat(r.precio_ud)).toFixed(2),
+        mult.toString(),
+        pesoLabel,
+        envases.toFixed(0),
+        botesTotal.toFixed(0),
+        kgTotalLabel,
+        (envases * parseFloat(r.precio_ud)).toFixed(2),
         r.num_ordenes,
         r.primera_fecha, r.ultima_fecha,
       ].map(v => '"' + String(v).replace(/"/g, '""') + '"').join(sep);
     });
 
     lines.push('');
-    lines.push(['', 'TOTALES', '', totalUds.toFixed(0), totalKgPlastico.toFixed(4), totalCoste.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
-    lines.push(['', `IMPUESTO PLASTICO (${totalKgPlastico.toFixed(2)} kg x ${TASA_PLASTICO} EUR/kg)`, '', '', '', impuestoPlastico.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
-    lines.push(['', `Periodo: ${desde} a ${hasta}`, '', '', '', '', '', '', ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', 'TOTALES', '', '', totalEnvases.toFixed(0), totalBotes.toFixed(0), totalKgPlastico.toFixed(4), totalCoste.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', `IMPUESTO PLASTICO (${totalKgPlastico.toFixed(2)} kg x ${TASA_PLASTICO} EUR/kg)`, '', '', '', '', '', impuestoPlastico.toFixed(2), '', '', ''].map(v => '"' + v + '"').join(sep));
+    lines.push(['', `Periodo: ${desde} a ${hasta}`, '', '', '', '', '', '', '', '', ''].map(v => '"' + v + '"').join(sep));
+    if (sinPesoConfigurado.length > 0) {
+      lines.push('');
+      lines.push(['', `AVISO: ${sinPesoConfigurado.length} materiales sin peso_plastico configurado — declaración incompleta. Revisar y configurar peso por bote en cada ficha de producto:`, '', '', '', '', '', '', '', '', ''].map(v => '"' + v + '"').join(sep));
+      for (const codigo of sinPesoConfigurado) {
+        lines.push(['', codigo, '', '', '', '', '', '', '', '', ''].map(v => '"' + v + '"').join(sep));
+      }
+    }
 
     const csv = BOM + headers.join(sep) + '\n' + lines.join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');

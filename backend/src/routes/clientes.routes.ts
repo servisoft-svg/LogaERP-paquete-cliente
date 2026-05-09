@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
+import { adminOnly } from '../middleware/auth';
 
 const router = Router();
 
@@ -37,7 +38,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/clientes
-router.post('/', async (req, res) => {
+router.post('/', adminOnly, async (req, res) => {
   try {
     const { nombre, email, telefono, direccion, nif, notas } = req.body;
     if (!nombre) {
@@ -63,7 +64,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/clientes/:id
-router.put('/:id', async (req, res) => {
+router.put('/:id', adminOnly, async (req, res) => {
   try {
     const { nombre, email, telefono, direccion, nif, notas, activo } = req.body;
     const { rows: [cli] } = await pool.query(
@@ -96,7 +97,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE /api/clientes/:id  (soft delete)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', adminOnly, async (req, res) => {
   try {
     await pool.query(`UPDATE clientes SET activo = FALSE WHERE id = $1`, [req.params.id]);
     return res.json({ ok: true });

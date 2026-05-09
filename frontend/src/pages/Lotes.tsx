@@ -58,6 +58,10 @@ export default function Lotes() {
   const [trazaLote, setTrazaLote]         = useState<Lote | null>(null);
   const [trazaData, setTrazaData]         = useState<TrazabilidadItem[]>([]);
   const [trazaLoading, setTrazaLoading]   = useState(false);
+  const [historialEstado, setHistorialEstado] = useState<{
+    revisor: { nombre: string; rol: string; revisado_at: string; motivo: string } | null;
+    cambios: { id: string; accion: string; motivo: string | null; created_at: string; usuario_nombre: string | null; usuario_rol: string | null }[];
+  } | null>(null);
   const trazaRef = useRef<HTMLDivElement>(null);
 
   const cargar = useCallback(async () => {
@@ -147,9 +151,16 @@ export default function Lotes() {
   const verTrazabilidad = async (lote: Lote) => {
     setTrazaLote(lote);
     setTrazaLoading(true);
+    setHistorialEstado(null);
     try {
-      const res = await lotesApi.trazabilidad(lote.id);
-      setTrazaData(res.data as TrazabilidadItem[]);
+      const [trazaRes, histRes] = await Promise.all([
+        lotesApi.trazabilidad(lote.id),
+        lotesApi.historialEstado(lote.id).catch(() => null),
+      ]);
+      setTrazaData(trazaRes.data as TrazabilidadItem[]);
+      if (histRes) {
+        setHistorialEstado(histRes.data as typeof historialEstado);
+      }
       setTimeout(() => trazaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
     } catch {
       setTrazaData([]);
@@ -380,6 +391,76 @@ export default function Lotes() {
               <X size={16} />
             </button>
           </div>
+
+          {/* Historial de estado: revisor + motivo + cambios auditoría */}
+          {historialEstado && (historialEstado.revisor || historialEstado.cambios.length > 0) && (
+            <div className="rounded-lg border border-amber-100 bg-amber-50/30 p-4 mb-3">
+              <h4 className="text-[11px] font-bold text-amber-800 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                Historial de estado
+              </h4>
+
+              {/* Bloque revisor (lote aprobado tras cuarentena) */}
+              {historialEstado.revisor && (
+                <div className="rounded-md bg-emerald-50 border border-emerald-200 p-3 mb-3">
+                  <p className="text-[10px] font-bold text-emerald-700 uppercase tracking-wide mb-1">
+                    ✓ Aprobado tras revisión QC
+                  </p>
+                  <p className="text-xs text-emerald-900 italic font-medium leading-relaxed mb-2">
+                    "{historialEstado.revisor.motivo}"
+                  </p>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-emerald-800">
+                    <span>
+                      Por <b>{historialEstado.revisor.nombre}</b>
+                      {historialEstado.revisor.rol === 'admin' && <span className="ml-1 inline-block rounded bg-emerald-200 px-1 text-[9px]">admin</span>}
+                    </span>
+                    <span>·</span>
+                    <span>{new Date(historialEstado.revisor.revisado_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Timeline de todos los cambios */}
+              {historialEstado.cambios.length > 0 && (
+                <ol className="space-y-2">
+                  {historialEstado.cambios.map((c) => {
+                    const fmt = (a: string) => a === 'CAMBIO_ESTADO_LOTE' ? 'Cambio de estado'
+                      : a === 'ENTRADA_STOCK' ? 'Entrada de stock'
+                      : a === 'MODIFICAR_LOTE' ? 'Modificación de cantidad'
+                      : a;
+                    const colorAccion = c.accion === 'CAMBIO_ESTADO_LOTE' ? 'bg-amber-100 text-amber-800'
+                      : c.accion === 'ENTRADA_STOCK' ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-gray-100 text-gray-600';
+                    return (
+                      <li key={c.id} className="flex gap-2.5 text-xs">
+                        <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
+                            <span className={clsx('inline-block rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide', colorAccion)}>
+                              {fmt(c.accion)}
+                            </span>
+                            <span className="text-[10px] text-gray-500 tabular-nums">
+                              {new Date(c.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                            {c.usuario_nombre && (
+                              <span className="text-[10px] text-gray-500">
+                                · por <b className="text-gray-700">{c.usuario_nombre}</b>
+                                {c.usuario_rol === 'admin' && <span className="ml-0.5 text-[9px] text-amber-600">(admin)</span>}
+                              </span>
+                            )}
+                          </div>
+                          {c.motivo && (
+                            <p className="text-gray-700 italic leading-snug pl-1 border-l-2 border-amber-200">
+                              "{c.motivo}"
+                            </p>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          )}
 
           {trazaLoading ? (
             <div className="flex justify-center py-8">

@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { productosApi, proveedoresApi, stockApi, lotesApi } from '../api/client';
 import type { Producto, Proveedor, TipoProducto } from '../types';
+import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
 import ConfirmModal from '../components/ConfirmModal';
@@ -49,6 +50,7 @@ interface FormData {
   proveedor_id: string;
   caducidad_meses: string;
   peso_unitario_kg: string;
+  unidades_por_envase: string;
 }
 
 interface LoteDisponible { id: string; lote_interno: string; lote_proveedor?: string; cantidad_actual: string; cantidad_inicial?: string; fecha_caducidad?: string; }
@@ -56,7 +58,7 @@ interface LoteDisponible { id: string; lote_interno: string; lote_proveedor?: st
 const EMPTY: FormData = {
   codigo: '', nombre: '', descripcion: '', tipo: 'materia_prima',
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
-  precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '',
+  precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
 };
 
 const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
@@ -93,6 +95,7 @@ const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
 
 export default function Productos() {
   const navigate = useNavigate();
+  const { isAdmin } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const stockCheckProducto = searchParams.get('check');
   const stockCheckCantidad = searchParams.get('cantidad');
@@ -112,7 +115,8 @@ export default function Productos() {
   const [error, setError]             = useState('');
   const [sortField, setSortField]     = useState<keyof Producto>('nombre');
   const [expandedId, setExpandedId]   = useState<string | null>(null);
-  const [expandedLotes, setExpandedLotes] = useState<{ lote_interno: string; cantidad_inicial?: string; cantidad_actual: string; precio_compra?: string; fecha_caducidad?: string; fecha_entrada?: string; created_at?: string }[]>([]);
+  const [expandedLotes, setExpandedLotes] = useState<{ lote_interno: string; lote_proveedor?: string; cantidad_inicial?: string; cantidad_actual: string; precio_compra?: string; fecha_caducidad?: string; fecha_entrada?: string; created_at?: string }[]>([]);
+  const [lotesProdMatch, setLotesProdMatch] = useState<Set<string>>(new Set());
   const [sortDir, setSortDir]         = useState<'asc' | 'desc'>('asc');
   const [confirmElim, setConfirmElim] = useState<Producto | null>(null);
   const [scanning, setScanning]     = useState(false);
@@ -179,6 +183,34 @@ export default function Productos() {
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // Buscar también por lote_interno / lote_proveedor (albarán). Debounce 250ms.
+  useEffect(() => {
+    const q = busqueda.trim();
+    if (q.length < 2) { setLotesProdMatch(new Set()); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await lotesApi.listar({ busqueda: q });
+        if (cancelled) return;
+        const ids = new Set<string>();
+        for (const l of res.data as { producto_id: string }[]) ids.add(l.producto_id);
+        setLotesProdMatch(ids);
+      } catch { if (!cancelled) setLotesProdMatch(new Set()); }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [busqueda]);
+
+  // Auto-expandir si búsqueda casa exactamente 1 producto vía lote (mostrar lote sin click)
+  useEffect(() => {
+    if (lotesProdMatch.size !== 1) return;
+    const [pid] = Array.from(lotesProdMatch);
+    if (expandedIdRef.current === pid) return;
+    setExpandedId(pid);
+    lotesApi.listar({ producto_id: pid, estado: 'aprobado' })
+      .then(res => setExpandedLotes(res.data as any[]))
+      .catch(() => setExpandedLotes([]));
+  }, [lotesProdMatch]);
+
   const abrirNuevo = () => {
     setEditando(null);
     setForm(EMPTY);
@@ -205,6 +237,7 @@ export default function Productos() {
       proveedor_id:    p.proveedor_id ?? '',
       caducidad_meses: p.caducidad_meses ? String(p.caducidad_meses) : '',
       peso_unitario_kg: p.peso_unitario_kg ? String(p.peso_unitario_kg) : '',
+      unidades_por_envase: (p as any).unidades_por_envase ? String((p as any).unidades_por_envase) : '',
     });
     setEditLotes([]);
     setEditLoteId('');
@@ -239,7 +272,7 @@ export default function Productos() {
     }
     setSaving(true);
     setError('');
-    const payload: any = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null };
+    const payload: any = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null, unidades_por_envase: form.unidades_por_envase ? Number(form.unidades_por_envase) : null };
     // Si user pulsó "Restaurar auto", indicar al backend que vuelva a modo automático
     if (resetAuto) payload.reset_coste_auto = true;
     const ejecutarGuardar = async () => {
@@ -381,7 +414,7 @@ export default function Productos() {
           <ToastBlock title={`${d.nombre} · +${d.cantidad.toLocaleString('es-ES')} ${d.unidad}`}>
             <ToastField label="Lote" value={d.lote_interno} span={2} />
             <ToastField label="Proveedor" value={d.proveedor} span={2} />
-            <ToastField label="Precio compra" value={d.precio !== undefined ? `${d.precio.toFixed(4)} EUR/${d.unidad}` : ''} />
+            {isAdmin && <ToastField label="Precio compra" value={d.precio !== undefined ? `${d.precio.toFixed(4)} EUR/${d.unidad}` : ''} />}
             <ToastField label="Caducidad" value={d.caducidad ? new Date(d.caducidad).toLocaleDateString('es-ES') : ''} />
             <ToastField label="Ubicación" value={d.ubicacion} span={2} />
           </ToastBlock>
@@ -447,7 +480,8 @@ export default function Productos() {
     .filter((p) =>
       !busqueda ||
       p.nombre.toLowerCase().includes(busqueda.toLowerCase()) ||
-      p.codigo.toLowerCase().includes(busqueda.toLowerCase())
+      p.codigo.toLowerCase().includes(busqueda.toLowerCase()) ||
+      lotesProdMatch.has(p.id)
     )
     .sort((a, b) => {
       const av = a[sortField] ?? '';
@@ -790,10 +824,11 @@ export default function Productos() {
                           <thead>
                             <tr className="text-gray-400">
                               <th className="text-left py-1 font-medium">Lote</th>
+                              <th className="text-left py-1 font-medium">Ref. proveedor</th>
                               <th className="text-right py-1 font-medium">Entrada</th>
                               <th className="text-right py-1 font-medium">Restante</th>
-                              <th className="text-right py-1 font-medium">Precio</th>
-                              <th className="text-right py-1 font-medium">Valor actual</th>
+                              {isAdmin && <th className="text-right py-1 font-medium">Precio</th>}
+                              {isAdmin && <th className="text-right py-1 font-medium">Valor actual</th>}
                               <th className="text-right py-1 font-medium">Fecha entrada</th>
                               <th className="text-right py-1 font-medium">Caducidad</th>
                             </tr>
@@ -808,14 +843,15 @@ export default function Productos() {
                               return (
                                 <tr key={li} className={agotado ? 'opacity-25' : 'hover:bg-gray-100/50'}>
                                   <td className={clsx('py-1.5 font-mono', agotado ? 'text-gray-400 line-through' : 'text-gray-700')}>{l.lote_interno}</td>
+                                  <td className={clsx('py-1.5 font-mono text-xs', agotado ? 'text-gray-300' : 'text-gray-500')}>{l.lote_proveedor || '—'}</td>
                                   <td className="py-1.5 text-right tabular-nums text-gray-400">{inicial.toLocaleString('es-ES', { maximumFractionDigits: 2 })}</td>
                                   <td className="py-1.5 text-right tabular-nums">
                                     <span className={clsx('font-semibold', agotado ? 'text-gray-300' : gastado ? 'text-amber-600' : 'text-gray-800')}>
                                       {actual.toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}
                                     </span>
                                   </td>
-                                  <td className="py-1.5 text-right tabular-nums text-gray-500">{precio > 0 ? `${precio.toFixed(2)} EUR` : '—'}</td>
-                                  <td className="py-1.5 text-right tabular-nums font-semibold text-gray-800">{precio > 0 && actual > 0 ? `${(actual * precio).toFixed(2)} EUR` : agotado ? '0.00 EUR' : '—'}</td>
+                                  {isAdmin && <td className="py-1.5 text-right tabular-nums text-gray-500">{precio > 0 ? `${precio.toFixed(2)} EUR` : '—'}</td>}
+                                  {isAdmin && <td className="py-1.5 text-right tabular-nums font-semibold text-gray-800">{precio > 0 && actual > 0 ? `${(actual * precio).toFixed(2)} EUR` : agotado ? '0.00 EUR' : '—'}</td>}
                                   <td className="py-1.5 text-right text-gray-500 whitespace-nowrap">{l.created_at ? new Date(l.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
                                   <td className="py-1.5 text-right text-gray-500">{l.fecha_caducidad ? new Date(l.fecha_caducidad).toLocaleDateString('es-ES') : '—'}</td>
                                 </tr>
@@ -824,9 +860,10 @@ export default function Productos() {
                             <tr className="border-t border-gray-200 font-semibold text-gray-800">
                               <td className="py-1.5">En stock</td>
                               <td></td>
-                              <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual), 0).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}</td>
                               <td></td>
-                              <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual) * parseFloat(l.precio_compra ?? '0'), 0).toFixed(2)} EUR</td>
+                              <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual), 0).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}</td>
+                              {isAdmin && <td></td>}
+                              {isAdmin && <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual) * parseFloat(l.precio_compra ?? '0'), 0).toFixed(2)} EUR</td>}
                               <td></td>
                               <td></td>
                             </tr>
@@ -983,26 +1020,28 @@ export default function Productos() {
               </FormField>
             </div>
 
-            {/* Precio de compra */}
-            <FormField label="Precio de compra (EUR)" hint={stockProducto && parseFloat(stockProducto.precio_unitario) > 0 ? `Anterior: ${parseFloat(stockProducto.precio_unitario).toFixed(4)} EUR/${stockProducto.unidad_medida}` : undefined}>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number" min="0" step="0.0001"
-                  value={stockPrecio}
-                  onChange={(e) => setStockPrecio(e.target.value)}
-                  placeholder="0.0000"
-                  className="flex-1 font-mono"
-                />
-                <span className="text-xs text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">
-                  EUR/{stockProducto?.unidad_medida ?? 'kg'}
-                </span>
-              </div>
-              {stockPrecio && stockProducto && parseFloat(stockProducto.precio_unitario) > 0 && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001 && (
-                <p className={clsx('text-[11px] font-medium mt-1', Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'text-loga-red' : 'text-emerald-600')}>
-                  {Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'Subida' : 'Bajada'}: {((Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) / parseFloat(stockProducto.precio_unitario) * 100).toFixed(1)}%
-                </p>
-              )}
-            </FormField>
+            {/* Precio de compra — solo admin. Operario añade stock sin tocar precio. */}
+            {isAdmin && (
+              <FormField label="Precio de compra (EUR)" hint={stockProducto && parseFloat(stockProducto.precio_unitario) > 0 ? `Anterior: ${parseFloat(stockProducto.precio_unitario).toFixed(4)} EUR/${stockProducto.unidad_medida}` : undefined}>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number" min="0" step="0.0001"
+                    value={stockPrecio}
+                    onChange={(e) => setStockPrecio(e.target.value)}
+                    placeholder="0.0000"
+                    className="flex-1 font-mono"
+                  />
+                  <span className="text-xs text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">
+                    EUR/{stockProducto?.unidad_medida ?? 'kg'}
+                  </span>
+                </div>
+                {stockPrecio && stockProducto && parseFloat(stockProducto.precio_unitario) > 0 && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001 && (
+                  <p className={clsx('text-[11px] font-medium mt-1', Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'text-loga-red' : 'text-emerald-600')}>
+                    {Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'Subida' : 'Bajada'}: {((Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) / parseFloat(stockProducto.precio_unitario) * 100).toFixed(1)}%
+                  </p>
+                )}
+              </FormField>
+            )}
 
             {/* Motivo */}
             <FormField label="Motivo / Observaciones">
@@ -1170,15 +1209,34 @@ export default function Productos() {
             </FormField>
           </div>
 
-          {(form.tipo === 'producto_envasado' || form.peso_unitario_kg) && (
-            <FormField label="Peso por unidad (kg)" hint="Peso neto de cola por bote/garrafa/bidón">
-              <Input
-                type="number" min="0" step="0.001"
-                value={form.peso_unitario_kg}
-                onChange={(e) => setForm((f) => ({ ...f, peso_unitario_kg: e.target.value }))}
-                placeholder="Ej: 5 (garrafa 5kg)"
-              />
-            </FormField>
+          {(form.tipo === 'producto_envasado' || form.tipo === 'material_embalaje' || form.peso_unitario_kg) && (
+            <>
+              <FormField
+                label="Peso total de cola que lleva el envase (kg)"
+                hint={form.tipo === 'material_embalaje'
+                  ? 'Cuántos kg de cola entran en este envase. Ej: Bidón 30kg → 30. Caja 40 uds × 250g → 10. Etiqueta → 0.'
+                  : 'Peso neto de cola por unidad envasada (bote / garrafa / bidón). Ej: Bote 1kg → 1. Frasco 75g → 0.075.'}
+              >
+                <Input
+                  type="number" min="0" step="0.001"
+                  value={form.peso_unitario_kg}
+                  onChange={(e) => setForm((f) => ({ ...f, peso_unitario_kg: e.target.value }))}
+                  placeholder="Ej: 30 (bidón 30kg) o 10 (caja 40 × 250g)"
+                />
+              </FormField>
+
+              <FormField
+                label="Unidades por envase (botes dentro)"
+                hint="Cuántos botes individuales contiene. Caja de 40 frascos → 40. Caja de 18 → 18. Bidones, garrafas, sacos, frascos sueltos → dejar vacío (1 unidad)."
+              >
+                <Input
+                  type="number" min="1" step="1"
+                  value={form.unidades_por_envase}
+                  onChange={(e) => setForm((f) => ({ ...f, unidades_por_envase: e.target.value }))}
+                  placeholder="Ej: 40 (caja de 40 botes). Vacío para envases sueltos."
+                />
+              </FormField>
+            </>
           )}
 
           <FormField label="Caducidad automática (meses)" hint="Si se define, al crear lote se auto-calcula la fecha de caducidad">

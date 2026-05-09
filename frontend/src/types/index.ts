@@ -163,6 +163,25 @@ export interface OrdenProduccion {
   cola_id?: string;
   envase_id?: string;
   formato_label?: string;
+  operario_id?: string;
+  operario_nombre?: string;
+  operario_rol?: 'admin' | 'trabajador';
+  duracion_segundos?: number;
+  media_duracion_receta_segundos?: number | null;
+  num_ordenes_media?: number;
+  meteo?: {
+    temperatura: number;
+    humedad: number;
+    sensacion_termica: number;
+    precipitacion: number;
+    weather_code: number;
+    presion: number;
+    viento_velocidad: number;
+    viento_direccion: number;
+    viento_rafagas: number;
+    timestamp_utc: string;
+    fuente: string;
+  } | null;
   created_at: string;
 }
 
@@ -212,6 +231,10 @@ export interface Pedido {
   portes?: string;
   iva_porcentaje?: string;
   total?: string;
+  // Coste real: SUM(cantidad consumida × precio_compra del lote concreto).
+  // Calculado server-side desde reservas_stock con estado='consumida'.
+  // null si el pedido no se ha completado o no tiene lotes asociados.
+  coste_real?: string | null;
   lineas?: LineaPedido[];
   created_at: string;
 }

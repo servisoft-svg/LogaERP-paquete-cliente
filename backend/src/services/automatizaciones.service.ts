@@ -993,8 +993,24 @@ class AutomatizacionesService {
         if (!granel) continue;
 
         const cantidadKg = parseFloat(l.cantidad); // si es envasado, peso = unidades*peso_unit
-        // Para envasado se complica calcular kg desde uds; saltamos si es envasado y no hay datos
-        // Solo activamos para granel directo de momento.
+        // Auto-fabricar desde pedido envasado: NO DISPONIBLE TODAVÍA.
+        // El cálculo kg-desde-unidades requiere resolver receta envasado → granel,
+        // multiplicador de cajas/pales y peso unitario por presentación. Mientras
+        // no esté implementado, lo logueamos explícitamente para que el operario
+        // sepa que tiene que fabricar el granel a mano (no es un fallo silente).
+        if (l.producto_tipo === 'producto_envasado') {
+          await this.log({
+            tipo: 'duplicado_evitado',
+            resultado: 'omitido',
+            detalle: {
+              motivo: 'feature_envasado_no_disponible_todavia',
+              producto: l.producto_nombre,
+              pedido: pedido.numero_pedido,
+              tip: 'Auto-fabricar desde pedido envasado aún no soportado. Crea la orden de fabricación del granel manualmente.',
+            },
+          });
+          continue;
+        }
         if (l.producto_tipo !== 'producto_fabricado') continue;
         if (parseFloat(granel.stock_actual) >= cantidadKg) continue; // hay stock suficiente
 

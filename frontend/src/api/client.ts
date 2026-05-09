@@ -108,6 +108,7 @@ export const lotesApi = {
   cambiarEstado:(id: string, estado: string, motivo: string) =>
     api.patch(`/lotes/${id}/estado`, { estado, motivo }),
   trazabilidad: (id: string) => api.get(`/lotes/${id}/trazabilidad`),
+  historialEstado: (id: string) => api.get(`/lotes/${id}/historial-estado`),
   actualizar:   (id: string, data: object) => api.put(`/lotes/${id}`, data),
 };
 
@@ -117,6 +118,7 @@ export const pedidosApi = {
   editar:   (id: string, data: object) => api.put(`/pedidos/${id}`, data),
   consumir: (id: string, lotesOverride?: Record<string, string[]>) => api.post(`/pedidos/${id}/consumir`, { lotes_override: lotesOverride }),
   lotesDisponibles: (id: string) => api.get(`/pedidos/${id}/lotes-disponibles`),
+  desgloseCoste: (id: string) => api.get(`/pedidos/${id}/desglose-coste`),
   cancelar: (id: string) => api.delete(`/pedidos/${id}`),
   descargarAlbaran: (id: string) => api.get(`/pedidos/${id}/albaran.pdf`, { responseType: 'blob' }),
   enviarAlbaran: (id: string, email: string) => api.post(`/pedidos/${id}/enviar-albaran`, { email }),

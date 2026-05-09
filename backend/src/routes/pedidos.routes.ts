@@ -4,6 +4,7 @@ import { pool, acquireProductLocks, withSerializableTransaction } from '../db/po
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
+import { adminOnly } from '../middleware/auth';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -14,12 +15,24 @@ router.get('/', async (req, res) => {
     const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? '200'), 10) || 200));
     const offset = (page - 1) * limit;
+    // Subquery `coste_real`: suma de (cantidad consumida × precio_compra del lote)
+    // a partir de reservas_stock con estado='consumida' (lo que realmente se gastó
+    // de cada lote concreto). Solo lectura — NO modifica nada de stock ni reservas.
+    // Si un pedido no tiene reservas consumidas (cancelado / no completado / sin
+    // lote_id), el SUM devuelve NULL y el frontend lo muestra como "—".
     const { rows } = await pool.query(`
       SELECT pd.*,
         c.nombre AS cliente_nombre_rel,
         p.nombre AS producto_nombre_rel, p.codigo AS producto_codigo,
         p.unidad_medida AS producto_unidad,
-        op.numero_orden
+        op.numero_orden,
+        (SELECT SUM(rs.cantidad * COALESCE(l.precio_compra, 0))
+         FROM reservas_stock rs
+         LEFT JOIN lotes l ON l.id = rs.lote_id
+         WHERE rs.pedido_id = pd.id
+           AND rs.estado = 'consumida'
+           AND rs.lote_id IS NOT NULL
+        ) AS coste_real
       FROM pedidos pd
       LEFT JOIN clientes c ON c.id = pd.cliente_id
       LEFT JOIN productos p ON p.id = pd.producto_id
@@ -64,6 +77,40 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, lineas, subtotal, portes, iva_porcentaje } = req.body;
+    const userRol = (req as any).user?.rol;
+    const esAdmin = userRol === 'admin';
+
+    // [H3.2 audit v3] Si NO es admin, ignorar precio_unitario del body y usar
+    // precio_venta del catálogo. Manual: "precio unitario solo admin".
+    // Antes: trabajador podía enviar precio = 0.01 y el servidor lo aceptaba.
+    if (!esAdmin && Array.isArray(lineas) && lineas.length > 0) {
+      const productoIds = lineas
+        .map((l: any) => l.producto_id)
+        .filter((id: any) => typeof id === 'string' && id);
+      if (productoIds.length > 0) {
+        const { rows: prods } = await pool.query<{ id: string; nombre: string; precio_venta: string }>(
+          `SELECT id, nombre, COALESCE(precio_venta, 0)::TEXT AS precio_venta FROM productos WHERE id = ANY($1::uuid[])`,
+          [productoIds]
+        );
+        const precioMap = new Map(prods.map(p => [p.id, parseFloat(p.precio_venta)]));
+        const nombreMap = new Map(prods.map(p => [p.id, p.nombre]));
+        // Edge case: producto puede no tener precio_venta configurado (NULL o 0).
+        // Fallback ?? 0 para evitar NaN en el total. Si queda en 0, log warn
+        // pero NO bloquea: el admin puede revisar el pedido y editarlo después.
+        for (const l of lineas as any[]) {
+          if (!l.producto_id) continue;
+          const precio = precioMap.get(l.producto_id) ?? 0;
+          l.precio_unitario = precio;
+          if (precio === 0) {
+            logger.warn('[POST pedidos] Producto sin precio_venta configurado', {
+              producto_id: l.producto_id,
+              producto_nombre: nombreMap.get(l.producto_id) ?? 'desconocido',
+              usuario_id: (req as any).user?.id,
+            });
+          }
+        }
+      }
+    }
 
     // Server-side validation: recalculate totals from lineas + sanidad numérica
     const portesNum = Number(portes ?? 0);
@@ -204,6 +251,13 @@ router.post('/', async (req, res) => {
       });
     }
 
+    // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta.
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'CREAR_PEDIDO', 'pedidos', $2, $3)`,
+      [(req as any).user?.id ?? null, pedido.id, `Pedido ${pedido.numero_pedido} creado · cliente=${cliente_nombre ?? cliente_id ?? 'sin cliente'} · total=${totalCalc.toFixed(2)}`]
+    ).catch((e: unknown) => logger.warn('[auditoria CREAR_PEDIDO]', { err: e instanceof Error ? e.message : e }));
+
     res.status(201).json({
       ...pedido,
       ...(reservationFailed ? { warning: 'reservation_partial', detalle: reservationError } : {}),
@@ -225,7 +279,7 @@ const TRANSICIONES_VALIDAS: Record<string, string[]> = {
   cancelado:      ['confirmado'],
 };
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', adminOnly, async (req, res) => {
   try {
     const { estado, producto_id, cantidad, unidad_medida, fecha_entrega, notas, orden_produccion_id,
             cliente_id, cliente_nombre, subtotal, portes, iva_porcentaje, total, lineas } = req.body;
@@ -377,11 +431,17 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/pedidos/:id
-router.delete('/:id', async (req, res) => {
+// DELETE /api/pedidos/:id — restringido a admin
+router.delete('/:id', adminOnly, async (req, res) => {
   try {
     await pool.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [req.params.id]);
     await pool.query(`UPDATE pedidos SET estado = 'cancelado' WHERE id = $1`, [req.params.id]);
+    // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta.
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'CANCELAR_PEDIDO', 'pedidos', $2, 'Pedido cancelado por admin')`,
+      [(req as any).user?.id ?? null, req.params.id]
+    ).catch((e: unknown) => logger.warn('[auditoria CANCELAR_PEDIDO]', { err: e instanceof Error ? e.message : e }));
     res.json({ ok: true });
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -389,6 +449,56 @@ router.delete('/:id', async (req, res) => {
 });
 
 // GET /api/pedidos/:id/lotes-disponibles — lotes FIFO para cada linea del pedido
+// GET /api/pedidos/:id/desglose-coste
+// Devuelve los lotes que se consumieron del pedido con su coste real:
+//   cantidad consumida × precio_compra del lote (no precio ficha).
+// Solo LECTURA — no toca stock, reservas, ni stock_moves.
+router.get('/:id/desglose-coste', async (req, res) => {
+  try {
+    const { rows } = await pool.query<{
+      lote_id: string; lote_interno: string; producto_id: string; producto_nombre: string;
+      producto_codigo: string; unidad_medida: string;
+      cantidad: string; precio_compra: string | null;
+      fecha_caducidad: Date | null; fecha_entrada: Date | null;
+    }>(
+      `SELECT rs.lote_id,
+              l.lote_interno, l.fecha_caducidad, l.fecha_entrada,
+              p.id AS producto_id, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
+              p.unidad_medida,
+              rs.cantidad, l.precio_compra
+       FROM reservas_stock rs
+       JOIN lotes l ON l.id = rs.lote_id
+       JOIN productos p ON p.id = rs.producto_id
+       WHERE rs.pedido_id = $1
+         AND rs.estado = 'consumida'
+       ORDER BY p.nombre ASC, l.fecha_caducidad ASC NULLS LAST`,
+      [req.params.id]
+    );
+
+    const desglose = rows.map(r => {
+      const cantidad = parseFloat(r.cantidad);
+      const precio = r.precio_compra !== null ? parseFloat(r.precio_compra) : 0;
+      return {
+        lote_id: r.lote_id,
+        lote_interno: r.lote_interno,
+        producto_id: r.producto_id,
+        producto_nombre: r.producto_nombre,
+        producto_codigo: r.producto_codigo,
+        unidad_medida: r.unidad_medida,
+        cantidad,
+        precio_compra: precio,
+        coste_linea: Math.round(cantidad * precio * 100) / 100,
+        fecha_caducidad: r.fecha_caducidad,
+        fecha_entrada: r.fecha_entrada,
+      };
+    });
+    const coste_total = Math.round(desglose.reduce((s, d) => s + d.coste_linea, 0) * 100) / 100;
+    return res.json({ desglose, coste_total });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 router.get('/:id/lotes-disponibles', async (req, res) => {
   try {
     const { id } = req.params;
@@ -847,7 +957,7 @@ router.get('/:id/albaran.pdf', async (req, res) => {
 });
 
 // POST /api/pedidos/:id/enviar-albaran — envia albaran PDF + trazabilidad + fotos + docs por email
-router.post('/:id/enviar-albaran', async (req, res) => {
+router.post('/:id/enviar-albaran', adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     const { email } = req.body;

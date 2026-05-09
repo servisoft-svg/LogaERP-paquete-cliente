@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download, ArrowUpRight, ArrowDownRight, Search, ChevronDown,
   AlertTriangle, Plus, Minus, Activity, TrendingUp,
-  Factory, Warehouse, Package, Layers, Beaker, Zap,
+  Factory, Warehouse, Package, Layers, Beaker, Zap, Eye, EyeOff,
   type LucideIcon,
 } from 'lucide-react';
 import { finanzasApi } from '../api/client';
@@ -41,18 +41,39 @@ interface ResumenData {
 }
 interface ImpactoReceta {
   receta_nombre: string; producto_nombre: string; producto_codigo: string;
-  unidad_medida: string; precio_venta: number;
+  producto_tipo?: 'producto_fabricado' | 'producto_envasado';
+  tipo_receta?: 'fabricacion' | 'envasado';
+  unidad_medida: string; precio_venta: number; rendimiento?: number;
   pvp_anterior?: number; pvp_actual?: number;
   coste_anterior: number; coste_actual: number;
+  coste_batch_anterior?: number; coste_batch_actual?: number;
+  coste_stock_min?: number; coste_stock_max?: number;
+  coste_stock_min_batch?: number; coste_stock_max_batch?: number;
   margen_anterior: number; margen_actual: number;
   diff_coste: number; diff_margen: number; salud?: string;
-  detalle_mp: { nombre: string; cantidad: number; precio_anterior: number | null; precio_actual: number; diff: number }[];
+  detalle_mp: {
+    nombre: string;
+    cantidad: number;
+    precio_anterior: number | null;
+    precio_actual: number;
+    precio_stock_min?: number | null;
+    precio_stock_max?: number | null;
+    stock_source?: 'lots' | 'recursive' | 'ficha';
+    diff: number;
+  }[];
 }
 interface MPPrecio { codigo: string; nombre: string; unidad_medida: string; precio_actual: string; precio_anterior: string | null; variacion_pct: string }
 
 // ── Helpers — SIN ABREVIATURAS K/M ──────────────────────────────────
 const fmt = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtInt = (n: number) => n.toLocaleString('es-ES', { maximumFractionDigits: 0 });
+
+// ── Privacy mode — enmascara solo valores monetarios ───────────────
+const PRIV_KEY = 'loga_finanzas_priv';
+const money = (n: number, priv: boolean, decimals = 2) =>
+  priv ? '**' : n.toLocaleString('es-ES', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+const moneyInt = (n: number, priv: boolean) =>
+  priv ? '**' : Math.round(n).toLocaleString('es-ES', { maximumFractionDigits: 0 });
 
 const FADE = {
   initial: { opacity: 0, y: 6 },
@@ -67,6 +88,7 @@ export default function Finanzas() {
   const [impactoRecetas, setImpactoRecetas] = useState<ImpactoReceta[]>([]);
   const [mpPrecios, setMpPrecios] = useState<MPPrecio[]>([]);
   const [expandedReceta, setExpandedReceta] = useState<string | null>(null);
+  const [filtroImpacto, setFiltroImpacto] = useState<'todos' | 'granel' | 'envasado'>('todos');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [rentaTab, setRentaTab] = useState<'todos' | 'producto_fabricado' | 'producto_envasado'>('todos');
@@ -74,6 +96,14 @@ export default function Finanzas() {
   const [rentaSearch, setRentaSearch] = useState('');
   const [rentaSort, setRentaSort] = useState<{ key: 'margen' | 'venta' | 'coste' | 'beneficio'; dir: 'desc' | 'asc' }>({ key: 'margen', dir: 'desc' });
   const [año, setAño] = useState<number>(() => new Date().getFullYear());
+  const [priv, setPriv] = useState<boolean>(() => {
+    try { return localStorage.getItem(PRIV_KEY) === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(PRIV_KEY, priv ? '1' : '0'); } catch { /* noop */ }
+  }, [priv]);
+  const m  = useCallback((n: number, dec = 2) => money(n, priv, dec), [priv]);
+  const mi = useCallback((n: number) => moneyInt(n, priv), [priv]);
 
   const cargar = useCallback(async () => {
     setLoading(true);
@@ -198,6 +228,21 @@ export default function Finanzas() {
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => setPriv(p => !p)}
+            title={priv ? 'Mostrar importes' : 'Ocultar importes (modo presentación)'}
+            aria-pressed={priv}
+            className={clsx(
+              'inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium rounded-md transition-colors',
+              priv
+                ? 'bg-loga-red text-white hover:bg-loga-red-dark'
+                : 'text-zinc-600 dark:text-zinc-400 hover:text-loga-red hover:bg-loga-red/5'
+            )}
+          >
+            {priv ? <EyeOff size={11} strokeWidth={2.5} /> : <Eye size={11} strokeWidth={2.5} />}
+            {priv ? 'Oculto' : 'Privacidad'}
+          </button>
+          <div className="w-px h-4 bg-zinc-200 dark:bg-white/10 mx-1" />
           {[
             { tipo: 'pedidos',     label: 'Pedidos' },
             { tipo: 'produccion',  label: 'Producción' },
@@ -248,8 +293,8 @@ export default function Finanzas() {
             </div>
             <div className="flex items-baseline gap-3 flex-wrap">
               <h2 className="text-[56px] sm:text-[80px] font-bold text-zinc-900 dark:text-white tracking-[-0.04em] leading-none tabular-nums">
-                {fmt(data.ventas.facturacion_total).split(',')[0]}
-                <span className="text-zinc-300 dark:text-zinc-600 font-normal">,{fmt(data.ventas.facturacion_total).split(',')[1] ?? '00'}</span>
+                {priv ? '**' : fmt(data.ventas.facturacion_total).split(',')[0]}
+                {!priv && <span className="text-zinc-300 dark:text-zinc-600 font-normal">,{fmt(data.ventas.facturacion_total).split(',')[1] ?? '00'}</span>}
               </h2>
               <span className="text-base font-bold text-loga-red tracking-tight">EUR</span>
             </div>
@@ -259,7 +304,7 @@ export default function Finanzas() {
           <div className="lg:col-span-5 grid grid-cols-3 lg:flex lg:flex-col lg:justify-end gap-y-5 gap-x-4 lg:gap-y-4 lg:border-l lg:border-zinc-200 lg:dark:border-white/10 lg:pl-10">
             <HeroStat
               label="Beneficio bruto"
-              value={fmtInt(beneficioBruto)}
+              value={mi(beneficioBruto)}
               hint={`${margenPct.toFixed(1)}% margen`}
               positive={beneficioBruto >= 0}
               icon={TrendingUp}
@@ -267,14 +312,14 @@ export default function Finanzas() {
             />
             <HeroStat
               label="Coste producción"
-              value={fmtInt(data.costeProd.coste_total)}
+              value={mi(data.costeProd.coste_total)}
               hint={`${fmtInt(data.costeProd.num_ordenes)} órdenes`}
               icon={Factory}
               accent="amber"
             />
             <HeroStat
               label="Inmovilizado"
-              value={fmtInt(data.inmovilizado.valor_total)}
+              value={mi(data.inmovilizado.valor_total)}
               hint="stock total"
               icon={Warehouse}
               accent="red"
@@ -288,10 +333,10 @@ export default function Finanzas() {
           ╚══════════════════════════════════════════════════════════╝ */}
       <section className="border-y-2 border-zinc-900 dark:border-white bg-zinc-50 dark:bg-white/[0.02]">
         <div className="px-6 sm:px-10 py-5 grid grid-cols-2 sm:grid-cols-4 divide-x divide-zinc-200 dark:divide-white/10">
-          <Inline label="Ticket medio" value={data.ventas.num_pedidos > 0 ? fmt(data.ventas.facturacion_total / data.ventas.num_pedidos) : '0'} unit="€/pedido" color="violet" />
-          <Inline label="Coste/orden" value={data.costeProd.num_ordenes > 0 ? fmt(data.costeProd.coste_total / data.costeProd.num_ordenes) : '0'} unit="€/orden" color="amber" />
-          <Inline label="Rechazada" value={fmtInt(data.rechazos.valor_rechazado)} unit={`${data.rechazos.ordenes_canceladas} órd · ${data.rechazos.lotes_rechazados} lotes`} color="red" />
-          <Inline label="Mermas" value={`${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')}`} unit={`kg · ${fmtInt(data.mermas?.total_eur ?? 0)} €`} color="orange" />
+          <Inline label="Ticket medio" value={data.ventas.num_pedidos > 0 ? m(data.ventas.facturacion_total / data.ventas.num_pedidos) : (priv ? '**' : '0')} unit="€/pedido" color="violet" />
+          <Inline label="Coste/orden" value={data.costeProd.num_ordenes > 0 ? m(data.costeProd.coste_total / data.costeProd.num_ordenes) : (priv ? '**' : '0')} unit="€/orden" color="amber" />
+          <Inline label="Rechazada" value={mi(data.rechazos.valor_rechazado)} unit={`${data.rechazos.ordenes_canceladas} órd · ${data.rechazos.lotes_rechazados} lotes`} color="red" />
+          <Inline label="Mermas" value={`${(data.mermas?.total_kg ?? 0).toLocaleString('es-ES')}`} unit={`kg · ${mi(data.mermas?.total_eur ?? 0)} €`} color="orange" />
         </div>
       </section>
 
@@ -306,14 +351,14 @@ export default function Finanzas() {
             icon={TrendingUp}
             extra={
               <div className="flex items-center gap-5 text-[11px]">
-                <Stat sub="Pico" value={fmtInt(maxMes)} />
-                <Stat sub="Media" value={fmtInt(avgMes)} />
-                <Stat sub="Total" value={fmtInt(totalEvolucion)} accent />
+                <Stat sub="Pico" value={mi(maxMes)} />
+                <Stat sub="Media" value={mi(avgMes)} />
+                <Stat sub="Total" value={mi(totalEvolucion)} accent />
               </div>
             }
           />
           <div className="mt-6">
-            <PrecisionChart data={data.ventasMes} maxMes={maxMes} minMes={minMes} avgMes={avgMes} />
+            <PrecisionChart data={data.ventasMes} maxMes={maxMes} minMes={minMes} avgMes={avgMes} priv={priv} />
           </div>
         </motion.section>
       )}
@@ -420,18 +465,18 @@ export default function Finanzas() {
                                 {tipoStyle.label}
                               </span>
                               {r.precio_kg != null && (
-                                <span className="text-[10px] text-zinc-500 tabular-nums">· {fmt(r.precio_kg)} €/kg</span>
+                                <span className="text-[10px] text-zinc-500 tabular-nums">· {m(r.precio_kg)} €/kg</span>
                               )}
                             </div>
                           </div>
                         </div>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{fmt(r.precio_venta)}</p>
+                        <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{m(r.precio_venta)}</p>
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/{r.unidad_medida}</p>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <p className="text-[12px] tabular-nums text-zinc-700 dark:text-zinc-300">{fmt(r.precio_coste)}</p>
+                        <p className="text-[12px] tabular-nums text-zinc-700 dark:text-zinc-300">{m(r.precio_coste)}</p>
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/{r.unidad_medida}</p>
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -451,7 +496,7 @@ export default function Finanzas() {
                         ) : <span className="text-zinc-300 text-[11px]">—</span>}
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <p className="text-[12px] tabular-nums font-bold text-zinc-900 dark:text-white">{fmt(r.beneficio_ud)}</p>
+                        <p className="text-[12px] tabular-nums font-bold text-zinc-900 dark:text-white">{m(r.beneficio_ud)}</p>
                         <p className="text-[9px] text-zinc-400 tabular-nums">€/ud</p>
                       </td>
                     </motion.tr>
@@ -474,26 +519,26 @@ export default function Finanzas() {
                                   <span className="col-span-5">Ingrediente</span>
                                   <span className="col-span-3 text-right">Cantidad</span>
                                   <span className="col-span-2 text-right">Precio</span>
-                                  <span className="col-span-2 text-right">Línea</span>
+                                  <span className="col-span-2 text-right">Coste por batch</span>
                                 </div>
                                 {r.desglose.map((d, j) => (
                                   <div key={j} className="grid grid-cols-12 gap-3 text-[11px] py-1.5 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
                                     <span className="col-span-5 text-zinc-700 dark:text-zinc-300 font-medium">{d.nombre}</span>
                                     <span className="col-span-3 text-right tabular-nums text-zinc-500">{d.cantidad.toLocaleString('es-ES', { maximumFractionDigits: 4 })} {d.unidad}</span>
-                                    <span className="col-span-2 text-right tabular-nums text-zinc-500">{fmt(d.precio_ud)}</span>
-                                    <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-bold">{fmt(d.coste_linea)}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-zinc-500">{m(d.precio_ud)}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-bold">{m(d.coste_linea)}</span>
                                   </div>
                                 ))}
                                 <div className="grid grid-cols-12 gap-3 text-[11px] pt-2.5 mt-1.5 border-t border-zinc-300 dark:border-white/20 font-bold">
                                   <span className="col-span-10 text-zinc-900 dark:text-white">
                                     Total batch{r.rendimiento && r.rendimiento > 1 ? ` · ${r.rendimiento} ${r.unidad_medida}` : ''}
                                   </span>
-                                  <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white">{fmt(r.coste_batch ?? r.precio_coste)} €</span>
+                                  <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white">{m(r.coste_batch ?? r.precio_coste)} €</span>
                                 </div>
                                 {r.rendimiento && r.rendimiento > 1 && (
                                   <div className="grid grid-cols-12 gap-3 text-[11px] pt-1.5 mt-1.5 bg-loga-red/10 -mx-2 px-2 py-1.5 rounded font-bold text-loga-red">
                                     <span className="col-span-10">Coste por {r.unidad_medida}</span>
-                                    <span className="col-span-2 text-right tabular-nums">{fmt(r.precio_coste)} €</span>
+                                    <span className="col-span-2 text-right tabular-nums">{m(r.precio_coste)} €</span>
                                   </div>
                                 )}
                               </div>
@@ -547,7 +592,7 @@ export default function Finanzas() {
                       </div>
                       <div className="flex items-baseline gap-3">
                         <span className="text-[10px] tabular-nums text-zinc-400 font-bold">{pct.toFixed(1)}%</span>
-                        <span className="text-[13px] font-bold tabular-nums text-zinc-900 dark:text-white w-32 text-right">{fmtInt(value)} <span className="text-[10px] text-zinc-400 font-normal">€</span></span>
+                        <span className="text-[13px] font-bold tabular-nums text-zinc-900 dark:text-white w-32 text-right">{mi(value)} <span className="text-[10px] text-zinc-400 font-normal">€</span></span>
                       </div>
                     </div>
                     <div className="h-1 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
@@ -564,7 +609,7 @@ export default function Finanzas() {
               <div className="flex items-baseline justify-between py-3 border-t-2 border-loga-red mt-2">
                 <span className="text-[10px] uppercase tracking-[0.16em] font-bold text-loga-red">Total inventario</span>
                 <span className="text-[20px] font-bold tabular-nums text-zinc-900 dark:text-white">
-                  {fmtInt(data.inmovilizado.valor_total)} <span className="text-[12px] text-loga-red font-bold">EUR</span>
+                  {mi(data.inmovilizado.valor_total)} <span className="text-[12px] text-loga-red font-bold">EUR</span>
                 </span>
               </div>
             </div>
@@ -614,7 +659,7 @@ export default function Finanzas() {
                         />
                       </div>
                     </div>
-                    <span className="col-span-2 text-right text-[12px] font-bold tabular-nums text-zinc-900 dark:text-white">{fmtInt(val)} <span className="text-[9px] text-zinc-400 font-normal">€</span></span>
+                    <span className="col-span-2 text-right text-[12px] font-bold tabular-nums text-zinc-900 dark:text-white">{mi(val)} <span className="text-[9px] text-zinc-400 font-normal">€</span></span>
                   </motion.li>
                 );
               })}
@@ -653,7 +698,7 @@ export default function Finanzas() {
                   <div className="col-span-7 min-w-0">
                     <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{v.nombre}</p>
                     <p className="text-[10px] text-zinc-500 tabular-nums mt-0.5">
-                      {fmtInt(cantidad)} {v.unidad_medida} · {fmt(precioEf)} €/{v.unidad_medida}
+                      {fmtInt(cantidad)} {v.unidad_medida} · {m(precioEf)} €/{v.unidad_medida}
                     </p>
                     <div className="h-1 bg-zinc-100 dark:bg-zinc-800 mt-2 relative overflow-hidden rounded-full">
                       <motion.div
@@ -665,7 +710,7 @@ export default function Finanzas() {
                     </div>
                   </div>
                   <div className="col-span-4 text-right">
-                    <p className="text-[14px] font-bold tabular-nums text-zinc-900 dark:text-white">{fmtInt(fact)}</p>
+                    <p className="text-[14px] font-bold tabular-nums text-zinc-900 dark:text-white">{mi(fact)}</p>
                     <p className="text-[9px] text-loga-red font-bold uppercase tracking-wider">EUR</p>
                   </div>
                 </motion.div>
@@ -680,10 +725,55 @@ export default function Finanzas() {
           ╚══════════════════════════════════════════════════════════╝ */}
       {impactoRecetas.length > 0 && (
         <motion.section {...FADE} className="px-6 sm:px-10 py-10 border-b border-zinc-200 dark:border-white/10">
-          <SectionHeader label="Impacto · coste futuro" title="Variación de margen" hint="PVP + coste anterior vs futuro proyectado (precios ficha MP)" icon={Activity} />
+          <SectionHeader label="Impacto · coste futuro" title="Variación de margen" hint="PVP + coste anterior vs futuro proyectado (precios ficha MP). Envasados incluyen coste de cola + envase + materiales recursivamente." icon={Activity} />
+
+          {/* Tabs de filtro: todos / granel / envasado */}
+          {(() => {
+            const granel = impactoRecetas.filter(r => r.producto_tipo === 'producto_fabricado' || r.tipo_receta === 'fabricacion');
+            const envasado = impactoRecetas.filter(r => r.producto_tipo === 'producto_envasado' || r.tipo_receta === 'envasado');
+            const otros = impactoRecetas.filter(r =>
+              !(r.producto_tipo === 'producto_fabricado' || r.tipo_receta === 'fabricacion') &&
+              !(r.producto_tipo === 'producto_envasado' || r.tipo_receta === 'envasado')
+            );
+            return (
+              <div className="mt-4 inline-flex rounded-lg border border-zinc-200 dark:border-white/10 bg-white dark:bg-zinc-900 p-1 gap-1">
+                {([
+                  { key: 'todos',    label: 'Todos',    n: impactoRecetas.length },
+                  { key: 'granel',   label: 'Granel',   n: granel.length + otros.length },
+                  { key: 'envasado', label: 'Envasado', n: envasado.length },
+                ] as const).map(opt => (
+                  <button
+                    key={opt.key}
+                    onClick={() => setFiltroImpacto(opt.key)}
+                    className={clsx(
+                      'rounded-md px-3 py-1.5 text-[11px] font-semibold transition-colors flex items-center gap-1.5',
+                      filtroImpacto === opt.key
+                        ? 'bg-loga-red text-white shadow-sm'
+                        : 'text-zinc-500 hover:text-zinc-900 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-white/5'
+                    )}
+                  >
+                    {opt.label}
+                    <span className={clsx(
+                      'rounded-full px-1.5 py-0.5 text-[9px] font-bold',
+                      filtroImpacto === opt.key ? 'bg-white/20' : 'bg-zinc-100 dark:bg-white/10'
+                    )}>
+                      {opt.n}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
 
           <div className="mt-6 border-t border-zinc-200 dark:border-white/10">
-            {impactoRecetas.map((r) => {
+            {impactoRecetas
+              .filter(r => {
+                if (filtroImpacto === 'todos') return true;
+                if (filtroImpacto === 'envasado') return r.producto_tipo === 'producto_envasado' || r.tipo_receta === 'envasado';
+                // granel = fabricado + cualquier otro que no sea envasado
+                return !(r.producto_tipo === 'producto_envasado' || r.tipo_receta === 'envasado');
+              })
+              .map((r) => {
               const expanded = expandedReceta === r.receta_nombre;
               const diffPositivo = r.diff_margen > 0;
               const diffNegativo = r.diff_margen < 0;
@@ -710,26 +800,31 @@ export default function Finanzas() {
                       <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{r.producto_nombre}</p>
                       <p className="text-[10px] text-zinc-500 mt-0.5 tabular-nums truncate">
                         {r.receta_nombre}
-                        {r.pvp_actual !== undefined && <span> · <span className="font-medium text-zinc-700 dark:text-zinc-300">{fmt(r.pvp_actual)}</span> €/{r.unidad_medida}</span>}
-                        {pvpCambio && <span className="text-zinc-400"> (ant {fmt(r.pvp_anterior!)})</span>}
+                        {r.pvp_actual !== undefined && <span> · <span className="font-medium text-zinc-700 dark:text-zinc-300">{m(r.pvp_actual)}</span> €/{r.unidad_medida}</span>}
+                        {pvpCambio && <span className="text-zinc-400"> (ant {m(r.pvp_anterior!)})</span>}
                       </p>
                     </div>
-                    <div className="col-span-6 sm:col-span-2 text-right">
-                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Coste</p>
-                      <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{r.coste_actual.toFixed(4)}</p>
+                    <div className="col-span-6 sm:col-span-2 text-right" title={`Coste de fabricar 1 ${r.unidad_medida} con precios futuros (precio ficha de las MP)`}>
+                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Coste / {r.unidad_medida}</p>
+                      <p className="text-[12px] tabular-nums text-zinc-900 dark:text-white font-medium">{m(r.coste_actual, 4)} <span className="text-[9px] text-zinc-400 font-normal">€/{r.unidad_medida}</span></p>
+                      {r.coste_batch_actual != null && r.rendimiento && r.rendimiento > 1 && (
+                        <p className="text-[10px] tabular-nums text-zinc-500" title={`Coste total de un batch de ${r.rendimiento} ${r.unidad_medida}`}>
+                          batch: <b>{m(r.coste_batch_actual)}</b> <span className="text-[9px] text-zinc-400">€</span>
+                        </p>
+                      )}
                       {r.diff_coste !== 0 && (
-                        <p className={clsx('text-[10px] tabular-nums font-bold', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
-                          {r.diff_coste > 0 ? '+' : ''}{r.diff_coste.toFixed(4)}
+                        <p className={clsx('text-[10px] tabular-nums font-bold', r.diff_coste > 0 ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')} title={`Subida/bajada de coste por ${r.unidad_medida} respecto al periodo anterior`}>
+                          {priv ? (r.diff_coste > 0 ? '+**' : '-**') : `${r.diff_coste > 0 ? '+' : ''}${r.diff_coste.toFixed(4)} €/${r.unidad_medida}`}
                         </p>
                       )}
                     </div>
-                    <div className="col-span-5 sm:col-span-2 text-right">
-                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Margen</p>
+                    <div className="col-span-5 sm:col-span-2 text-right" title={`Margen sobre PVP: (PVP − coste) / PVP × 100. Pestaña sobre el % indica cuánto te queda de cada euro vendido`}>
+                      <p className="text-[10px] uppercase tracking-[0.1em] text-zinc-400 font-bold">Margen s/PVP</p>
                       <p className={clsx('text-[14px] font-bold tabular-nums', margenColor)}>{r.margen_actual.toFixed(1)}%</p>
                       {r.diff_margen !== 0 && (
-                        <p className={clsx('text-[10px] tabular-nums inline-flex items-center gap-0.5 font-bold', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')}>
+                        <p className={clsx('text-[10px] tabular-nums inline-flex items-center gap-0.5 font-bold', diffNegativo ? 'text-loga-red' : 'text-emerald-600 dark:text-emerald-400')} title="Variación en puntos porcentuales (pp): si margen pasa de 90% a 88%, son -2pp (NO -2%)">
                           {diffPositivo ? <ArrowUpRight size={9} strokeWidth={2.5} /> : <ArrowDownRight size={9} strokeWidth={2.5} />}
-                          {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)}pp
+                          {r.diff_margen > 0 ? '+' : ''}{r.diff_margen.toFixed(1)} pp
                         </p>
                       )}
                     </div>
@@ -737,7 +832,7 @@ export default function Finanzas() {
                   </button>
 
                   <AnimatePresence>
-                    {expanded && r.detalle_mp.length > 0 && (
+                    {expanded && (
                       <motion.div
                         initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }}
@@ -749,25 +844,89 @@ export default function Finanzas() {
                               {r.salud}
                             </p>
                           )}
-                          <div className="grid grid-cols-12 gap-3 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
-                            <span className="col-span-6">Materia prima</span>
-                            <span className="col-span-2 text-right">Anterior</span>
-                            <span className="col-span-2 text-right">Actual</span>
-                            <span className="col-span-2 text-right">Impacto</span>
-                          </div>
-                          {r.detalle_mp.map((mp, i) => (
-                            <div key={i} className="grid grid-cols-12 gap-3 text-[11px] py-1.5 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
-                              <span className="col-span-6 text-zinc-700 dark:text-zinc-300 font-medium">{mp.nombre} <span className="text-zinc-400 tabular-nums">({mp.cantidad.toFixed(2)})</span></span>
-                              <span className="col-span-2 text-right tabular-nums text-zinc-500">{mp.precio_anterior?.toFixed(4) ?? '—'}</span>
-                              <span className="col-span-2 text-right tabular-nums text-zinc-900 dark:text-white font-bold">{mp.precio_actual.toFixed(4)}</span>
-                              <span className={clsx(
-                                'col-span-2 text-right tabular-nums font-bold',
-                                mp.diff > 0 ? 'text-loga-red' : mp.diff < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-300'
-                              )}>
-                                {mp.diff !== 0 ? `${mp.diff > 0 ? '+' : ''}${mp.diff.toFixed(2)}` : '—'}
-                              </span>
-                            </div>
-                          ))}
+                          {r.detalle_mp.length === 0 ? (
+                            <p className="text-[11px] text-zinc-500 italic text-center py-4">
+                              Esta receta no tiene ingredientes registrados. Edítala para añadir cola, envases y materiales.
+                            </p>
+                          ) : (
+                            <>
+                              <p className="text-[10px] text-zinc-500 mb-3 italic leading-relaxed">
+                                <b className="text-emerald-600 dark:text-emerald-400">Precio actual</b>: lote más barato disponible en almacén (lo que consumes ahora).{' '}
+                                <b className="text-amber-600 dark:text-amber-400">Precio futuro</b>: lote más caro en stock (lo que consumirás cuando el barato se agote).{' '}
+                                Si un ingrediente no tiene lotes propios, calculamos su coste con los precios mín/máx de SUS materias primas.
+                              </p>
+                              <div className="grid grid-cols-12 gap-2 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
+                                <span className="col-span-3">Ingrediente</span>
+                                <span className="col-span-1 text-right">Cant.</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400">P. actual /u</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400">P. futuro /u</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Cantidad × precio actual = lo que cuesta este ingrediente con tu stock barato">Coste actual</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Cantidad × precio futuro = lo que costará cuando se agote el lote barato">Coste futuro</span>
+                              </div>
+                              {r.detalle_mp.map((mp, i) => {
+                                const pMin = mp.precio_stock_min ?? mp.precio_actual;
+                                const pMax = mp.precio_stock_max ?? mp.precio_actual;
+                                const costeActual = mp.cantidad * pMin;
+                                const costeFuturo = mp.cantidad * pMax;
+                                const haySpread = Math.abs(pMax - pMin) > 0.0001;
+                                const sourceLabel = mp.stock_source === 'lots' ? null
+                                  : mp.stock_source === 'recursive' ? 'calculado de sus MP'
+                                  : 'precio ficha · sin stock';
+                                return (
+                                  <div key={i} className="grid grid-cols-12 gap-2 text-[11px] py-1.5 border-b border-zinc-100 dark:border-white/5 last:border-b-0">
+                                    <span className="col-span-3 text-zinc-700 dark:text-zinc-300 font-medium truncate" title={mp.nombre}>{mp.nombre}</span>
+                                    <span className="col-span-1 text-right tabular-nums text-zinc-500">{mp.cantidad.toFixed(3)}</span>
+                                    <span className="col-span-2 text-right tabular-nums text-emerald-700 dark:text-emerald-300 font-semibold">
+                                      {priv ? '**' : m(pMin, 4)}
+                                      {sourceLabel && (
+                                        <span className="block text-[8px] font-normal text-zinc-400 italic">{sourceLabel}</span>
+                                      )}
+                                    </span>
+                                    <span className="col-span-2 text-right tabular-nums text-amber-700 dark:text-amber-300 font-semibold">
+                                      {priv ? '**' : m(pMax, 4)}
+                                      {haySpread && (
+                                        <span className="block text-[8px] font-normal text-amber-600">+{((pMax - pMin) / pMin * 100).toFixed(0)}% vs actual</span>
+                                      )}
+                                    </span>
+                                    <span className="col-span-2 text-right tabular-nums text-emerald-700 dark:text-emerald-300 font-bold">
+                                      {priv ? '**' : costeActual.toFixed(2)} €
+                                    </span>
+                                    <span className="col-span-2 text-right tabular-nums text-amber-700 dark:text-amber-300 font-bold">
+                                      {priv ? '**' : costeFuturo.toFixed(2)} €
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                              {/* Totales: dos columnas (barato vs caro) */}
+                              <div className="grid grid-cols-12 gap-2 text-[11px] py-2 mt-1 border-t-2 border-zinc-300 dark:border-white/20">
+                                <span className="col-span-8 text-right text-zinc-500 font-bold uppercase text-[10px] tracking-wide">
+                                  Total receta {r.rendimiento && r.rendimiento > 1 ? `· batch ${r.rendimiento} ${r.unidad_medida}` : ''}
+                                </span>
+                                <span className="col-span-2 text-right tabular-nums">
+                                  <span className="block text-emerald-700 dark:text-emerald-300 font-bold">
+                                    {priv ? '**' : (r.coste_stock_min_batch ?? 0).toFixed(2)} €
+                                  </span>
+                                  <span className="block text-[9px] text-emerald-600 dark:text-emerald-400 font-normal">actual</span>
+                                </span>
+                                <span className="col-span-2 text-right tabular-nums">
+                                  <span className="block text-amber-700 dark:text-amber-300 font-bold">
+                                    {priv ? '**' : (r.coste_stock_max_batch ?? 0).toFixed(2)} €
+                                  </span>
+                                  <span className="block text-[9px] text-amber-600 dark:text-amber-400 font-normal">futuro</span>
+                                </span>
+                              </div>
+                              {/* Coste por unidad final */}
+                              <div className="grid grid-cols-12 gap-2 text-[11px] py-1">
+                                <span className="col-span-8 text-right text-zinc-400 italic text-[10px]">por {r.unidad_medida} (coste / unidad)</span>
+                                <span className="col-span-2 text-right tabular-nums text-emerald-700 dark:text-emerald-300 font-bold">
+                                  {priv ? '**' : (r.coste_stock_min ?? 0).toFixed(4)} €
+                                </span>
+                                <span className="col-span-2 text-right tabular-nums text-amber-700 dark:text-amber-300 font-bold">
+                                  {priv ? '**' : (r.coste_stock_max ?? 0).toFixed(4)} €
+                                </span>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </motion.div>
                     )}
@@ -813,7 +972,7 @@ export default function Finanzas() {
                     <div className="col-span-7 min-w-0 relative">
                       <p className="text-[12px] font-medium text-zinc-900 dark:text-white truncate">{item.nombre}</p>
                       <p className="text-[10px] text-zinc-500 tabular-nums mt-0.5">
-                        {ant ? ant.toFixed(4) : '—'} → <span className="text-zinc-900 dark:text-white font-bold">{act.toFixed(4)}</span> €/{item.unidad_medida}
+                        {ant != null ? m(ant, 4) : '—'} → <span className="text-zinc-900 dark:text-white font-bold">{m(act, 4)}</span> €/{item.unidad_medida}
                       </p>
                     </div>
                     <div className="col-span-5 text-right relative">
@@ -958,7 +1117,7 @@ function Sort({ label, active, dir, onClick }: { label: string; active: boolean;
 // ═══════════════════════════════════════════════════════════════════════
 // PRECISION CHART — más vivo con red brand
 // ═══════════════════════════════════════════════════════════════════════
-function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; maxMes: number; minMes: number; avgMes: number }) {
+function PrecisionChart({ data, maxMes, minMes, avgMes, priv = false }: { data: VentaMes[]; maxMes: number; minMes: number; avgMes: number; priv?: boolean }) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const W = 1000;
   const H = 240;
@@ -1003,7 +1162,7 @@ function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; ma
           <g key={i}>
             <line x1={padL} y1={t.y} x2={W - padR} y2={t.y} stroke="currentColor" strokeWidth="0.5" className="text-zinc-200 dark:text-white/10" />
             <text x={padL - 8} y={t.y + 3} textAnchor="end" className="text-[9px] fill-zinc-400 tabular-nums font-medium">
-              {fmtInt(t.value)}
+              {moneyInt(t.value, priv)}
             </text>
           </g>
         ))}
@@ -1080,7 +1239,7 @@ function PrecisionChart({ data, maxMes, minMes, avgMes }: { data: VentaMes[]; ma
             }}
           >
             <p className="text-[9px] uppercase tracking-[0.16em] opacity-80 font-bold">{hovered.m.mes_label}</p>
-            <p className="text-[18px] font-bold tabular-nums leading-tight">{fmtInt(hovered.v)} <span className="text-[10px] font-normal opacity-80">EUR</span></p>
+            <p className="text-[18px] font-bold tabular-nums leading-tight">{moneyInt(hovered.v, priv)} <span className="text-[10px] font-normal opacity-80">EUR</span></p>
             <p className="text-[10px] tabular-nums opacity-90 mt-0.5">{hovered.m.num_pedidos} pedidos · {hovered.v > avgMes ? '+' : ''}{((hovered.v / avgMes - 1) * 100).toFixed(0)}%</p>
             <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-2 h-2 bg-loga-red rotate-45" />
           </motion.div>

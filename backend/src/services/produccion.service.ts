@@ -16,6 +16,7 @@ import { pool, withSerializableTransaction, acquireProductLocks } from '../db/po
 import { toNum }  from '../types';
 import { alertaService } from './alerta.service';
 import { automatizacionesService } from './automatizaciones.service';
+import { fetchMeteoSnapshot } from './meteo.service';
 
 interface LoteFIFO {
   id: string;
@@ -64,6 +65,11 @@ class ProduccionService {
     // Inicialmente true; se invalida si algún parámetro está fuera de rango.
     let qcOk = true;
     const desviacionesQC: string[] = [];
+
+    // Snapshot meteorológico ANTES del BEGIN de la transacción (timeout 3s,
+    // fail-soft: si falla la API → null, fabricación continúa). Permite
+    // correlacionar mermas con condiciones climáticas externas.
+    const meteo = await fetchMeteoSnapshot();
 
     const result = await withSerializableTransaction(async (client) => {
       // ── 1. Cargar orden ────────────────────────────────────────────────
@@ -270,6 +276,13 @@ class ProduccionService {
       // de la receta. NO se confía en el flag del cliente.
       const loteEstado = qcOk ? 'aprobado' : 'cuarentena';
 
+      // Leer stock ANTES del INSERT para registrar cantidad_antes correcto.
+      const { rows: [ptStockAntes] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`,
+        [receta.producto_id]
+      );
+      const antespt = toNum(ptStockAntes.stock_actual);
+
       const { rows: [lotePT] } = await client.query<{ id: string }>(
         `INSERT INTO lotes
            (producto_id, lote_interno, cantidad_inicial, cantidad_actual, estado, fecha_entrada, precio_compra)
@@ -280,20 +293,23 @@ class ProduccionService {
       prodFinalId = receta.producto_id;
       lotePTId = lotePT.id;
 
-      // Actualizar stock producto terminado (con version para optimistic locking)
-      const { rows: [ptStock] } = await client.query<{ stock_actual: string; version: string }>(
-        `SELECT stock_actual, version FROM productos WHERE id = $1 FOR UPDATE`,
+      // Tras INSERT, el trigger fn_trg_lotes_stock_actual recalcula
+      // productos.stock_actual = SUM(lotes WHERE estado='aprobado').
+      //   - Lote 'aprobado'   → stock sube cantidadReal.
+      //   - Lote 'cuarentena' → stock NO cambia (lote no disponible hasta aprobarse).
+      // NO hacer UPDATE manual aquí: causaría doble conteo en aprobado y suma
+      // espuria en cuarentena (bug histórico que el usuario reportó).
+      const { rows: [ptStockDespues] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1`,
         [receta.producto_id]
       );
-      const antespt   = toNum(ptStock.stock_actual);
-      const despuespt = antespt + cantidadReal;
+      const despuespt = toNum(ptStockDespues.stock_actual);
 
-      await client.query(
-        `UPDATE productos SET stock_actual = $1::NUMERIC, version = version + 1 WHERE id = $2`,
-        [despuespt.toFixed(6), receta.producto_id]
-      );
-
-      // Stock move de entrada producto terminado
+      // Stock move: registra producción independientemente del estado del lote.
+      // Si lote en cuarentena, antespt == despuespt (stock_actual no varió),
+      // pero el move queda como evidencia de que se PRODUJO la cantidad.
+      // Cuando QC apruebe el lote, lotes.routes.ts inserta el stock_move 'entrada'
+      // con el delta real al pasar de cuarentena → aprobado.
       await client.query(
         `INSERT INTO stock_moves
            (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
@@ -306,11 +322,18 @@ class ProduccionService {
           despuespt.toFixed(6),
           ordenId,
           usuarioId ?? null,
-          `Producción confirmada orden ${orden.numero_orden}`,
+          qcOk
+            ? `Producción confirmada orden ${orden.numero_orden}`
+            : `Producción orden ${orden.numero_orden} → lote en cuarentena (QC fuera de rango). Stock no disponible hasta aprobación.`,
         ]
       );
 
       // ── 6. Actualizar orden ───────────────────────────────────────────
+      // operario_id: registrar QUIÉN ejecutó la orden. Si la orden ya tenía
+      // operario asignado al planificarla, lo sobrescribimos con el ejecutor
+      // real (es la persona que pulsa "Confirmar fabricación" y por tanto
+      // hace el trabajo). Si usuarioId es NULL (no debería pasar tras login),
+      // se preserva el valor previo.
       await client.query(
         `UPDATE ordenes_produccion
          SET estado = 'completada',
@@ -327,6 +350,8 @@ class ProduccionService {
              solidos            = COALESCE($7, solidos),
              viscosidad         = COALESCE($8, viscosidad),
              fecha_fabricacion  = COALESCE($9::TIMESTAMPTZ, fecha_fabricacion, NOW()),
+             meteo              = COALESCE($14::JSONB, meteo),
+             operario_id        = COALESCE($15::UUID, operario_id),
              locked_by          = NULL,
              locked_at          = NULL
          WHERE id = $3`,
@@ -342,6 +367,8 @@ class ProduccionService {
           merma.toFixed(6),
           mermaPct.toFixed(2),
           extra?.fecha_inicio_cliente ?? null,
+          meteo ? JSON.stringify(meteo) : null,
+          usuarioId ?? null,
         ]
       );
 
@@ -421,13 +448,14 @@ class ProduccionService {
     fecha_planificada?: string;
     notas?: string;
     operario_id?: string;
+    creado_por_id?: string;
     cliente?: string;
     cliente_id?: string;
   }): Promise<{ id: string; numero_orden: string }> {
     const { rows: [orden] } = await pool.query(
       `INSERT INTO ordenes_produccion
-         (receta_id, cantidad_planificada, fecha_planificada, notas, operario_id, cliente, cliente_id)
-       VALUES ($1, $2::NUMERIC, $3, $4, $5, $6, $7)
+         (receta_id, cantidad_planificada, fecha_planificada, notas, operario_id, creado_por_id, cliente, cliente_id)
+       VALUES ($1, $2::NUMERIC, $3, $4, $5, $6, $7, $8)
        RETURNING id, numero_orden`,
       [
         payload.receta_id,
@@ -435,6 +463,7 @@ class ProduccionService {
         payload.fecha_planificada ?? null,
         payload.notas ?? null,
         payload.operario_id ?? null,
+        payload.creado_por_id ?? null,
         payload.cliente ?? null,
         payload.cliente_id ?? null,
       ]

@@ -541,6 +541,25 @@ export default function Pedidos() {
             {isAdmin && p.total && parseFloat(p.total) > 0 && (
               <p className="text-[11px] font-bold text-gray-700">Total: {parseFloat(p.total).toFixed(2)} EUR</p>
             )}
+            {/* Coste real: solo admin, solo si hay lotes consumidos. Compara
+                contra total para colorear margen (verde +, rojo -). */}
+            {isAdmin && p.coste_real != null && parseFloat(p.coste_real) > 0 && (() => {
+              const cr = parseFloat(p.coste_real);
+              const tot = parseFloat(p.total ?? '0');
+              const margen = tot > 0 ? tot - cr : 0;
+              const margenPct = tot > 0 ? (margen / tot) * 100 : 0;
+              return (
+                <p className="text-[11px] flex items-center gap-1.5" title="Coste calculado con el precio_compra de los lotes concretos consumidos (no precio ficha)">
+                  <span className="text-gray-500">Coste lotes:</span>
+                  <span className="font-bold text-amber-700">{cr.toFixed(2)} EUR</span>
+                  {tot > 0 && (
+                    <span className={clsx('font-bold tabular-nums', margen >= 0 ? 'text-emerald-600' : 'text-loga-red')}>
+                      → margen {margen >= 0 ? '+' : ''}{margen.toFixed(2)} EUR ({margenPct.toFixed(0)}%)
+                    </span>
+                  )}
+                </p>
+              );
+            })()}
             {p.fecha_entrega && <p className="text-[11px] text-gray-400 flex items-center gap-1"><Clock size={10} /> {new Date(p.fecha_entrega).toLocaleDateString('es-ES')}</p>}
             {p.origen === 'email' && <span className="inline-block text-[9px] bg-purple-100 text-purple-700 rounded px-1.5 py-0.5 font-medium">via email</span>}
             <div className="flex items-center gap-2 pt-1 flex-wrap">
@@ -656,6 +675,22 @@ export default function Pedidos() {
                   {isAdmin && p.total && parseFloat(p.total) > 0 && (
                     <p className="text-[10px] font-semibold text-gray-500">{parseFloat(p.total).toFixed(2)} EUR</p>
                   )}
+                  {/* Coste real (lotes consumidos): sólo admin */}
+                  {isAdmin && p.coste_real != null && parseFloat(p.coste_real) > 0 && (() => {
+                    const cr = parseFloat(p.coste_real);
+                    const tot = parseFloat(p.total ?? '0');
+                    const margen = tot > 0 ? tot - cr : 0;
+                    return (
+                      <p className="text-[10px] text-amber-700 font-semibold tabular-nums" title="Coste real con precio_compra de los lotes concretos consumidos">
+                        Coste: {cr.toFixed(2)} €
+                        {tot > 0 && (
+                          <span className={clsx('ml-1', margen >= 0 ? 'text-emerald-600' : 'text-loga-red')}>
+                            ({margen >= 0 ? '+' : ''}{margen.toFixed(2)})
+                          </span>
+                        )}
+                      </p>
+                    );
+                  })()}
                 </td>
                 <td className="px-4 py-3 text-xs text-gray-500">
                   {p.fecha_entrega ? new Date(p.fecha_entrega).toLocaleDateString('es-ES') : '—'}

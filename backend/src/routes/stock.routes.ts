@@ -4,11 +4,13 @@ import { stockController } from '../controllers/stock.controller';
 import { toNum } from '../types';
 import { logger } from '../lib/logger';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { adminOnly } from '../middleware/auth';
 
 const router = Router();
 
 router.get ('/',                    stockController.listarProductos);
-router.post('/ajuste',              stockController.ajustarStock);
+// Ajuste manual y reconciliación: operaciones contables, solo admin (H1.2 audit v3).
+router.post('/ajuste',              adminOnly, stockController.ajustarStock);
 router.get ('/notificaciones',      stockController.notificaciones);
 router.post('/pedido',              stockController.enviarPedido);
 router.get ('/:id/historial',       stockController.historial);
@@ -38,7 +40,7 @@ router.get('/reconciliar', async (_req, res) => {
 });
 
 // POST /api/stock/reconciliar — fix all discrepancies WITH audit trail in stock_moves
-router.post('/reconciliar', async (req, res) => {
+router.post('/reconciliar', adminOnly, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

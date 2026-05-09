@@ -95,13 +95,21 @@ export default function EnvasadoRapido({ open, onClose, onDone, initialProducto,
   const colaSel = productos.find(p => p.id === colaId);
   const envaseSel = productos.find(p => p.id === envaseId);
 
-  // Multiplier detection
+  // Multiplier: prioridad campo BD unidades_por_envase > regex del nombre > 1.
+  const multBD = envaseSel && (envaseSel as any).unidades_por_envase != null
+    ? Number((envaseSel as any).unidades_por_envase)
+    : 0;
   const multMatch = envaseSel?.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
-  const mult = multMatch ? parseInt(multMatch[1], 10) : 1;
+  const mult = multBD > 0 ? multBD : (multMatch ? parseInt(multMatch[1], 10) : 1);
   const cantNum = parseInt(cantidad) || 0;
   const totalUds = cantNum * mult;
-  const pesoUd = parseFloat(prodFinal?.peso_unitario_kg ?? '0');
-  const colaNecesaria = totalUds * pesoUd;
+  // Cola necesaria: prioridad peso del envase (kg de cola dentro de 1 envase, ya
+  // configurado en ficha. Funciona igual para sueltos (Bidón 30kg → 30) y cajas
+  // (Caja 40 × 250g → 10). Fallback al peso del producto final.
+  const pesoEnvase = parseFloat(envaseSel?.peso_unitario_kg ?? '0');
+  const pesoProdFinal = parseFloat(prodFinal?.peso_unitario_kg ?? '0');
+  const pesoUd = pesoProdFinal > 0 ? pesoProdFinal : (mult > 0 ? pesoEnvase / mult : pesoEnvase);
+  const colaNecesaria = pesoEnvase > 0 ? cantNum * pesoEnvase : totalUds * pesoProdFinal;
 
   const puedeEnvasar = productoFinalId && colaId && envaseId && cantNum > 0;
 

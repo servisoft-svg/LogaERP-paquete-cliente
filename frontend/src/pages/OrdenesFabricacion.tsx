@@ -985,13 +985,23 @@ export default function OrdenesFabricacion() {
 
                 {/* Resumen con calculo real */}
                 {parseInt(envForm.cantidad) > 0 && envaseSelEnv && colaSelEnv && prodFinalSel && (() => {
-                  // Detect multiplier from envase name
+                  // Multiplicador: prioridad campo BD > regex del nombre > 1.
+                  const multBD = (envaseSelEnv as any).unidades_por_envase != null
+                    ? Number((envaseSelEnv as any).unidades_por_envase)
+                    : 0;
                   const multMatch = envaseSelEnv.nombre.match(/(?:caja|pal[eé]|palet)\s*(?:de\s*)?(\d+)/i);
-                  const mult = multMatch ? parseInt(multMatch[1], 10) : 1;
+                  const mult = multBD > 0 ? multBD : (multMatch ? parseInt(multMatch[1], 10) : 1);
                   const cantInput = parseInt(envForm.cantidad);
                   const totalUds = cantInput * mult;
-                  const pesoUd = parseFloat(prodFinalSel.peso_unitario_kg ?? '0');
-                  const colaNecesaria = totalUds * pesoUd;
+                  // Cola necesaria: prioridad peso del envase (kg de cola que entra en
+                  // 1 unidad del envase, ya configurado en ficha producto). Para envases
+                  // sueltos (Bidón 30kg → 30) y cajas (Caja 40×250g → 10) funciona igual.
+                  // Fallback al peso del producto final si el envase no lo tiene.
+                  const pesoEnvase = parseFloat(envaseSelEnv.peso_unitario_kg ?? '0');
+                  const pesoProdFinal = parseFloat(prodFinalSel.peso_unitario_kg ?? '0');
+                  const colaNecesaria = pesoEnvase > 0
+                    ? cantInput * pesoEnvase
+                    : totalUds * pesoProdFinal;
 
                   return (
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
@@ -1479,6 +1489,52 @@ export default function OrdenesFabricacion() {
                         {detalleOrden.orden.viscosidad != null && <span className="text-blue-600 font-medium">Visc: <b>{detalleOrden.orden.viscosidad}</b></span>}
                         {detalleOrden.orden.fecha_fabricacion && <span className="text-gray-500">{new Date(detalleOrden.orden.fecha_fabricacion).toLocaleString('es-ES')}</span>}
                       </div>
+                      {detalleOrden.orden.meteo && (
+                        <div className="mt-1 text-[11px] text-gray-500" title={`Snapshot meteorológico al confirmar la orden (fuente: ${detalleOrden.orden.meteo.fuente})`}>
+                          {Number(detalleOrden.orden.meteo.temperatura).toFixed(1)}°C · {Number(detalleOrden.orden.meteo.humedad).toFixed(0)}% HR · {Number(detalleOrden.orden.meteo.viento_velocidad).toFixed(1)} km/h
+                        </div>
+                      )}
+                      {/* Quién hizo la orden + duración: solo admin lo ve. */}
+                      {isAdmin && (detalleOrden.orden.operario_nombre || detalleOrden.orden.duracion_segundos != null) && (
+                        <div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-gray-500">
+                          {detalleOrden.orden.operario_nombre && (
+                            <span title={`Rol: ${detalleOrden.orden.operario_rol ?? 'desconocido'}`}>
+                              Hecha por <b className="text-gray-700">{detalleOrden.orden.operario_nombre}</b>
+                              {detalleOrden.orden.operario_rol === 'admin' ? ' (admin)' : ''}
+                            </span>
+                          )}
+                          {(() => {
+                            const fmtDur = (s: number) => {
+                              if (s < 60) return `${s}s`;
+                              if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60}s`;
+                              const h = Math.floor(s / 3600);
+                              const m = Math.floor((s % 3600) / 60);
+                              return `${h}h ${m}min`;
+                            };
+                            const dur = detalleOrden.orden.duracion_segundos;
+                            const media = detalleOrden.orden.media_duracion_receta_segundos;
+                            const n = detalleOrden.orden.num_ordenes_media ?? 0;
+                            return (
+                              <>
+                                {dur != null && dur > 0 && (
+                                  <span>Duración <b className="text-gray-700">{fmtDur(dur)}</b></span>
+                                )}
+                                {media != null && media > 0 && n > 0 && (
+                                  <span title={`Media calculada sobre ${n} orden${n !== 1 ? 'es' : ''} completada${n !== 1 ? 's' : ''} de esta misma receta (con duración > 5s)`}>
+                                    Media receta <b className="text-gray-700">{fmtDur(media)}</b>
+                                    <span className="text-gray-400"> ({n})</span>
+                                    {dur != null && dur > 0 && (
+                                      <span className={clsx('ml-1', dur > media * 1.2 ? 'text-amber-600' : dur < media * 0.8 ? 'text-emerald-600' : 'text-gray-400')}>
+                                        {dur > media ? '↑' : dur < media ? '↓' : '='}{Math.abs(Math.round((dur - media) / media * 100))}%
+                                      </span>
+                                    )}
+                                  </span>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
                       {isAdmin && detalleOrden.coste_total != null && detalleOrden.coste_total > 0 && (
                         <p className="mt-1 text-xs">
                           <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-2 py-0.5 font-semibold text-amber-800">

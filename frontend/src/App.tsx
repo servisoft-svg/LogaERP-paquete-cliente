@@ -8,6 +8,7 @@ import SpinnerColaBlanca, { LoadingScreen } from './components/SpinnerColaBlanca
 import { Toaster } from 'sileo';
 import 'sileo/styles.css';
 import { useAutomatizacionesLive } from './hooks/useAutomatizacionesLive';
+import { useCronHealth } from './hooks/useCronHealth';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
@@ -33,6 +34,8 @@ function AppContent() {
 
   // Hook live de automatizaciones (polling 30s + sileo toasts)
   useAutomatizacionesLive();
+  // Watchdog de crons internos: avisa con sileo.error si alguno cae.
+  useCronHealth();
 
   if (loading || splash) return <LoadingScreen />;
   if (!user) return <Login />;
@@ -54,7 +57,7 @@ function AppContent() {
             <Route path="/finanzas" element={isAdmin ? <Finanzas /> : <Navigate to="/" replace />} />
             <Route path="/configuracion" element={isAdmin ? <Configuracion /> : <Navigate to="/" replace />} />
             <Route path="/recuento" element={isAdmin ? <Recuento /> : <Navigate to="/" replace />} />
-            <Route path="/automatizaciones" element={<Automatizaciones />} />
+            <Route path="/automatizaciones" element={isAdmin ? <Automatizaciones /> : <Navigate to="/" replace />} />
           </Routes>
         </Suspense>
       </main>

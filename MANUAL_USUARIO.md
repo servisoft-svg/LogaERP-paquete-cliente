@@ -95,8 +95,9 @@ A continuacion aparece una lista de las acciones notificadas. Las marcadas con (
 **Sesion**
 - Login correcto (rich: bienvenida con nombre del usuario)
 - Credenciales invalidas
-- Logout (info: "Sesion cerrada")
+- Logout (info: "Sesion cerrada") — el token se revoca server-side, no solo se borra del navegador
 - Sesion caducada (warning antes de logout automatico)
+- Cron caido (error persistente con nombre del cron y minutos sin ejecutar)
 
 ---
 
@@ -252,10 +253,21 @@ Un lote es una cantidad concreta de un producto que entro en el almacen en un mo
 
 1. En la lista de lotes, buscar el lote en cuarentena
 2. Pulsar **Cambiar estado**
-3. Seleccionar **Aprobado** e indicar motivo (ej: "Control calidad OK")
+3. Seleccionar **Aprobado** e indicar motivo
 4. El stock del producto se actualiza automaticamente
 
-> Solo los lotes aprobados cuentan para el stock disponible.
+> Solo los lotes aprobados cuentan para el stock disponible. Los lotes en estado **cuarentena** o **rechazado** NO suman al stock — están reservados para producto fuera de spec o pendiente de revisión.
+
+### Aprobacion de lote en cuarentena (auditoria REACH)
+
+Cuando un lote esta en cuarentena (QC fuera de rango o entrada manual sin aprobar), su aprobacion exige:
+
+- **Solo administrador**: la transicion `cuarentena → aprobado` esta restringida server-side a usuarios con rol `admin` (responsable de calidad autorizado). Un trabajador no puede aprobar lotes desviados aunque conozca el endpoint API. Cumple normativa REACH.
+- **Motivo obligatorio de minimo 10 caracteres**: explicar por que se aprueba pese a la desviacion. Ejemplo: "Revisado por laboratorio externo, valor de pH 4.2 dentro de tolerancia ampliada para esta receta. Aprobado por jefe de calidad."
+- **Revisor automatico**: el sistema registra al usuario logueado como revisor y la fecha/hora exacta. No se puede aprobar sin sesion identificada.
+- **Trazabilidad permanente**: el motivo y el revisor quedan en la ficha del lote (`revisor_id`, `revisado_at`, `motivo_revision`) para auditoria REACH y de calidad.
+
+> Si un trabajador intenta aprobar un lote en cuarentena, recibe error 403 con mensaje explicativo sobre normativa REACH. Si el motivo introducido es menor de 10 caracteres, el sistema rechaza la operacion con un aviso.
 
 ### Rechazar un lote
 
@@ -357,6 +369,12 @@ Todo ocurre en una unica transaccion atomica (si algo falla, no se hace nada):
 8. Si habia un pedido vinculado, pasa a estado "fabricado"
 9. **Alertas automaticas**: el sistema comprueba si algun ingrediente ha bajado del stock minimo y genera notificacion instantanea
 10. **Tiempo de fabricacion**: se guarda automaticamente la duracion real (`fecha_inicio` = momento en que se abrio el modal de Fabricar; `fecha_fin` = momento en que se confirmo). Estos datos solo se registran si la fabricacion se completa con exito. Si el operario abre el modal y lo cierra sin confirmar, no se guarda nada y el cronometro empieza de cero la siguiente vez.
+11. **Snapshot meteorologico automatico**: justo antes de iniciar la transaccion, el sistema consulta Open-Meteo (gratuita, sin API key) para capturar las condiciones climaticas exteriores en la fabrica en ese momento exacto: temperatura, humedad, sensacion termica, precipitacion, codigo WMO del cielo, presion atmosferica, velocidad/direccion/rafagas de viento. Se guarda como JSONB en `ordenes_produccion.meteo` junto al resto de datos de la orden. Si la API falla (sin red, timeout 3s, error HTTP), `meteo` queda en NULL y la fabricacion continua igualmente — **nunca bloquea la orden**. El operario no ve nada durante el proceso; solo aparece un texto pequeno en la tarjeta de detalle de la orden completada (ej: `21.4°C · 68% HR · 14.5 km/h`). Permite analizar correlaciones futuras entre meteo y mermas / desviaciones QC.
+12. **Registro de quien hizo la orden + duracion (visible solo a admin)**: al pulsar Confirmar fabricacion o Confirmar envasado, el sistema persiste el `operario_id` del usuario logueado en ese momento (sobrescribe el operario asignado al planificar — manda quien ejecuta). Tambien guarda `creado_por_id` (quien creo la orden originalmente), `fecha_inicio` (apertura del modal) y `fecha_fin` (confirmacion). En el panel de detalle de la orden:
+    - **Si entras como admin**: ves "Hecha por <Nombre> · Duracion 47 min 12s" (y "(admin)" si quien ejecuto era admin).
+    - **Si entras como trabajador (operario)**: NO ves nada de eso. Solo ves los datos tecnicos (pH, solidos, viscosidad, lote, fecha) sin saber quien la hizo ni cuanto tardo.
+    - **Defensa server-side**: el endpoint `GET /api/produccion/:id/detalle` borra los campos `operario_id`, `operario_nombre`, `operario_rol` y `duracion_segundos` del JSON respuesta cuando el usuario no es admin. Inspeccionar Network en DevTools no devuelve esos datos.
+    - **Para que la duracion sea util**: el modal de fabricacion del frontend manda `fecha_inicio_cliente` (timestamp en que el operario abrio el modal). Si no se manda, fecha_inicio queda como NOW() y la duracion sale 0 (no se muestra). En envasado planificado tambien se acepta este campo; en envasado rapido la duracion es ≈ 0 (proceso en una sola pulsacion).
 
 **Tiempo de fabricacion (recopilacion automatica):**
 
@@ -402,9 +420,11 @@ Si planificas 1000 kg pero produces 980 kg:
 Si los valores de pH, solidos o viscosidad estan fuera de los rangos definidos en la receta:
 - La fabricacion se completa normalmente (materias primas descontadas, stock_moves creados)
 - Pero el lote resultante queda en estado **Cuarentena** en lugar de Aprobado
+- **El stock del producto fabricado NO sube hasta que el lote sea aprobado**: la cantidad fabricada queda registrada en el lote pero no aparece como disponible para vender ni envasar. Esto evita que el material fuera de spec llegue al cliente por error.
 - El operario recibe un aviso en pantalla indicando que parametros estan desviados
 - Se anade una nota automatica a la orden: "Lote desviado de parametros de calidad: pH 4.0 fuera de rango [6.5-7.5]"
-- Un responsable de calidad debe ir a **Lotes** y aprobar o rechazar el lote manualmente tras revision
+- Un responsable de calidad debe ir a **Lotes** y aprobar (con motivo ≥10 caracteres) o rechazar el lote manualmente tras revision (ver seccion 3)
+- Cuando se aprueba el lote desde cuarentena, el stock del producto sube automaticamente con la cantidad fabricada y se registra el revisor + motivo en la ficha del lote
 
 ---
 
@@ -566,18 +586,22 @@ La columna **Accion** muestra el estado con color para ver de un vistazo que ped
 6. Si es producto envasado → el boton cambia a naranja (envasar primero)
 7. Si es producto granel → el boton cambia a verde (consumir directamente)
 
-### Editar un pedido
+### Editar un pedido (solo admin)
 
 1. Pulsar el **lapiz** en el pedido (solo admin, solo si no esta completado)
 2. Modificar productos, cantidades, precios, fecha, cliente
 3. Guardar — los totales se recalculan automaticamente en el servidor
 
-### Cancelar un pedido
+> **Restriccion server-side**: el endpoint `PUT /api/pedidos/:id` esta protegido por el middleware `adminOnly`. Si un usuario rol=trabajador intenta editar via API directa, recibe error 403. La proteccion no depende solo del boton del frontend.
+
+### Cancelar un pedido (solo admin)
 
 1. Pulsar la **X** en el pedido
 2. Confirmar cancelacion
 3. Las reservas de stock se liberan automaticamente
 4. Se puede reactivar un pedido cancelado cambiando su estado a Confirmado (re-reserva stock)
+
+> **Restriccion server-side**: el endpoint `DELETE /api/pedidos/:id` esta protegido por `adminOnly`. Trabajadores no pueden cancelar pedidos ni siquiera con llamadas API directas. Esto evita robos de stock por liberacion forzada de reservas.
 
 ### Albaran de entrega
 
@@ -695,7 +719,7 @@ Barras que muestran facturacion mensual:
 
 Tabla con todos los productos vendibles:
 - **Precio venta**: lo que cobras
-- **Precio coste**: coste **real actual** del producto — el mismo valor que aparece en la pantalla **Productos** (calculado desde el CMP de los lotes que tienes en almacén)
+- **Precio coste**: coste **real actual** del producto, calculado por asignación **"más barato primero"** sobre los lotes aprobados que tienes en almacén (ver detalle abajo)
 - **Margen %**: (venta - coste) / venta x 100
   - Verde: >40%
   - Naranja: 20-40%
@@ -705,6 +729,28 @@ Tabla con todos los productos vendibles:
 Se puede filtrar por: Todos / Granel / Envasado
 
 > Esta sección responde a: *"¿Cuánto gano hoy con cada producto, según los costes reales que ya he pagado?"*
+
+#### Cómo calcula el coste actual ("cheapest-first")
+
+Para cada ingrediente de la receta, el sistema simula que vas a fabricar AHORA con los lotes que tienes en almacén, **empezando siempre por el más barato disponible**. Cuando el lote más barato se agota, sigue por el siguiente más barato, y así sucesivamente.
+
+**Ejemplo:** la receta necesita 10 kg de Persulfato Amónico.
+
+| Lote | Stock | Precio compra |
+|------|-------|---------------|
+| LMP-A | 5 kg  | 3,66 €/kg     |
+| LMP-B | 50 kg | 3,82 €/kg     |
+
+Asignación cheapest-first:
+- 5 kg del lote A × 3,66 €/kg = **18,30 €**
+- 5 kg del lote B × 3,82 €/kg = **19,10 €**
+- **Coste total** del ingrediente = 37,40 € → precio efectivo **3,74 €/kg**
+
+El desglose muestra ese precio efectivo (3,74) en la columna PRECIO, no el del lote más barato ni el CMP.
+
+**Si no hay stock suficiente** para cubrir la cantidad necesaria con los lotes existentes, el resto se valora al **precio ficha** del producto (campo `precio_unitario` que se muestra en la pantalla Productos). Así el desglose nunca queda subvalorado: refleja el coste real al que arrancaría la siguiente fabricación.
+
+**Productos envasados**: el ingrediente "cola granel" tiene sus propios lotes con `precio_compra` igual al coste real al que se fabricó. La asignación cheapest-first se aplica también ahí, lo que permite ver cuándo conviene tirar primero de cola granel barata acumulada antes de fabricar más.
 
 ### Valor inventario por tipo (donut)
 
@@ -773,9 +819,77 @@ Al final del CSV aparecen:
 
 > El sistema ya tiene pesos por defecto para todos los envases. Ajustalos si los pesos reales de tu proveedor son diferentes.
 
+**Cobertura completa del informe (anti-falsa omision):**
+
+El informe incluye **TODOS los productos tipo "material_embalaje" que se hayan consumido en el periodo**, no solo los que tienen peso configurado:
+
+- Si un material tiene `peso_plastico_kg` configurado: aparece con su peso en kg y se suma al total de kg de plastico declarables.
+- Si un material **NO tiene peso configurado** (por olvido al crear la ficha): aparece igualmente en el CSV con la etiqueta `PESO NO CONFIGURADO` en la columna de peso y `REVISAR` en la columna kg total. Al final del CSV se muestra una seccion "AVISO" con el listado de materiales que faltan de configurar.
+
+> Esto evita el riesgo de que un envase plastico nuevo (etiquetas, film retractil, cajas con elementos plasticos) se omita silenciosamente del informe Hacienda por no haberse rellenado su peso. El admin ve la lista de pendientes y los completa antes de presentar la declaracion.
+
 ---
 
 ## 10. Configuracion y Administracion
+
+### Permisos por rol (admin vs trabajador)
+
+El sistema tiene dos roles. Las restricciones se aplican **server-side** (endpoint API), no solo en el frontend — un trabajador con su token llamando directamente a la API recibe 403 en operaciones no permitidas.
+
+**Trabajador (operario) puede:**
+- **Lotes y stock**: añadir nuevos lotes, ver lista de lotes, cambiar estado de lotes (excepto aprobar cuarentena), ajustar stock manualmente, reconciliar.
+- **Fabricacion**: planificar nuevas ordenes de fabricacion, confirmar fabricaciones (ejecutar el reactor).
+- **Envasado**: planificar y confirmar envasados (rapido y planificado).
+- **Pedidos**: ver pedidos, crear pedidos nuevos, marcar consumo (consumir stock para completar).
+- **Productos / Recetas / Clientes / Proveedores**: solo LECTURA. Puede ver fichas pero no editar ni crear ni borrar.
+- **Borrar ordenes de fabricacion**: solo las que el mismo creo (creado_por_id) o ejecuto (operario_id). NO puede borrar ordenes ajenas.
+
+**Trabajador NO puede:**
+- Editar/crear/borrar productos, recetas, clientes, proveedores
+- Aprobar lotes en cuarentena (transicion cuarentena → aprobado)
+- Editar o cancelar pedidos (PUT/DELETE pedidos)
+- Acceder a Finanzas, Configuracion, Automatizaciones, Recuento
+- Ver precios de compra de lotes ni coste de produccion en panel detalle
+- Ver quien hizo una orden ni cuanto tardo
+- Borrar ordenes ajenas
+
+**Admin puede todo lo del trabajador, ademas:**
+- Editar/crear/borrar productos, recetas, clientes, proveedores
+- Aprobar lotes en cuarentena (con motivo ≥10 chars)
+- Editar y cancelar pedidos
+- Acceso completo a Finanzas, Configuracion, Automatizaciones, Recuento
+- Ver precios, costes, operario ejecutor, duraciones, media receta
+- Borrar cualquier orden de fabricacion (no solo las suyas)
+- Crear usuarios, ver login_logs, configurar SMTP, gestionar backups
+- Restaurar BD desde backup (con red de seguridad de pre-backup automatico)
+
+### Trazabilidad de quien hizo cada cosa
+
+Cada orden de fabricacion y envasado registra dos campos distintos:
+
+- **`creado_por_id`**: usuario que pulsa "Nueva fabricacion" / "Planificar envasado". Quien planifica.
+- **`operario_id`**: usuario que pulsa "Confirmar fabricacion" / "Confirmar envasado". Quien ejecuta.
+
+Pueden ser el mismo (un operario que planifica y luego fabrica) o distintos (admin planifica, operario ejecuta).
+
+**Para envasados** (rapido, planificado y confirmar-envasado) tambien se capturan los mismos datos que en fabricacion:
+- Snapshot meteorologico Open-Meteo en el momento de confirmar
+- `fecha_inicio` (apertura del modal) y `fecha_fin` (confirmacion) → duracion real
+- `operario_id` y `creado_por_id`
+
+El admin ve en el panel detalle de cualquier orden:
+- "Hecha por <Nombre>" (operario_id)
+- "Duracion <tiempo>" + "Media receta <tiempo medio> (n)"
+- Badge meteo "X°C · Y% HR · Z km/h"
+- Coste total
+- Si fue creada por otro usuario, aparece junto al nombre.
+
+### Sesion y seguridad
+
+- **Token JWT con TTL 8 horas**: el token de sesion caduca a las 8 horas de iniciado. Antes era 7 dias, demasiado para un entorno industrial multi-operario donde los moviles pueden perderse o compartirse. Tras 8 horas, el sistema redirige al login.
+- **Auto-refresh proactivo**: la app refresca el token automaticamente cada 4 horas y al volver a la pestana tras inactividad, asi el operario no nota cortes durante un turno normal.
+- **Logout efectivo (revocacion server-side)**: pulsar Cerrar sesion no solo borra el token del navegador — tambien lo registra en la tabla `sesiones_revocadas` del servidor. A partir de ese momento, ningun request con ese token sera aceptado, aunque alguien lo haya copiado antes. Esto resuelve el caso "operario pierde el movil": admin no necesita esperar a que caduque el token, basta con cerrar la sesion del usuario.
+- **Cache de revocados**: el middleware mantiene una cache en memoria con los `jti` revocados (TTL 30s) para no consultar la BD en cada request. Tras un logout, la cache se invalida inmediatamente.
 
 ### Datos de empresa
 
@@ -809,8 +923,20 @@ Tipos de alerta:
 ### Backups
 
 - **Backup manual**: pulsar para generar backup cifrado (AES-256)
-- **Restaurar**: seleccionar un backup para restaurar toda la base de datos
+- **Validacion automatica antes de borrar**: tras crear el backup nuevo, el sistema **descifra y verifica que el contenido es un dump de PostgreSQL valido**. Solo si la validacion pasa, se borran los backups antiguos (mantenemos los 2 mas recientes en local). Si la validacion falla:
+  - El backup corrupto se elimina del disco
+  - **NO se borran los backups antiguos** — quedan preservados
+  - El sistema devuelve error con detalle ("Backup creado pero validacion fallo: ...")
+- **Restaurar (proceso a prueba de fallos)**: el restore tiene 4 etapas con red de seguridad en cada paso. **Es matematicamente imposible perder los datos por culpa del restore**:
+  1. **Validacion previa del backup objetivo**: descifra y comprueba cabecera (`PostgreSQL database dump` o `SET`/`CREATE`) Y pie de archivo (marker `PostgreSQL database dump complete`). Si el archivo esta truncado o corrupto, el restore se aborta sin tocar la BD.
+  2. **Pre-backup automatico de seguridad**: antes de borrar nada, el sistema crea un backup completo del estado actual con nombre `pre-restore-AAAA-MM-DD_HH-MM-SS.sql.gz.enc` en `/backups/`. Si el pre-backup falla, el restore se aborta.
+  3. **Restore en transaccion atomica**: ejecuta DROP TABLES + COPY de datos dentro de una unica transaccion PostgreSQL con `ON_ERROR_STOP=1`. Si una sola sentencia falla, PostgreSQL hace ROLLBACK total — la BD queda exactamente como estaba antes.
+  4. **Rollback automatico si algo falla**: si el restore principal aborta, el sistema **automaticamente** restaura el pre-backup creado en el paso 2. Resultado: BD vuelve al estado previo, sin intervencion humana, sin perdida de datos.
+- En la respuesta del endpoint aparece el nombre del `pre_restore_backup` para que el admin pueda borrarlo a mano cuando confirme que el restore fue correcto (queda como copia adicional hasta que se decida).
 - Los backups incluyen la base de datos completa + archivos subidos (fichas SDS, fotos)
+- **Subida a Drive**: si rclone esta configurado, sube tambien a Google Drive (manteniendo los 10 mas recientes alli)
+
+> **Garantia formal**: en cualquier escenario de fallo de restore (backup corrupto, disco lleno, psql interrumpido, error sintaxis, fallo electrico), la base de datos queda en uno de estos dos estados: (a) el original previo al restore, o (b) restaurada al pre-backup automatico. **Nunca queda vacia ni en estado inconsistente**.
 
 ### Auditoria
 
@@ -854,6 +980,7 @@ Cuando confirmas un pedido cuyo producto no tiene stock granel, el sistema crea 
 
 - Anti-duplicado: si ya existe orden borrador/confirmada/en_proceso del mismo granel en los ultimos 5 dias, omite con motivo `orden_ya_pendiente`.
 - Si no hay receta activa para el producto: omite con motivo `sin_receta_fabricacion` (debes crear la receta primero).
+- **Solo soportado para productos tipo `producto_fabricado` (granel)**. Si el pedido es de un producto envasado sin stock, la automatizacion registra `feature_envasado_no_disponible_todavia` en el historial y muestra el tip al admin: *"Auto-fabricar desde pedido envasado aun no soportado. Crea la orden de fabricacion del granel manualmente."* Es una limitacion conocida; mientras no este implementada, el operario debe planificar manualmente la fabricacion del granel cuando el pedido es envasado.
 
 #### Auto-completar pedido con stock
 Cuando confirmas (o cambia a fabricado/envasado) un pedido y hay stock disponible del producto envasado, el sistema descuenta lotes FEFO y deja el pedido en `completado` sin que tengas que pulsar Consumir.
@@ -957,7 +1084,19 @@ Cada entrada muestra:
 
 Mientras estas en cualquier pagina, un hook (polling 30s) detecta nuevas entradas no leidas y dispara un toast sileo con el detalle + boton "Ver orden" / "Ver historial". Asi te enteras de cada automatizacion sin tener que abrir el panel.
 
-### 11.7 Tabla de retencion de retry para emails
+### 11.7 Vigilancia de los crons internos (heartbeat)
+
+Los crons internos (`sweep_pedidos`, `sweep_stock_reglas`, `backup_nocturno_tick`, `retry_email_proveedor`) escriben un latido en la tabla `cron_heartbeat` cada vez que terminan correctamente. El frontend pollea cada 60 segundos el endpoint `/api/health/cron` y, si algun cron lleva mas tiempo del esperado sin ejecutar (umbral configurado por cron, tipicamente 3x su intervalo), dispara una notificacion sileo de error persistente al admin:
+
+> *"Sistema caido: Auto-completar pedidos. No ha ejecutado en 12 min (umbral 5 min). Avisa al tecnico."*
+
+Asi el admin se entera al instante de que un cron ha dejado de funcionar (proceso muerto, BD desconectada, excepcion no manejada), antes de que se acumulen pedidos sin auto-completar o albaranes sin enviar.
+
+- La tabla `cron_heartbeat` guarda: `nombre`, `ultimo_run`, `ultimo_status` (`ok` | `error`), `ultimo_error`, `intervalo_ms`, `umbral_ms`.
+- Si el cron lanza una excepcion, el heartbeat se actualiza con `status=error` y el mensaje, lo que tambien dispara la alerta sileo.
+- Cuando el cron se recupera (vuelve a ejecutar OK antes del umbral), el frontend deja de avisar y permite que la siguiente caida vuelva a alertar.
+
+### 11.8 Tabla de retencion de retry para emails
 
 Los emails al proveedor que fallan se reintentan automaticamente:
 - Maximo 3 reintentos (configurable en el endpoint `/automatizaciones/config`).
@@ -1054,8 +1193,9 @@ Al fabricar un lote o anadir stock, el icono de **escaner** abre la camara del m
 | Termino | Significado |
 |---------|------------|
 | **FEFO** | First Expiry, First Out — primero que caduca, primero que se usa (variante de FIFO optimizada para productos con caducidad) |
-| **CMP** | Coste Medio Ponderado — media ponderada del precio de compra de todos los lotes en stock |
-| **Coste actual** | Coste real basado en el CMP de los lotes que tienes ahora en almacén. Lo que se ve en pantalla **Productos** y en la tabla **Rentabilidad** de Finanzas |
+| **CMP** | Coste Medio Ponderado — media ponderada del precio de compra de todos los lotes en stock. Se usa como fallback cuando no hay stock suficiente para asignación cheapest-first |
+| **Cheapest-first** | Algoritmo de asignación de coste: para cubrir la cantidad necesaria, empieza por el lote con el precio_compra más bajo y sube al siguiente cuando se agota. Refleja el coste real con el que arrancaría la próxima fabricación |
+| **Coste actual** | Coste real calculado con asignación "cheapest-first" (más barato primero) sobre los lotes aprobados en almacén. Si no hay stock suficiente, se completa al precio ficha del producto. Aparece en la tabla **Rentabilidad** de Finanzas |
 | **Coste futuro** | Coste proyectado usando el precio ficha de las materias primas (lo que costará la próxima compra). Se usa en **Impacto · Variación de margen** de Finanzas |
 | **Merma** | Diferencia entre cantidad planificada y real producida (perdida en el proceso) |
 | **Granel** | Cola sin envasar, directamente del reactor |
@@ -1067,3 +1207,4 @@ Al fabricar un lote o anadir stock, el icono de **escaner** abre la camara del m
 | **Reconciliacion** | Verificar y corregir que el stock mostrado coincide con los lotes reales. Cada correccion queda registrada en stock_moves |
 | **Multiplicador** | Factor que convierte cajas/pales en unidades individuales (ej: Caja 18 → multiplicador 18) |
 | **Cuarentena QC** | Estado de un lote que no ha pasado control de calidad. Puede ser aprobado o rechazado por un responsable |
+| **Meteo snapshot** | Captura automatica de condiciones climaticas exteriores (Open-Meteo) al confirmar una orden de fabricacion. Se guarda como JSONB en `ordenes_produccion.meteo` para correlacionar mermas con clima |

@@ -162,11 +162,17 @@ router.get('/backup-status', async (_req, res) => {
 });
 
 // POST /api/configuracion/backup — ejecuta backup cifrado + sube a Drive
-router.post('/backup', async (_req, res) => {
+router.post('/backup', async (req, res) => {
   try {
     const { ejecutarBackup } = require('../services/backup.service');
     const result = await ejecutarBackup();
     ultimoBackup = { fecha: new Date().toISOString(), ok: true, filename: result.filename, size: result.size, local: result.local, icloud: result.icloud, drive: result.drive, error: result.driveError };
+    // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta del backup.
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'BACKUP_MANUAL', 'sistema', NULL, $2)`,
+      [(req as any).user?.id ?? null, `Backup manual: ${result.filename} (${result.size}). Drive=${result.drive ? 'OK' : 'NO'}`]
+    ).catch((e: unknown) => logger.warn('[auditoria BACKUP_MANUAL]', { err: e instanceof Error ? e.message : e }));
     res.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error en backup';
@@ -205,7 +211,23 @@ router.post('/restaurar', async (req, res) => {
     const { restaurarBackup } = require('../services/backup.service');
     const result = await restaurarBackup(backupPath);
 
-    if (!result.ok) return res.status(500).json({ error: result.message });
+    // [H1.1 audit v3] Auditoría OBLIGATORIA del restore (operación más
+    // destructiva del sistema). Caso especial: usamos await + try/catch para
+    // intentar registrar antes de responder al cliente, pero el catch es
+    // SILENCIOSO — un fallo del INSERT NUNCA se devuelve al cliente, la
+    // respuesta del restore va siempre. La forensia depende de logs si la
+    // BD también está mal. Se registra OK o KO con detalle.
+    try {
+      await pool.query(
+        `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+         VALUES ($1, 'RESTORE_BACKUP', 'sistema', NULL, $2)`,
+        [(req as any).user?.id ?? null, `Restore ${filename} → ${result.ok ? 'OK' : 'FALLÓ'}. ${result.message ?? ''}${result.pre_restore_backup ? ` Pre-backup: ${result.pre_restore_backup}` : ''}`.slice(0, 500)]
+      );
+    } catch (e) {
+      logger.warn('[auditoria RESTORE_BACKUP]', { err: e instanceof Error ? e.message : e });
+    }
+
+    if (!result.ok) return res.status(500).json({ error: result.message, pre_restore_backup: result.pre_restore_backup });
     return res.json(result);
   } catch (err: unknown) {
     return res.status(500).json({ error: 'Error al restaurar el backup.' });

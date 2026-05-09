@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { adminOnly } from '../middleware/auth';
 
 const router = Router();
 
 // POST /api/recetas/importar
-router.post('/importar', async (req, res) => {
+router.post('/importar', adminOnly, async (req, res) => {
   try {
     const { recetas } = req.body;
     if (!Array.isArray(recetas)) return res.status(400).json({ error: 'recetas debe ser un array' });
@@ -143,7 +144,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/recetas
-router.post('/', async (req, res) => {
+router.post('/', adminOnly, async (req, res) => {
   try {
     let { producto_id } = req.body;
     const { nombre, rendimiento, notas, pasos, ingredientes, tipo_receta, ph_min, ph_max, solidos_min, solidos_max, viscosidad_min, viscosidad_max } = req.body;
@@ -232,7 +233,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/recetas/:id
-router.put('/:id', async (req, res) => {
+router.put('/:id', adminOnly, async (req, res) => {
   try {
     const { nombre, rendimiento, notas, pasos, activa, tipo_receta, producto_id, ph_min, ph_max, solidos_min, solidos_max, viscosidad_min, viscosidad_max } = req.body;
     if (rendimiento != null && Number(rendimiento) <= 0) {
@@ -270,7 +271,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE /api/recetas/:id  (soft delete)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', adminOnly, async (req, res) => {
   try {
     await pool.query(`UPDATE recetas SET activa = FALSE WHERE id = $1`, [req.params.id]);
     invalidarCacheFinanzas();
@@ -283,7 +284,7 @@ router.delete('/:id', async (req, res) => {
 // ── Ingredientes ──────────────────────────────────────────────
 
 // POST /api/recetas/:id/ingredientes
-router.post('/:id/ingredientes', async (req, res) => {
+router.post('/:id/ingredientes', adminOnly, async (req, res) => {
   try {
     const { materia_prima_id, cantidad, porcentaje_merma, unidad_medida } = req.body;
     if (!materia_prima_id || !cantidad) {
@@ -314,7 +315,7 @@ router.post('/:id/ingredientes', async (req, res) => {
 });
 
 // PUT /api/recetas/:id/ingredientes/:ingId
-router.put('/:id/ingredientes/:ingId', async (req, res) => {
+router.put('/:id/ingredientes/:ingId', adminOnly, async (req, res) => {
   try {
     const { cantidad, porcentaje_merma, unidad_medida } = req.body;
     const { rows: [ing] } = await pool.query(
@@ -341,7 +342,7 @@ router.put('/:id/ingredientes/:ingId', async (req, res) => {
 });
 
 // DELETE /api/recetas/:id/ingredientes/:ingId
-router.delete('/:id/ingredientes/:ingId', async (req, res) => {
+router.delete('/:id/ingredientes/:ingId', adminOnly, async (req, res) => {
   try {
     await pool.query(
       `DELETE FROM ingredientes_receta WHERE id = $1 AND receta_id = $2`,

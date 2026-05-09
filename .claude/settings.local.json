@@ -82,7 +82,23 @@
       "Bash(npm test *)",
       "Bash(npx tsx -e ' *)",
       "Bash(timeout 6 npx tsx src/index.ts)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(bash -n /Users/adrianmartinlopez/Documents/Loga/install.sh)",
+      "Bash(bash -n /Users/adrianmartinlopez/Documents/Loga/start.sh)",
+      "Bash(bash -n /Users/adrianmartinlopez/Documents/Loga/stop.sh)",
+      "Bash(bash -n /Users/adrianmartinlopez/Documents/Loga/uninstall.sh)",
+      "Bash(command -v pwsh)",
+      "Bash(pwsh -NoProfile -Command '[System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''/Users/adrianmartinlopez/Documents/Loga/__TRACKED_VAR__'\\\\'', [ref]$null, [ref]$null\\) | Out-Null; Write-Host '\\\\''__TRACKED_VAR__ OK'\\\\''')",
+      "Bash(git tag *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 *)",
+      "Bash(curl -sI \"https://nodejs.org/dist/v20.18.1/node-v20.18.1-x64.msi\")",
+      "Bash(curl -sIL \"https://get.enterprisedb.com/postgresql/postgresql-16.6-1-windows-x64.exe\")",
+      "Bash(grep -n \"DELETE.*produccion\\\\|async eliminar\\\\|return res.json\\({ ok: true, revertido\" /Users/adrianmartinlopez/Documents/Loga/backend/src/controllers/produccion.controller.ts)",
+      "Bash(curl -s -X POST http://localhost:3001/api/configuracion/restaurar -H 'Authorization: Bearer __TRACKED_VAR__' -H 'Content-Type: application/json' -d '{\"filename\":\"backup-2026-05-08_10-33-03.sql.gz.enc\"}' --max-time 600)",
+      "Bash(ps -p 50720 -o stat,tt)",
+      "Bash(curl -s -H 'Authorization: Bearer __TRACKED_VAR__' http://localhost:3001/api/health/cron)",
+      "Bash(grep *)"
     ]
   }
 }

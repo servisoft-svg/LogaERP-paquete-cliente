@@ -14,12 +14,12 @@ interface AuthContextType {
   loading: boolean;
   login: (email: string, password: string, remember: boolean) => Promise<User>;
   completeLogin: (usuario: User) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
   isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType>({
-  user: null, loading: true, login: async () => ({ id: '', nombre: '', email: '', rol: 'trabajador' }), completeLogin: () => {}, logout: () => {}, isAdmin: false,
+  user: null, loading: true, login: async () => ({ id: '', nombre: '', email: '', rol: 'trabajador' }), completeLogin: () => {}, logout: async () => {}, isAdmin: false,
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -58,7 +58,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const completeLogin = (usuario: User) => setUser(usuario);
 
-  const logout = () => {
+  const logout = async () => {
+    // Revocar token server-side (best-effort, no bloquea el logout local).
+    // Si falla la red, el cliente igualmente cierra sesión local — el token
+    // expirará por TTL natural (8h) en el peor caso.
+    try { await api.post('/auth/logout'); } catch { /* fail-silent */ }
     localStorage.removeItem('loga_token');
     sessionStorage.removeItem('loga_token');
     delete api.defaults.headers.common['Authorization'];
@@ -66,7 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     notify.info('Sesión cerrada');
   };
 
-  // Auto-refresh proactivo cada 6h: token TTL 7d, refresca pronto para no
+  // Auto-refresh proactivo: token TTL 8h. Refrescamos cada 4h para no
   // depender del 401 catch. También refresca al volver a la pestaña tras
   // estar inactivo, con cooldown de 60s para evitar spam si el usuario
   // alterna pestañas rápido (Fix #21).
@@ -95,7 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })();
       return inFlight;
     };
-    const interval = setInterval(refrescar, 6 * 60 * 60 * 1000); // 6 horas
+    const interval = setInterval(refrescar, 4 * 60 * 60 * 1000); // 4 horas (TTL=8h)
     const onVisible = () => { if (mounted && document.visibilityState === 'visible') refrescar(); };
     document.addEventListener('visibilitychange', onVisible);
     return () => {

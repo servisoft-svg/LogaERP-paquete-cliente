@@ -40,7 +40,7 @@ export default function Navbar() {
   }, [dark]);
 
   const visibleLinks = LINKS.filter(l => {
-    if (['/proveedores', '/clientes', '/finanzas', '/configuracion'].includes(l.to)) return isAdmin;
+    if (['/proveedores', '/clientes', '/finanzas', '/configuracion', '/automatizaciones'].includes(l.to)) return isAdmin;
     return true;
   });
 
@@ -50,7 +50,7 @@ export default function Navbar() {
     <>
       {/* ── Desktop top bar ── */}
       <header className="sticky top-0 z-40 w-full border-b border-gray-100 bg-white/95 backdrop-blur-sm hidden md:block">
-        <div className="mx-auto flex h-14 max-w-screen-xl items-center justify-between px-6 gap-4">
+        <div className="mx-auto flex h-14 max-w-screen-xl items-center justify-between pl-1 pr-24 gap-4">
           <Link to="/" className="flex items-center gap-3 shrink-0">
             <img src="/colas-loga.png" alt="Loga" className="h-9 w-auto object-contain" />
             <span className="text-base font-bold text-loga-red">Colas Loga</span>

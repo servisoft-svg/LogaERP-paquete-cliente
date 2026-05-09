@@ -7,6 +7,7 @@ import { invalidarCacheFinanzas } from './finanzas.routes';
 import { isAllowedExtension } from '../lib/fileValidation';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
+import { fetchMeteoSnapshot } from '../services/meteo.service';
 import { toNum } from '../types';
 import { logger } from '../lib/logger';
 
@@ -101,6 +102,8 @@ router.delete('/recordatorios/:id', async (req, res) => {
 
 // POST /api/produccion/envasado-rapido — envasado dinámico con orden + trazabilidad (SERIALIZABLE)
 router.post('/envasado-rapido', async (req, res) => {
+  // Snapshot meteo ANTES del BEGIN (timeout 3s, fail-soft).
+  const meteoEnvasadoRapido = await fetchMeteoSnapshot();
   const client = await pool.connect();
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE');
@@ -163,7 +166,11 @@ router.post('/envasado-rapido', async (req, res) => {
       return res.status(400).json({ error: 'Peso de envase no válido (debe ser > 0). Define peso_unitario_kg en el producto.' });
     }
 
-    const pesoTotal = pesoEnvase * totalUnidades;
+    // peso_unitario_kg representa el peso TOTAL de cola que entra en 1 envase
+    // (Bidón 30kg → 30, Caja 40×250g → 10). Por tanto: cola consumida =
+    // cantidad de envases × peso_envase. NO multiplicar por totalUnidades:
+    // eso multiplicaría por el factor multiplicador 2 veces (bug anterior 4×).
+    const pesoTotal = cantidadEnvases * pesoEnvase;
 
     // Verificar stock
     const stockCola = parseFloat(cola.stock_actual);
@@ -216,13 +223,22 @@ router.post('/envasado-rapido', async (req, res) => {
     const notaOrden = multiplicador > 1
       ? `Envasado rápido: ${cantidadEnvases} ${envase?.nombre ?? 'cajas'} × ${multiplicador} = ${totalUnidades} ud de ${cola.nombre}`
       : `Envasado rápido: ${totalUnidades} × ${fmtLabel} de ${cola.nombre}`;
+    // Captura inicio cliente para duración real (envasado rápido también)
+    let fechaInicioRapido: string | null = null;
+    if (typeof req.body.fecha_inicio_cliente === 'string' && req.body.fecha_inicio_cliente.trim()) {
+      const t = Date.parse(req.body.fecha_inicio_cliente);
+      const ahora = Date.now();
+      if (!Number.isNaN(t) && t <= ahora + 60_000 && ahora - t < 24 * 3600 * 1000) {
+        fechaInicioRapido = new Date(t).toISOString();
+      }
+    }
     const { rows: [orden] } = await client.query(
-      `INSERT INTO ordenes_produccion (receta_id, cantidad_planificada, cantidad_real_producida, estado, cliente, fecha_planificada, fecha_inicio, fecha_fin, notas, tipo_orden, cola_id, envase_id, formato_label)
+      `INSERT INTO ordenes_produccion (receta_id, cantidad_planificada, cantidad_real_producida, estado, cliente, fecha_planificada, fecha_inicio, fecha_fin, notas, tipo_orden, cola_id, envase_id, formato_label, operario_id, creado_por_id, meteo)
        VALUES (
          (SELECT id FROM recetas WHERE activa = true LIMIT 1),
-         $1, $1, 'completada', $2, CURRENT_DATE, NOW(), NOW(), $3, 'envasado', $4, $5, $6
+         $1, $1, 'completada', $2, CURRENT_DATE, COALESCE($7::TIMESTAMPTZ, NOW()), NOW(), $3, 'envasado', $4, $5, $6, $8::UUID, $8::UUID, $9::JSONB
        ) RETURNING id, numero_orden`,
-      [totalUnidades, cliente ?? null, notaOrden, cola_id, envase_id || null, fmtLabel]
+      [totalUnidades, cliente ?? null, notaOrden, cola_id, envase_id || null, fmtLabel, fechaInicioRapido, userId, meteoEnvasadoRapido ? JSON.stringify(meteoEnvasadoRapido) : null]
     );
 
     // ── Descontar cola granel FIFO + stock_moves ──
@@ -456,15 +472,16 @@ router.post('/envasado-planificar', async (req, res) => {
     const fmtLabel = formato_label || envase.nombre || '';
     const materialesJson = Array.isArray(materiales) ? JSON.stringify(materiales) : '[]';
 
+    const userIdPlan = (req as any).user?.id ?? null;
     const { rows: [orden] } = await pool.query(
-      `INSERT INTO ordenes_produccion (receta_id, cantidad_planificada, estado, cliente, cliente_id, fecha_planificada, notas, tipo_orden, cola_id, envase_id, formato_label, producto_final_id, materiales)
+      `INSERT INTO ordenes_produccion (receta_id, cantidad_planificada, estado, cliente, cliente_id, fecha_planificada, notas, tipo_orden, cola_id, envase_id, formato_label, producto_final_id, materiales, creado_por_id)
        VALUES (
          (SELECT id FROM recetas WHERE activa = true LIMIT 1),
-         $1, 'borrador', $2, $3, $4, $5, 'envasado', $6, $7, $8, $9, $10::JSONB
+         $1, 'borrador', $2, $3, $4, $5, 'envasado', $6, $7, $8, $9, $10::JSONB, $11::UUID
        ) RETURNING id, numero_orden`,
       [cantidad_unidades, cliente ?? null, cliente_id ?? null, fecha_planificada ?? null,
        notas ?? `Envasado: ${cantidad_unidades} × ${productoFinalNombre || fmtLabel} — ${cola.nombre}`,
-       cola_id, envase_id, fmtLabel, producto_final_id ?? null, materialesJson]
+       cola_id, envase_id, fmtLabel, producto_final_id ?? null, materialesJson, userIdPlan]
     );
 
     return res.status(201).json({
@@ -485,25 +502,10 @@ router.post('/envasado-planificar', async (req, res) => {
 // Helper: calculate envasado consumption from an order
 async function calcularConsumoEnvasado(orden: any) {
   const { rows: [cola] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario FROM productos WHERE id = $1`, [orden.cola_id]);
-  const { rows: [envase] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario, unidades_por_envase FROM productos WHERE id = $1`, [orden.envase_id]);
+  const { rows: [envase] } = await pool.query(`SELECT id, nombre, codigo, stock_actual, coste_medio_actual, precio_unitario, unidades_por_envase, peso_unitario_kg FROM productos WHERE id = $1`, [orden.envase_id]);
   if (!cola || !envase) throw new Error('Producto no encontrado.');
 
-  // Get peso from producto_final (not envase!)
-  let pesoUnitario = 0;
-  if (orden.producto_final_id) {
-    const { rows: [pf] } = await pool.query(`SELECT peso_unitario_kg FROM productos WHERE id = $1`, [orden.producto_final_id]);
-    pesoUnitario = parseFloat(pf?.peso_unitario_kg ?? '0');
-  }
-  // Fallback: parse from envase name
-  if (!pesoUnitario) {
-    const match = envase.nombre.match(/(\d+(?:\.\d+)?)\s*(g|kg|L)/i);
-    if (match) { pesoUnitario = parseFloat(match[1]); if (match[2].toLowerCase() === 'g') pesoUnitario /= 1000; }
-  }
-  if (!pesoUnitario) throw new Error('No se puede determinar el peso unitario.');
-
-  const cantidadInput = parseFloat(orden.cantidad_planificada);
-
-  // Multiplicador caja/palé (Fix C-1): campo explícito → fallback regex.
+  // Multiplicador: prioridad campo explícito BD > regex del nombre > 1.
   let multiplicador = 1;
   if (envase.unidades_por_envase && envase.unidades_por_envase > 1) {
     multiplicador = envase.unidades_por_envase;
@@ -512,8 +514,37 @@ async function calcularConsumoEnvasado(orden: any) {
     if (multMatch) multiplicador = parseInt(multMatch[1], 10);
   }
 
+  // Peso de cola por envase. Estrategia (más fiable primero):
+  //   1. envase.peso_unitario_kg (kg de cola que entra en 1 envase). Funciona
+  //      uniforme para sueltos (Bidón 30kg → 30) y cajas (Caja 40×250g → 10).
+  //   2. producto_final.peso_unitario_kg × multiplicador (config legacy donde
+  //      el peso vive en el producto envasado, no en el envase).
+  //   3. Regex del nombre del envase (último fallback).
+  let pesoColaPorEnvase = parseFloat(envase.peso_unitario_kg ?? '0');
+  let pesoUnitario = multiplicador > 0 ? pesoColaPorEnvase / multiplicador : pesoColaPorEnvase;
+
+  if (!pesoColaPorEnvase && orden.producto_final_id) {
+    const { rows: [pf] } = await pool.query(`SELECT peso_unitario_kg FROM productos WHERE id = $1`, [orden.producto_final_id]);
+    const pfPeso = parseFloat(pf?.peso_unitario_kg ?? '0');
+    if (pfPeso > 0) {
+      pesoUnitario = pfPeso;
+      pesoColaPorEnvase = pfPeso * multiplicador;
+    }
+  }
+  if (!pesoColaPorEnvase) {
+    const match = envase.nombre.match(/(\d+(?:\.\d+)?)\s*(g|kg|L)/i);
+    if (match) {
+      let v = parseFloat(match[1]);
+      if (match[2].toLowerCase() === 'g') v /= 1000;
+      pesoColaPorEnvase = v;
+      pesoUnitario = multiplicador > 0 ? v / multiplicador : v;
+    }
+  }
+  if (!pesoColaPorEnvase) throw new Error('No se puede determinar el peso de cola por envase. Configura peso_unitario_kg en la ficha del envase.');
+
+  const cantidadInput = parseFloat(orden.cantidad_planificada);
   const totalUnidades = cantidadInput * multiplicador;
-  const pesoColaNecesario = totalUnidades * pesoUnitario;
+  const pesoColaNecesario = cantidadInput * pesoColaPorEnvase;
 
   // Materials from order
   const materialesArr: { producto_id: string; cantidad: number }[] = Array.isArray(orden.materiales)
@@ -626,6 +657,8 @@ router.get('/:id/preview-envasado', async (req, res) => {
 
 // POST /api/produccion/:id/confirmar-envasado — ejecutar orden de envasado (SERIALIZABLE)
 router.post('/:id/confirmar-envasado', async (req, res) => {
+  // Snapshot meteo ANTES del BEGIN (timeout 3s, fail-soft).
+  const meteoEnvasado = await fetchMeteoSnapshot();
   const client = await pool.connect();
   try {
     await client.query('BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE');
@@ -733,9 +766,29 @@ router.post('/:id/confirmar-envasado', async (req, res) => {
       [pe.id, lotePE.id, calc.totalUnidades, id, userId, `Envasado ${orden.numero_orden}: ${calc.totalUnidades} ud`]
     );
 
+    // Captura de duración: timestamp de apertura del modal de envasar (cliente)
+    // — mismo patrón que en fabricación. Si el cliente no lo manda, fecha_inicio
+    // queda como NOW() (orden inmediata, duración ≈ 0).
+    let fechaInicioEnv: string | null = null;
+    if (typeof req.body.fecha_inicio_cliente === 'string' && req.body.fecha_inicio_cliente.trim()) {
+      const t = Date.parse(req.body.fecha_inicio_cliente);
+      const ahora = Date.now();
+      if (!Number.isNaN(t) && t <= ahora + 60_000 && ahora - t < 24 * 3600 * 1000) {
+        fechaInicioEnv = new Date(t).toISOString();
+      }
+    }
+
     await client.query(
-      `UPDATE ordenes_produccion SET estado = 'completada', cantidad_real_producida = $1, lote_producido_id = $2, fecha_inicio = NOW(), fecha_fin = NOW() WHERE id = $3`,
-      [calc.totalUnidades, lotePE.id, id]
+      `UPDATE ordenes_produccion
+         SET estado = 'completada',
+             cantidad_real_producida = $1,
+             lote_producido_id = $2,
+             fecha_inicio = COALESCE($4::TIMESTAMPTZ, NOW()),
+             fecha_fin = NOW(),
+             operario_id = COALESCE($5::UUID, operario_id),
+             meteo = COALESCE($6::JSONB, meteo)
+       WHERE id = $3`,
+      [calc.totalUnidades, lotePE.id, id, fechaInicioEnv, userId, meteoEnvasado ? JSON.stringify(meteoEnvasado) : null]
     );
 
     await client.query('COMMIT');

@@ -1,18 +1,27 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { adminOnly } from '../middleware/auth';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
 // Validaciones reusables (Fix #24) — POST y bulk import.
 const TIPOS_VALIDOS = new Set(['materia_prima', 'producto_fabricado', 'producto_envasado', 'material_embalaje']);
-const UNIDADES_VALIDAS = new Set(['kg', 'g', 'l', 'ml', 'unidad', 'm', 'cm', 'caja', 'rollo']);
+// Whitelist de unidades. Incluye abreviaturas reales usadas en planta:
+// 'ud' (envasados, 77 productos en BD), 'l'/'L' (litros), variantes habituales.
+// La validación normaliza a minúsculas antes de comparar para no fallar por
+// mayúscula casual (ej: 'L' en BD legacy).
+const UNIDADES_VALIDAS = new Set(['kg', 'g', 'l', 'ml', 'ud', 'unidad', 'unidades', 'm', 'cm', 'caja', 'rollo', 'pal', 'palet']);
 function validarProductoPayload(p: any): string | null {
   if (!p || typeof p !== 'object') return 'payload vacío';
   if (!p.nombre || typeof p.nombre !== 'string' || p.nombre.trim().length === 0) return 'nombre obligatorio';
   if (p.nombre.length > 200) return 'nombre máximo 200 caracteres';
   if (!p.tipo || !TIPOS_VALIDOS.has(p.tipo)) return `tipo debe ser uno de: ${[...TIPOS_VALIDOS].join(', ')}`;
-  if (p.unidad_medida && !UNIDADES_VALIDAS.has(p.unidad_medida)) return `unidad_medida no válida: ${p.unidad_medida}`;
+  if (p.unidad_medida) {
+    const u = String(p.unidad_medida).trim().toLowerCase();
+    if (!UNIDADES_VALIDAS.has(u)) return `unidad_medida no válida: ${p.unidad_medida}`;
+  }
   if (p.codigo && (typeof p.codigo !== 'string' || p.codigo.length > 50)) return 'codigo máximo 50 caracteres';
   if (p.descripcion && (typeof p.descripcion !== 'string' || p.descripcion.length > 2000)) return 'descripcion máximo 2000 caracteres';
   for (const f of ['stock_minimo', 'stock_maximo', 'precio_unitario', 'precio_venta'] as const) {
@@ -29,8 +38,8 @@ function validarProductoPayload(p: any): string | null {
   return null;
 }
 
-// POST /api/productos/importar
-router.post('/importar', async (req, res) => {
+// POST /api/productos/importar — solo admin
+router.post('/importar', adminOnly, async (req, res) => {
   try {
     const { productos } = req.body;
     if (!Array.isArray(productos)) return res.status(400).json({ error: 'productos debe ser un array' });
@@ -144,7 +153,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/productos
-router.post('/', async (req, res) => {
+router.post('/', adminOnly, async (req, res) => {
   try {
     const validationErr = validarProductoPayload(req.body);
     if (validationErr) return res.status(400).json({ error: validationErr });
@@ -153,6 +162,7 @@ router.post('/', async (req, res) => {
     const {
       nombre, descripcion, tipo, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
+      peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses,
     } = req.body;
 
     // Auto-generar codigo si no viene
@@ -170,11 +180,15 @@ router.post('/', async (req, res) => {
       codigo = `${prefijo}-${String(nextNum).padStart(3, '0')}`;
     }
 
+    // Bug previo: el POST omitía peso_unitario_kg, unidades_por_envase, peso_plastico_kg
+    // y caducidad_meses → al crear envase nuevo se perdían sus datos. Añadidos aquí.
     const { rows: [prod] } = await pool.query(
       `INSERT INTO productos
          (codigo, nombre, descripcion, tipo, unidad_medida,
-          stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id)
-       VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10)
+          stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
+          peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses)
+       VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10,
+               $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER)
        RETURNING *`,
       [
         codigo.trim().toUpperCase(),
@@ -187,6 +201,14 @@ router.post('/', async (req, res) => {
         Number(precio_unitario ?? 0).toFixed(6),
         Number(precio_venta ?? 0).toFixed(6),
         proveedor_id ?? null,
+        peso_unitario_kg != null && peso_unitario_kg !== '' && Number(peso_unitario_kg) > 0
+          ? Number(peso_unitario_kg).toFixed(6) : null,
+        unidades_por_envase != null && unidades_por_envase !== '' && Number(unidades_por_envase) > 0
+          ? Math.floor(Number(unidades_por_envase)) : null,
+        peso_plastico_kg != null && peso_plastico_kg !== ''
+          ? Number(peso_plastico_kg).toFixed(4) : null,
+        caducidad_meses != null && caducidad_meses !== '' && Number(caducidad_meses) > 0
+          ? Math.floor(Number(caducidad_meses)) : null,
       ]
     );
     invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
@@ -201,11 +223,11 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/productos/:id
-router.put('/:id', async (req, res) => {
+router.put('/:id', adminOnly, async (req, res) => {
   try {
     const {
       codigo, nombre, descripcion, unidad_medida,
-      stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id, activo, caducidad_meses, peso_unitario_kg, peso_plastico_kg,
+      stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id, activo, caducidad_meses, peso_unitario_kg, peso_plastico_kg, unidades_por_envase,
       reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
@@ -281,7 +303,8 @@ router.put('/:id', async (req, res) => {
          caducidad_meses = $12,
          peso_unitario_kg = $13,
          peso_plastico_kg = COALESCE($14::NUMERIC, peso_plastico_kg),
-         precio_coste_manual = COALESCE($15, precio_coste_manual)
+         precio_coste_manual = COALESCE($15, precio_coste_manual),
+         unidades_por_envase = $16
        WHERE id = $11
        RETURNING *`,
       [
@@ -300,6 +323,9 @@ router.put('/:id', async (req, res) => {
         peso_unitario_kg != null ? Number(peso_unitario_kg) || null : null,
         peso_plastico_kg != null ? Number(peso_plastico_kg).toFixed(4) : null,
         nuevoManualFlag,
+        unidades_por_envase != null && unidades_por_envase !== ''
+          ? (Number(unidades_por_envase) > 0 ? Math.floor(Number(unidades_por_envase)) : null)
+          : null,
       ]
     );
 
@@ -382,9 +408,17 @@ router.get('/:id/trazabilidad.csv', async (req, res) => {
 });
 
 // DELETE /api/productos/:id  (soft delete)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', adminOnly, async (req, res) => {
   try {
     await pool.query(`UPDATE productos SET activo = FALSE WHERE id = $1`, [req.params.id]);
+    // [H1.1 audit v3] Auditoría fail-soft: nunca bloquea la respuesta. Si el
+    // INSERT falla (BD intermitente, FK rara), la operación principal ya está
+    // hecha y se loguea como warn. Sin await: la promesa se resuelve aparte.
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'ELIMINAR_PRODUCTO', 'productos', $2, 'Producto desactivado (soft delete)')`,
+      [(req as any).user?.id ?? null, req.params.id]
+    ).catch((e: unknown) => logger.warn('[auditoria ELIMINAR_PRODUCTO]', { err: e instanceof Error ? e.message : e }));
     invalidarCacheFinanzas(); // producto desactivado → ya no cuenta en inventario
     return res.json({ ok: true });
   } catch (err: unknown) {
@@ -407,7 +441,7 @@ const sdsUpload = multer({
   },
 });
 
-router.post('/:id/sds', sdsUpload.single('sds'), async (req, res) => {
+router.post('/:id/sds', adminOnly, sdsUpload.single('sds'), async (req, res) => {
   try {
     const file = (req as any).file;
     if (!file) return res.status(400).json({ error: 'Archivo PDF requerido.' });
@@ -420,7 +454,7 @@ router.post('/:id/sds', sdsUpload.single('sds'), async (req, res) => {
 });
 
 // DELETE /api/productos/:id/sds
-router.delete('/:id/sds', async (req, res) => {
+router.delete('/:id/sds', adminOnly, async (req, res) => {
   try {
     await pool.query(`UPDATE productos SET sds_url = NULL WHERE id = $1`, [req.params.id]);
     return res.json({ ok: true });
