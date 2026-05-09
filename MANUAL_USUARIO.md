@@ -639,13 +639,60 @@ Pedidos completados o confirmados pueden generar albaran:
 
 ### Predicciones de demanda
 
-El sistema analiza automaticamente los pedidos historicos y predice:
+El sistema analiza los pedidos completados de los ultimos 2 anos y predice, por cada par cliente-producto:
 - Que cliente va a pedir
-- Que producto y cantidad aproximada
-- Cuando (rango de fechas)
-- Nivel de confianza (alta/media/baja)
+- Que producto y cantidad esperada (mediana ajustada por tendencia)
+- Cuando (fecha estimada + rango ±desviacion)
+- Probabilidad: **Muy probable / Probable / Posible** (segun regularidad del intervalo)
+- Tendencia: **subiendo / bajando / estable** comparando ultimos 90 dias vs los 90 anteriores
+- Estado: **activo** (sigue en su ritmo habitual) o **dormido** (lleva mas del doble de su intervalo sin pedir)
 
-Las predicciones aparecen como marcadores en el calendario.
+#### Como leer la prediccion
+
+En el Dashboard, la seccion "Prediccion de demanda" tiene dos pestanas:
+
+- **Activos**: clientes en su ciclo normal. Salen las alertas a 60 dias o menos.
+- **Recuperar**: clientes dormidos. Boton "Recuperar" sugiere email para reactivar.
+
+Cada tarjeta muestra:
+- Nombre cliente + nivel (oro/plata/bronce)
+- Etiqueta probabilidad (verde/ambar/gris)
+- Etiqueta tendencia con porcentaje (↑+12% / ↓−8% / −0%)
+- Cantidad esperada y producto
+- "En Xd" o "Hace Xd" si esta vencida
+
+#### Boton "Por que"
+
+En cada tarjeta hay un enlace **▾ Por que** que despliega:
+- Linea de tiempo de los ultimos 5 pedidos con cantidad y fecha
+- Gaps en dias entre pedidos consecutivos (ej: `→ 14d →`)
+- Resumen: intervalo medio, numero de pedidos en el historico, lectura de la tendencia
+
+Sirve para validar de un vistazo por que el sistema dice lo que dice antes de actuar.
+
+#### Calendario
+
+Las predicciones **activas** aparecen como marcadores morados en el dia estimado del calendario. Los dormidos NO aparecen para no ensuciar la vista.
+
+#### Acciones rapidas
+
+Desde cada tarjeta:
+- **Sugerir pedido** (clientes activos) — abre email pre-rellenado al cliente
+- **Recuperar** (clientes dormidos) — email de reactivacion
+- **Fabricar** — abre orden de produccion con la cantidad esperada
+- **Ver stock** — comprueba si hay stock suficiente para cubrir
+
+#### Como mejora frente al modelo anterior
+
+| Antes | Ahora |
+|-------|-------|
+| Promedia 2 anos por igual | Pondera lo reciente (decay 180 dias) |
+| Media de cantidad (sesgada por outliers) | Mediana (estable) |
+| Solo fecha | Fecha + cantidad ajustada por tendencia |
+| Clientes que dejaron de pedir seguian apareciendo | Se separan en pestana "Recuperar" |
+| Sin justificacion visible | Boton "Por que" con timeline |
+
+> Nota: el modelo necesita al menos 2 pedidos completados del par cliente-producto para predecir. Clientes nuevos (cold start) no aparecen.
 
 ---
 

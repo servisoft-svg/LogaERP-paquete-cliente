@@ -13,10 +13,16 @@ import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
 // ── Tipos (intactos) ────────────────────────────────────────────────
-interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
+interface DesgloseItem {
+  nombre: string; cantidad: number; unidad: string;
+  precio_ud: number; coste_linea: number;
+  precio_ud_futuro?: number; coste_linea_futuro?: number;
+}
 interface Rentabilidad {
   id: string; codigo: string; nombre: string; tipo: string;
-  precio_venta: number; precio_coste: number; coste_batch?: number; rendimiento?: number;
+  precio_venta: number; precio_coste: number; coste_batch?: number;
+  coste_ud_futuro?: number; coste_batch_futuro?: number;
+  rendimiento?: number;
   precio_kg?: number; precio_1000kg?: number; stock_actual: number; unidad_medida: string;
   margen_pct: number; margen_ref?: number; diff_margen?: number; salud?: string;
   pvp_anterior?: number; beneficio_ud: number; desglose?: DesgloseItem[];
@@ -851,17 +857,17 @@ export default function Finanzas() {
                           ) : (
                             <>
                               <p className="text-[10px] text-zinc-500 mb-3 italic leading-relaxed">
-                                <b className="text-emerald-600 dark:text-emerald-400">Precio actual</b>: lote más barato disponible en almacén (lo que consumes ahora).{' '}
-                                <b className="text-amber-600 dark:text-amber-400">Precio futuro</b>: lote más caro en stock (lo que consumirás cuando el barato se agote).{' '}
-                                Si un ingrediente no tiene lotes propios, calculamos su coste con los precios mín/máx de SUS materias primas.
+                                <b className="text-emerald-600 dark:text-emerald-400">Precio lote barato</b>: precio del lote más barato que tienes ahora en almacén — lo que pagarías hoy si solo gastaras de ese lote.{' '}
+                                <b className="text-amber-600 dark:text-amber-400">Precio lote caro</b>: precio del lote más caro en stock — lo que pagarás cuando se agote el barato y consumas el caro.{' '}
+                                Si un ingrediente no tiene lotes propios (granel sin stock), se calcula recursivamente con los precios mín/máx de SUS materias primas.
                               </p>
                               <div className="grid grid-cols-12 gap-2 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
                                 <span className="col-span-3">Ingrediente</span>
                                 <span className="col-span-1 text-right">Cant.</span>
-                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400">P. actual /u</span>
-                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400">P. futuro /u</span>
-                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Cantidad × precio actual = lo que cuesta este ingrediente con tu stock barato">Coste actual</span>
-                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Cantidad × precio futuro = lo que costará cuando se agote el lote barato">Coste futuro</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Precio del lote más barato disponible en almacén ahora mismo">Precio lote barato</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Precio del lote más caro disponible en almacén — lo que pagarás cuando el barato se agote">Precio lote caro</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Cantidad × precio lote barato = coste de producción si todo el lote viniera del barato">Coste prod. con stock barato</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Cantidad × precio lote caro = coste futuro de producción cuando se agote el barato">Coste futuro producción</span>
                               </div>
                               {r.detalle_mp.map((mp, i) => {
                                 const pMin = mp.precio_stock_min ?? mp.precio_actual;
@@ -906,18 +912,18 @@ export default function Finanzas() {
                                   <span className="block text-emerald-700 dark:text-emerald-300 font-bold">
                                     {priv ? '**' : (r.coste_stock_min_batch ?? 0).toFixed(2)} €
                                   </span>
-                                  <span className="block text-[9px] text-emerald-600 dark:text-emerald-400 font-normal">actual</span>
+                                  <span className="block text-[9px] text-emerald-600 dark:text-emerald-400 font-normal">coste prod. stock barato</span>
                                 </span>
                                 <span className="col-span-2 text-right tabular-nums">
                                   <span className="block text-amber-700 dark:text-amber-300 font-bold">
                                     {priv ? '**' : (r.coste_stock_max_batch ?? 0).toFixed(2)} €
                                   </span>
-                                  <span className="block text-[9px] text-amber-600 dark:text-amber-400 font-normal">futuro</span>
+                                  <span className="block text-[9px] text-amber-600 dark:text-amber-400 font-normal">coste futuro producción</span>
                                 </span>
                               </div>
                               {/* Coste por unidad final */}
                               <div className="grid grid-cols-12 gap-2 text-[11px] py-1">
-                                <span className="col-span-8 text-right text-zinc-400 italic text-[10px]">por {r.unidad_medida} (coste / unidad)</span>
+                                <span className="col-span-8 text-right text-zinc-400 italic text-[10px]">coste de producción por {r.unidad_medida}</span>
                                 <span className="col-span-2 text-right tabular-nums text-emerald-700 dark:text-emerald-300 font-bold">
                                   {priv ? '**' : (r.coste_stock_min ?? 0).toFixed(4)} €
                                 </span>

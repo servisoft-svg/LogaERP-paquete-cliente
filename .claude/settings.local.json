@@ -98,7 +98,8 @@
       "Bash(curl -s -X POST http://localhost:3001/api/configuracion/restaurar -H 'Authorization: Bearer __TRACKED_VAR__' -H 'Content-Type: application/json' -d '{\"filename\":\"backup-2026-05-08_10-33-03.sql.gz.enc\"}' --max-time 600)",
       "Bash(ps -p 50720 -o stat,tt)",
       "Bash(curl -s -H 'Authorization: Bearer __TRACKED_VAR__' http://localhost:3001/api/health/cron)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(git *)"
     ]
   }
 }

@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   AlertTriangle, Factory, CheckCircle, Check,
-  TrendingDown, CalendarClock, Play,
-  ChevronLeft, ChevronRight, Package,
+  TrendingDown, TrendingUp, Minus, Moon, CalendarClock, Play,
+  ChevronLeft, ChevronRight, ChevronDown, Package,
   ShoppingBag, Clock, Sparkles, Mail, X, Trash2,
 } from 'lucide-react';
 import { stockApi, produccionApi, pedidosApi, configuracionApi, finanzasApi } from '../api/client';
@@ -40,10 +40,18 @@ export default function Dashboard() {
   const [predicciones, setPredicciones] = useState<{
     cliente_nombre: string; cliente_email: string; cliente_nivel: string;
     producto_nombre: string; producto_codigo: string; unidad_medida: string;
-    num_pedidos: number; cantidad_media: number; dias_intervalo: number;
+    num_pedidos: number; cantidad_media: number; cantidad_esperada: number;
+    dias_intervalo: number;
     ultimo_pedido: string; fecha_estimada: string; fecha_rango: string; dias_restantes: number;
     probabilidad: string; urgente: boolean; vencido: boolean;
+    estado: 'activo' | 'dormido';
+    factor_tendencia: number;
+    tendencia: 'subiendo' | 'bajando' | 'estable';
+    tendencia_pct: number;
+    ultimos_pedidos: { fecha: string; cantidad: string }[];
   }[]>([]);
+  const [predTab, setPredTab] = useState<'activos' | 'dormidos'>('activos');
+  const [predExpanded, setPredExpanded] = useState<string | null>(null);
   const [loading, setLoading]           = useState(true);
 
   // Calendar + recordatorios
@@ -454,12 +462,12 @@ export default function Dashboard() {
                         r.color === 'red' ? 'bg-red-100 text-red-700' : r.color === 'green' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'
                       )}>📌 {r.titulo}</div>
                     ))}
-                    {/* Predicciones */}
+                    {/* Predicciones (solo activas) */}
                     {calFiltros.has('predicciones') && predicciones
-                      .filter(p => p.dias_restantes > 0 && p.fecha_estimada === cell.dateStr)
+                      .filter(p => p.estado === 'activo' && p.dias_restantes > 0 && p.fecha_estimada === cell.dateStr)
                       .slice(0, 2).map((p, pi) => (
-                      <div key={`pred-${pi}`} className="rounded px-1 py-0.5 mb-0.5 text-[8px] font-medium truncate bg-purple-50 text-purple-600 border border-purple-200 leading-tight" title={`${p.cliente_nombre} pedirá ${p.cantidad_media} ${p.unidad_medida} de ${p.producto_nombre}`}>
-                        {p.cliente_nombre?.split(' ')[0]} · {p.cantidad_media}{p.unidad_medida}
+                      <div key={`pred-${pi}`} className="rounded px-1 py-0.5 mb-0.5 text-[8px] font-medium truncate bg-purple-50 text-purple-600 border border-purple-200 leading-tight" title={`${p.cliente_nombre} pedirá ${p.cantidad_esperada} ${p.unidad_medida} de ${p.producto_nombre}`}>
+                        {p.cliente_nombre?.split(' ')[0]} · {p.cantidad_esperada}{p.unidad_medida}
                       </div>
                     ))}
                     {/* Órdenes */}
@@ -490,7 +498,7 @@ export default function Dashboard() {
           const raw = o.fecha_planificada ?? o.created_at;
           return raw && new Date(raw).toLocaleDateString('en-CA') === diaSeleccionado;
         });
-        const dayPreds = predicciones.filter(p => p.dias_restantes > 0 && p.fecha_estimada === diaSeleccionado);
+        const dayPreds = predicciones.filter(p => p.estado === 'activo' && p.dias_restantes > 0 && p.fecha_estimada === diaSeleccionado);
         const fechaLabel = new Date(diaSeleccionado + 'T12:00').toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
         return (
           <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
@@ -562,8 +570,17 @@ export default function Dashboard() {
                     <p className="text-xs font-bold text-gray-900 truncate">{p.cliente_nombre}</p>
                   </div>
                   <p className="text-[10px] text-gray-500 truncate">
-                    {p.producto_nombre} · {p.cantidad_media.toLocaleString('es-ES', { maximumFractionDigits: 1 })} {p.unidad_medida}
-                    {' · '}<span className="font-semibold">{p.probabilidad}% prob.</span>
+                    {p.producto_nombre} · {p.cantidad_esperada.toLocaleString('es-ES', { maximumFractionDigits: 1 })} {p.unidad_medida}
+                    {' · '}<span className={clsx('font-semibold',
+                      p.probabilidad === 'alta' ? 'text-emerald-600' : p.probabilidad === 'media' ? 'text-amber-600' : 'text-gray-500'
+                    )}>{p.probabilidad === 'alta' ? 'Muy probable' : p.probabilidad === 'media' ? 'Probable' : 'Posible'}</span>
+                    {p.tendencia !== 'estable' && (
+                      <span className={clsx('ml-1 font-bold',
+                        p.tendencia === 'subiendo' ? 'text-emerald-600' : 'text-rose-600'
+                      )}>
+                        {p.tendencia === 'subiendo' ? '↑' : '↓'}{Math.abs(p.tendencia_pct)}%
+                      </span>
+                    )}
                   </p>
                 </div>
                 <span className={clsx('rounded-md px-1.5 py-0.5 text-[9px] font-bold',
@@ -575,112 +592,213 @@ export default function Dashboard() {
         );
       })()}
 
-      {/* Predicciones de demanda */}
-      {predicciones.length > 0 && (
-        <section className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/50 to-white shadow-sm overflow-hidden">
-          <div className="flex items-center gap-2 px-5 py-4 border-b border-indigo-100">
-            <Sparkles size={16} className="text-indigo-500" />
-            <div>
-              <h2 className="text-sm font-bold text-gray-900">Predicción de demanda</h2>
-              <p className="text-[10px] text-gray-400">Basado en patrones de compra recurrentes</p>
-            </div>
-            <span className="ml-auto rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-600">
-              {predicciones.filter(p => p.urgente || p.vencido).length} alertas
-            </span>
-          </div>
-          <div className="divide-y divide-gray-100 max-h-[400px] overflow-y-auto">
-            {[...predicciones]
-              .filter(p => p.urgente || p.vencido)
-              .sort((a, b) => {
-                // Próximos primero (dias_restantes > 0), luego vencidos por menos antiguos
-                if (a.dias_restantes > 0 && b.dias_restantes <= 0) return -1;
-                if (a.dias_restantes <= 0 && b.dias_restantes > 0) return 1;
-                return a.dias_restantes - b.dias_restantes;
-              })
-              .slice(0, 10).map((pred, i) => (
-              <motion.div
-                key={`${pred.cliente_nombre}-${pred.producto_codigo}-${i}`}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: i * 0.05 }}
-                className={clsx(
-                  'px-5 py-3 hover:bg-indigo-50/50 transition-colors',
-                  pred.vencido && 'bg-red-50/30'
-                )}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-bold text-gray-900">{pred.cliente_nombre}</p>
-                      {pred.cliente_nivel === 'oro' && <span className="rounded-full bg-gradient-to-r from-yellow-400 to-amber-500 px-1.5 py-0.5 text-[7px] font-black text-white">ORO</span>}
-                      {pred.cliente_nivel === 'plata' && <span className="rounded-full bg-gradient-to-r from-gray-300 to-gray-400 px-1.5 py-0.5 text-[7px] font-black text-white">PLATA</span>}
-                      {pred.cliente_nivel === 'bronce' && <span className="rounded-full bg-gradient-to-r from-amber-600 to-orange-700 px-1.5 py-0.5 text-[7px] font-black text-white">BRONCE</span>}
-                      <span className={clsx(
-                        'rounded-full px-1.5 py-0.5 text-[9px] font-bold',
-                        pred.probabilidad === 'alta' ? 'bg-emerald-100 text-emerald-700' :
-                        pred.probabilidad === 'media' ? 'bg-amber-100 text-amber-700' :
-                        'bg-gray-100 text-gray-500'
-                      )}>
-                        {pred.probabilidad === 'alta' ? 'Muy probable' : pred.probabilidad === 'media' ? 'Probable' : 'Posible'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Suele pedir <b className="text-gray-800">{pred.cantidad_media.toLocaleString('es-ES')} {pred.unidad_medida}</b> de <b className="text-indigo-600">{pred.producto_nombre}</b> cada <b>{pred.dias_intervalo} días</b>
-                    </p>
-                    <p className="text-[10px] text-gray-400 mt-0.5">
-                      {pred.num_pedidos} pedidos anteriores · Último: {new Date(pred.ultimo_pedido).toLocaleDateString('es-ES')}
-                    </p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className={clsx(
-                      'text-sm font-black tabular-nums',
-                      pred.vencido ? 'text-loga-red' : pred.dias_restantes <= 7 ? 'text-amber-600' : 'text-indigo-600'
-                    )}>
-                      {pred.vencido ? `Hace ${Math.abs(pred.dias_restantes)}d` : `En ${pred.dias_restantes}d`}
-                    </p>
-                    <p className="text-[10px] text-gray-400">{pred.fecha_rango}</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  {pred.cliente_email && (
-                    <button
-                      onClick={() => setEmailSugerido({
-                        to: pred.cliente_email, cliente: pred.cliente_nombre,
-                        producto: pred.producto_nombre, cantidad: pred.cantidad_media,
-                        unidad: pred.unidad_medida, rango: pred.fecha_rango,
-                      })}
-                      className="flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-100 transition-colors"
-                    >
-                      <Mail size={9} /> Sugerir pedido
-                    </button>
-                  )}
-                  <button
-                    onClick={() => {
-                      navigate(`/produccion?producto=${encodeURIComponent(pred.producto_nombre)}&cantidad=${pred.cantidad_media}&unidad=${pred.unidad_medida}&cliente=${encodeURIComponent(pred.cliente_nombre)}`);
-                    }}
-                    className="flex items-center gap-1 rounded-md bg-loga-red/10 px-2 py-0.5 text-[10px] font-medium text-loga-red hover:bg-loga-red/20 transition-colors"
-                  >
-                    <Factory size={9} /> Fabricar
-                  </button>
-                  <button
-                    onClick={() => navigate(`/productos?check=${encodeURIComponent(pred.producto_nombre)}&cantidad=${pred.cantidad_media}&unidad=${pred.unidad_medida}&cliente=${encodeURIComponent(pred.cliente_nombre)}`)}
-                    className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-600 hover:bg-emerald-100 transition-colors"
-                  >
-                    <Package size={9} /> Ver stock
-                  </button>
-                </div>
-              </motion.div>
-            ))}
-            {predicciones.filter(p => !p.urgente && !p.vencido).length > 0 && (
-              <div className="px-5 py-2 bg-gray-50/50">
-                <p className="text-[10px] text-gray-400">
-                  +{predicciones.filter(p => !p.urgente && !p.vencido).length} predicciones a más de 60 días
-                </p>
+      {/* Predicciones de demanda v2: tabs activos/dormidos + tendencia + timeline */}
+      {predicciones.length > 0 && (() => {
+        const activos = predicciones.filter(p => p.estado === 'activo');
+        const dormidos = predicciones.filter(p => p.estado === 'dormido');
+        const lista = (predTab === 'activos' ? activos : dormidos)
+          .filter(p => predTab === 'dormidos' || p.urgente || p.vencido)
+          .sort((a, b) => {
+            if (a.dias_restantes > 0 && b.dias_restantes <= 0) return -1;
+            if (a.dias_restantes <= 0 && b.dias_restantes > 0) return 1;
+            return a.dias_restantes - b.dias_restantes;
+          })
+          .slice(0, 15);
+
+        return (
+          <section className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/50 to-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-2 px-5 py-4 border-b border-indigo-100">
+              <Sparkles size={16} className="text-indigo-500" />
+              <div>
+                <h2 className="text-sm font-bold text-gray-900">Predicción de demanda</h2>
+                <p className="text-[10px] text-gray-400">Pondera reciente · mediana · tendencia</p>
               </div>
-            )}
-          </div>
-        </section>
-      )}
+              <div className="ml-auto flex items-center gap-1 bg-white rounded-lg p-0.5 border border-gray-200">
+                <button
+                  onClick={() => setPredTab('activos')}
+                  className={clsx('px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors',
+                    predTab === 'activos' ? 'bg-indigo-500 text-white' : 'text-gray-500 hover:text-gray-800')}
+                >
+                  Activos · {activos.filter(p => p.urgente || p.vencido).length}
+                </button>
+                <button
+                  onClick={() => setPredTab('dormidos')}
+                  className={clsx('px-2.5 py-1 rounded-md text-[10px] font-semibold transition-colors flex items-center gap-1',
+                    predTab === 'dormidos' ? 'bg-amber-500 text-white' : 'text-gray-500 hover:text-gray-800')}
+                >
+                  <Moon size={10} /> Recuperar · {dormidos.length}
+                </button>
+              </div>
+            </div>
+            <div className="divide-y divide-gray-100 max-h-[450px] overflow-y-auto">
+              {lista.length === 0 && (
+                <div className="px-5 py-8 text-center text-xs text-gray-400">
+                  {predTab === 'activos' ? 'Sin alertas próximas' : 'Sin clientes dormidos'}
+                </div>
+              )}
+              {lista.map((pred, i) => {
+                const key = `${pred.cliente_nombre}-${pred.producto_codigo}-${i}`;
+                const expanded = predExpanded === key;
+                const ult = pred.ultimos_pedidos || [];
+                // Calcular gaps entre pedidos consecutivos (orden DESC, así que cronológico inverso)
+                const gaps: number[] = [];
+                for (let j = 0; j < ult.length - 1; j++) {
+                  const newer = new Date(ult[j].fecha);
+                  const older = new Date(ult[j + 1].fecha);
+                  gaps.push(Math.round((newer.getTime() - older.getTime()) / 86400000));
+                }
+                const dormido = pred.estado === 'dormido';
+                return (
+                  <motion.div
+                    key={key}
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.04 }}
+                    className={clsx(
+                      'px-5 py-3 hover:bg-indigo-50/50 transition-colors',
+                      pred.vencido && !dormido && 'bg-red-50/30',
+                      dormido && 'bg-amber-50/30'
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-bold text-gray-900">{pred.cliente_nombre}</p>
+                          {pred.cliente_nivel === 'oro' && <span className="rounded-full bg-gradient-to-r from-yellow-400 to-amber-500 px-1.5 py-0.5 text-[7px] font-black text-white">ORO</span>}
+                          {pred.cliente_nivel === 'plata' && <span className="rounded-full bg-gradient-to-r from-gray-300 to-gray-400 px-1.5 py-0.5 text-[7px] font-black text-white">PLATA</span>}
+                          {pred.cliente_nivel === 'bronce' && <span className="rounded-full bg-gradient-to-r from-amber-600 to-orange-700 px-1.5 py-0.5 text-[7px] font-black text-white">BRONCE</span>}
+                          {dormido ? (
+                            <span className="rounded-full bg-amber-100 text-amber-700 px-1.5 py-0.5 text-[9px] font-bold flex items-center gap-1">
+                              <Moon size={9} /> DORMIDO
+                            </span>
+                          ) : (
+                            <span className={clsx(
+                              'rounded-full px-1.5 py-0.5 text-[9px] font-bold',
+                              pred.probabilidad === 'alta' ? 'bg-emerald-100 text-emerald-700' :
+                              pred.probabilidad === 'media' ? 'bg-amber-100 text-amber-700' :
+                              'bg-gray-100 text-gray-500'
+                            )}>
+                              {pred.probabilidad === 'alta' ? 'Muy probable' : pred.probabilidad === 'media' ? 'Probable' : 'Posible'}
+                            </span>
+                          )}
+                          {/* Tendencia */}
+                          <span className={clsx(
+                            'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold',
+                            pred.tendencia === 'subiendo' ? 'bg-emerald-50 text-emerald-600' :
+                            pred.tendencia === 'bajando' ? 'bg-rose-50 text-rose-600' :
+                            'bg-gray-50 text-gray-500'
+                          )}>
+                            {pred.tendencia === 'subiendo' ? <TrendingUp size={9} /> :
+                             pred.tendencia === 'bajando' ? <TrendingDown size={9} /> :
+                             <Minus size={9} />}
+                            {pred.tendencia_pct > 0 ? '+' : ''}{pred.tendencia_pct}%
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Esperado: <b className="text-gray-800">{pred.cantidad_esperada.toLocaleString('es-ES')} {pred.unidad_medida}</b> de{' '}
+                          <b className="text-indigo-600">{pred.producto_nombre}</b> · cada <b>{pred.dias_intervalo}d</b>
+                        </p>
+                        <button
+                          onClick={() => setPredExpanded(expanded ? null : key)}
+                          className="mt-1 inline-flex items-center gap-1 text-[10px] text-indigo-600 hover:text-indigo-800 font-medium"
+                        >
+                          <ChevronDown size={10} className={clsx('transition-transform', expanded && 'rotate-180')} />
+                          {expanded ? 'Ocultar' : 'Por qué'}
+                        </button>
+                      </div>
+                      <div className="text-right shrink-0">
+                        {dormido ? (
+                          <p className="text-sm font-black tabular-nums text-amber-600">
+                            Hace {Math.round((Date.now() - new Date(pred.ultimo_pedido).getTime()) / 86400000)}d
+                          </p>
+                        ) : (
+                          <p className={clsx(
+                            'text-sm font-black tabular-nums',
+                            pred.vencido ? 'text-loga-red' : pred.dias_restantes <= 7 ? 'text-amber-600' : 'text-indigo-600'
+                          )}>
+                            {pred.vencido ? `Hace ${Math.abs(pred.dias_restantes)}d` : `En ${pred.dias_restantes}d`}
+                          </p>
+                        )}
+                        <p className="text-[10px] text-gray-400">{dormido ? `último ${new Date(pred.ultimo_pedido).toLocaleDateString('es-ES')}` : pred.fecha_rango}</p>
+                      </div>
+                    </div>
+
+                    {/* Timeline expandido */}
+                    {expanded && ult.length > 0 && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="mt-3 pt-3 border-t border-indigo-100"
+                      >
+                        <p className="text-[10px] uppercase font-semibold text-gray-400 mb-2">Últimos {ult.length} pedidos</p>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {[...ult].reverse().map((p, idx) => {
+                            const gapIdx = ult.length - 2 - idx;
+                            const gap = gapIdx >= 0 ? gaps[gapIdx] : null;
+                            return (
+                              <div key={idx} className="flex items-center gap-1">
+                                {gap !== null && (
+                                  <span className="text-[9px] font-mono text-gray-400 px-1">→ {gap}d →</span>
+                                )}
+                                <div className="rounded-md bg-white border border-indigo-100 px-2 py-1 text-center shadow-sm">
+                                  <p className="text-[10px] font-bold text-gray-800 tabular-nums">{parseFloat(p.cantidad).toLocaleString('es-ES')}</p>
+                                  <p className="text-[8px] text-gray-400">{new Date(p.fecha).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })}</p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-gray-500 mt-2">
+                          Intervalo medio <b>{pred.dias_intervalo}d</b> · {pred.num_pedidos} pedidos en histórico ·
+                          {' '}{pred.tendencia === 'subiendo' ? 'pidiendo más últimamente' : pred.tendencia === 'bajando' ? 'pidiendo menos últimamente' : 'volumen estable'}
+                        </p>
+                      </motion.div>
+                    )}
+
+                    <div className="flex items-center gap-2 mt-2 flex-wrap">
+                      {pred.cliente_email && (
+                        <button
+                          onClick={() => setEmailSugerido({
+                            to: pred.cliente_email, cliente: pred.cliente_nombre,
+                            producto: pred.producto_nombre, cantidad: pred.cantidad_esperada,
+                            unidad: pred.unidad_medida, rango: pred.fecha_rango,
+                          })}
+                          className="flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-100 transition-colors"
+                        >
+                          <Mail size={9} /> {dormido ? 'Recuperar' : 'Sugerir pedido'}
+                        </button>
+                      )}
+                      {!dormido && (
+                        <button
+                          onClick={() => {
+                            navigate(`/produccion?producto=${encodeURIComponent(pred.producto_nombre)}&cantidad=${pred.cantidad_esperada}&unidad=${pred.unidad_medida}&cliente=${encodeURIComponent(pred.cliente_nombre)}`);
+                          }}
+                          className="flex items-center gap-1 rounded-md bg-loga-red/10 px-2 py-0.5 text-[10px] font-medium text-loga-red hover:bg-loga-red/20 transition-colors"
+                        >
+                          <Factory size={9} /> Fabricar
+                        </button>
+                      )}
+                      <button
+                        onClick={() => navigate(`/productos?check=${encodeURIComponent(pred.producto_nombre)}&cantidad=${pred.cantidad_esperada}&unidad=${pred.unidad_medida}&cliente=${encodeURIComponent(pred.cliente_nombre)}`)}
+                        className="flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-600 hover:bg-emerald-100 transition-colors"
+                      >
+                        <Package size={9} /> Ver stock
+                      </button>
+                    </div>
+                  </motion.div>
+                );
+              })}
+              {predTab === 'activos' && activos.filter(p => !p.urgente && !p.vencido).length > 0 && (
+                <div className="px-5 py-2 bg-gray-50/50">
+                  <p className="text-[10px] text-gray-400">
+                    +{activos.filter(p => !p.urgente && !p.vencido).length} predicciones activas a más de 60 días
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+        );
+      })()}
 
       {/* Proximas fabricaciones */}
       {proximas.length > 0 && (

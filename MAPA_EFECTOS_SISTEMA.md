@@ -852,6 +852,42 @@ Llamado desde: hook tras editar pedido + cron `sweepPedidos`.
 - Multiplica por `unidades_por_envase` para contar botes individuales dentro de cajas
 - Marca materiales sin `peso_plastico_kg` configurado
 
+#### `GET /api/finanzas/predicciones` (v2)
+- No cacheado. Read-only sobre `pedidos` + `clientes` + `productos`.
+- Rango: pedidos `estado='completado'` últimos 2 años, agrupados por par `(cliente_id, producto_id)`.
+- Filtro: necesita ≥2 pedidos del par, intervalo > 0, mediana cantidad > 10.
+- Devuelve hasta 150 predicciones ordenadas: activos primero → días restantes asc → cantidad total desc.
+
+**Algoritmo** (CTEs `base` → `gaps` → `analisis` → `ultimos`):
+- **Decay exponencial** sobre fecha del pedido: `EXP(-(NOW - created_at)/86400/180)`. Pedido de hoy pesa 1.0, hace 180d ≈ 0.37, hace 1 año ≈ 0.13.
+- **Intervalo medio ponderado** por decay: `SUM(gap × w_decay) / SUM(w_decay)`.
+- **Mediana cantidad** vía `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cantidad)` (anti outlier; el campo de salida sigue llamándose `cantidad_media` por compatibilidad con consumidores existentes).
+- **Factor tendencia**: `qty_90d / qty_prev90d`, capado entre 0.5 y 1.5 para evitar valores patológicos.
+- **`cantidad_esperada`** = mediana × factor_tendencia (la cifra que se usa en calendario, acciones de email/fabricar/stock).
+- **Estado**: `dormido` si `(NOW - ultimo_pedido) > 2 × dias_intervalo`, si no `activo`.
+- **`ultimos_pedidos`**: array JSON con los últimos 5 pedidos `{fecha, cantidad}` por par, para timeline en UI.
+
+**Campos clave de la respuesta**:
+| Campo | Tipo | Notas |
+|---|---|---|
+| `cantidad_media` | number | **Es la mediana** (nombre legacy) |
+| `cantidad_esperada` | number | mediana × factor_tendencia |
+| `dias_intervalo` | int | Ponderado por decay |
+| `estado` | `'activo'\|'dormido'` | Filtro principal del calendario |
+| `tendencia` | `'subiendo'\|'bajando'\|'estable'` | Umbral ±5% sobre 1.0 |
+| `tendencia_pct` | int | `(factor − 1) × 100` |
+| `factor_tendencia` | float | 0.5 ≤ x ≤ 1.5 |
+| `ultimos_pedidos` | array | Últimos 5, orden DESC |
+| `probabilidad` | `'alta'\|'media'\|'baja'` | Sin cambios — basada en `desviacion / intervalo` |
+
+**Side-effects**: ninguno. Solo lectura. No invalida cache. No escribe auditoría (consulta admin habitual).
+
+**Frontend**: consumido por `Dashboard.tsx`. Renderiza:
+- Tabs Activos / Recuperar (filtra `estado`).
+- Calendario (chips morados): solo `estado === 'activo'`, label usa `cantidad_esperada`.
+- Card con timeline expandible (botón "Por qué") — usa `ultimos_pedidos` para chips + gaps calculados en cliente.
+- Botones de acción (Sugerir pedido / Fabricar / Ver stock) usan `cantidad_esperada`.
+
 ---
 
 ## 9. Auditoría

@@ -72,14 +72,32 @@ router.get('/resumen', async (req, res) => {
     );
     for (const r of prodPrecios) precioMap[r.id] = parseFloat(r.precio ?? '0');
 
+    // Pre-load MAX precio_compra de lotes aprobados con stock — para "coste
+    // futuro" del desglose: precio del lote más caro disponible (lo que
+    // pagarás cuando el barato se agote). Mismo criterio que impacto-costes.
+    const { rows: stockMaxRows } = await pool.query<{ producto_id: string; precio_max: string | null }>(
+      `SELECT producto_id, MAX(precio_compra) AS precio_max
+       FROM lotes
+       WHERE estado = 'aprobado' AND cantidad_actual > 0
+         AND precio_compra IS NOT NULL AND precio_compra > 0
+       GROUP BY producto_id`
+    );
+    const stockMaxMap: Record<string, number> = {};
+    for (const r of stockMaxRows) {
+      if (r.precio_max !== null) stockMaxMap[r.producto_id] = parseFloat(r.precio_max);
+    }
+
     /**
      * Asigna `cantNecesaria` del producto consumiendo lotes aprobados de más
      * barato a más caro. Si no hay stock suficiente, completa el resto al
      * precio ficha (fallback) — así el desglose nunca queda subvalorado.
      * Devuelve { coste_total, precio_efectivo_por_unidad }.
      */
-    function costeCheapestFirst(productoId: string, cantNecesaria: number): { coste: number; precioEfectivo: number } {
-      if (cantNecesaria <= 0) return { coste: 0, precioEfectivo: 0 };
+    function costeCheapestFirst(productoId: string, cantNecesaria: number): {
+      coste: number; precioEfectivo: number;
+      costeFuturo: number; precioFuturo: number;
+    } {
+      if (cantNecesaria <= 0) return { coste: 0, precioEfectivo: 0, costeFuturo: 0, precioFuturo: 0 };
       const fallback = precioMap[productoId] ?? getCMP(productoId);
       const lotes = lotesPorProducto[productoId] ?? [];
       let restante = cantNecesaria;
@@ -87,16 +105,30 @@ router.get('/resumen', async (req, res) => {
       for (const lote of lotes) {
         if (restante <= 0) break;
         const tomar = Math.min(lote.cantidad, restante);
-        // Si lote no tiene precio_compra (raro, lotes legacy), cae al fallback.
         coste += tomar * (lote.precio > 0 ? lote.precio : fallback);
         restante -= tomar;
       }
       if (restante > 0) coste += restante * fallback;
-      return { coste, precioEfectivo: coste / cantNecesaria };
+      // Coste futuro: precio del lote más caro disponible (mismo criterio
+      // que impacto-costes). Sin stock → fallback al precio ficha.
+      const precioMaxStock = stockMaxMap[productoId] ?? fallback;
+      const costeFuturo = cantNecesaria * precioMaxStock;
+      return {
+        coste, precioEfectivo: coste / cantNecesaria,
+        costeFuturo, precioFuturo: precioMaxStock,
+      };
     }
 
-    interface DesgloseItem { nombre: string; cantidad: number; unidad: string; precio_ud: number; coste_linea: number }
-    interface CosteResult { coste_ud: number; coste_batch: number; rendimiento: number; desglose: DesgloseItem[] }
+    interface DesgloseItem {
+      nombre: string; cantidad: number; unidad: string;
+      precio_ud: number; coste_linea: number;
+      precio_ud_futuro: number; coste_linea_futuro: number;
+    }
+    interface CosteResult {
+      coste_ud: number; coste_batch: number; rendimiento: number;
+      coste_ud_futuro: number; coste_batch_futuro: number;
+      desglose: DesgloseItem[];
+    }
     const costeCache: Record<string, CosteResult> = {};
 
     async function calcularCosteProducto(productoId: string): Promise<CosteResult> {
@@ -124,7 +156,10 @@ router.get('/resumen', async (req, res) => {
       // Sin receta: usa precio ficha o CMP como coste (no hay desglose).
       if (!receta) {
         const c = precioMap[productoId] ?? getCMP(productoId);
-        const r: CosteResult = { coste_ud: c, coste_batch: c, rendimiento: 1, desglose: [] };
+        const r: CosteResult = {
+          coste_ud: c, coste_batch: c, rendimiento: 1,
+          coste_ud_futuro: c, coste_batch_futuro: c, desglose: [],
+        };
         costeCache[productoId] = r;
         return r;
       }
@@ -142,10 +177,13 @@ router.get('/resumen', async (req, res) => {
 
       const desglose: DesgloseItem[] = [];
       let costeBatch = 0;
+      let costeBatchFuturo = 0;
       for (const ing of ingredientes) {
         const cantReal = parseFloat(ing.cantidad) * (1 + parseFloat(ing.porcentaje_merma) / 100);
-        const { coste, precioEfectivo } = costeCheapestFirst(ing.materia_prima_id, cantReal);
+        const { coste, precioEfectivo, costeFuturo, precioFuturo } =
+          costeCheapestFirst(ing.materia_prima_id, cantReal);
         costeBatch += coste;
+        costeBatchFuturo += costeFuturo;
         desglose.push({
           nombre: ing.nombre,
           cantidad: Math.round(cantReal * 10000) / 10000,
@@ -153,6 +191,8 @@ router.get('/resumen', async (req, res) => {
           // precio_ud mostrado = precio efectivo ponderado de los lotes consumidos.
           precio_ud: Math.round(precioEfectivo * 10000) / 10000,
           coste_linea: Math.round(coste * 10000) / 10000,
+          precio_ud_futuro: Math.round(precioFuturo * 10000) / 10000,
+          coste_linea_futuro: Math.round(costeFuturo * 10000) / 10000,
         });
       }
 
@@ -160,10 +200,13 @@ router.get('/resumen', async (req, res) => {
       // ficha del producto). Refleja el coste real de fabricar 1 unidad ahora
       // mismo con los lotes que tienes en almacén.
       const costeUd = rendimiento > 0 ? costeBatch / rendimiento : costeBatch;
+      const costeUdFuturo = rendimiento > 0 ? costeBatchFuturo / rendimiento : costeBatchFuturo;
       const r: CosteResult = {
         coste_ud: Math.round(costeUd * 10000) / 10000,
         coste_batch: Math.round(costeBatch * 10000) / 10000,
         rendimiento,
+        coste_ud_futuro: Math.round(costeUdFuturo * 10000) / 10000,
+        coste_batch_futuro: Math.round(costeBatchFuturo * 10000) / 10000,
         desglose,
       };
       costeCache[productoId] = r;
@@ -263,6 +306,8 @@ router.get('/resumen', async (req, res) => {
         precio_venta: precioVenta,
         precio_coste: resultado.coste_ud,
         coste_batch: resultado.coste_batch,
+        coste_ud_futuro: resultado.coste_ud_futuro,
+        coste_batch_futuro: resultado.coste_batch_futuro,
         rendimiento: resultado.rendimiento,
         precio_kg: esFabricado ? resultado.coste_ud : undefined,
         precio_1000kg: esFabricado ? Math.round(resultado.coste_ud * 1000 * 100) / 100 : undefined,
@@ -882,85 +927,141 @@ router.get('/exportar/inventario', async (_req, res) => {
   }
 });
 
-// ── PREDICCIÓN DE DEMANDA ─────────────────────────────────────
-// Analiza patrones de compra recurrentes y predice próximos pedidos
+// ── PREDICCIÓN DE DEMANDA (v2) ────────────────────────────────
+// v2: pedidos recientes pesan más (decay 180d), mediana en lugar de media,
+// factor tendencia 90d/90d previos, estado activo/dormido, timeline últimos 5.
 router.get('/predicciones', async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      WITH pedidos_patron AS (
+      WITH base AS (
         SELECT
-          pd.cliente_id,
-          pd.producto_id,
-          c.nombre AS cliente_nombre,
-          c.email AS cliente_email,
-          c.nivel AS cliente_nivel,
-          p.nombre AS producto_nombre,
-          p.codigo AS producto_codigo,
-          p.unidad_medida,
-          pd.cantidad,
-          pd.created_at,
-          LAG(pd.created_at) OVER (PARTITION BY pd.cliente_id, pd.producto_id ORDER BY pd.created_at) AS pedido_anterior
+          pd.cliente_id, pd.producto_id,
+          c.nombre AS cliente_nombre, c.email AS cliente_email, c.nivel AS cliente_nivel,
+          p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida,
+          pd.cantidad, pd.created_at,
+          LAG(pd.created_at) OVER (PARTITION BY pd.cliente_id, pd.producto_id ORDER BY pd.created_at) AS pedido_anterior,
+          -- Decay: pedido de hoy=1.0, hace 180d≈0.37, hace 1 año≈0.13
+          EXP(- EXTRACT(EPOCH FROM (NOW() - pd.created_at))/86400.0/180.0) AS w_decay
         FROM pedidos pd
         JOIN clientes c ON c.id = pd.cliente_id
         JOIN productos p ON p.id = pd.producto_id
-        WHERE pd.estado = 'completado' AND pd.cantidad > 0 AND pd.created_at >= NOW() - INTERVAL '2 years'
+        WHERE pd.estado = 'completado' AND pd.cantidad > 0
+          AND pd.created_at >= NOW() - INTERVAL '2 years'
       ),
-      analisis AS (
+      gaps AS (
         SELECT
           cliente_id, producto_id,
           cliente_nombre, cliente_email, cliente_nivel,
           producto_nombre, producto_codigo, unidad_medida,
-          COUNT(*) AS num_pedidos,
-          ROUND(AVG(cantidad::NUMERIC)) AS cantidad_media,
-          ROUND(SUM(cantidad::NUMERIC)) AS cantidad_total,
-          ROUND(AVG(EXTRACT(EPOCH FROM (created_at - pedido_anterior)) / 86400)) AS dias_intervalo,
-          -- Desviación: si es baja = muy constante
-          ROUND(STDDEV(EXTRACT(EPOCH FROM (created_at - pedido_anterior)) / 86400)) AS dias_desviacion,
-          MAX(created_at) AS ultimo_pedido
-        FROM pedidos_patron
+          cantidad, created_at, w_decay,
+          EXTRACT(EPOCH FROM (created_at - pedido_anterior))/86400.0 AS gap
+        FROM base
         WHERE pedido_anterior IS NOT NULL
-        GROUP BY cliente_id, producto_id, cliente_nombre, cliente_email, cliente_nivel, producto_nombre, producto_codigo, unidad_medida
+      ),
+      analisis AS (
+        SELECT
+          cliente_id, producto_id,
+          MAX(cliente_nombre) AS cliente_nombre,
+          MAX(cliente_email) AS cliente_email,
+          MAX(cliente_nivel) AS cliente_nivel,
+          MAX(producto_nombre) AS producto_nombre,
+          MAX(producto_codigo) AS producto_codigo,
+          MAX(unidad_medida) AS unidad_medida,
+          (COUNT(*) + 1)::INT AS num_pedidos,
+          -- Intervalo PONDERADO por decay reciente
+          ROUND( SUM(gap * w_decay) / NULLIF(SUM(w_decay), 0) )::INT AS dias_intervalo,
+          ROUND(STDDEV(gap))::INT AS dias_desviacion,
+          -- MEDIANA cantidad (anti outlier). Sigue como cantidad_media para
+          -- compatibilidad con consumidores existentes.
+          ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cantidad::NUMERIC))::NUMERIC AS cantidad_media,
+          ROUND(SUM(cantidad::NUMERIC))::NUMERIC AS cantidad_total,
+          MAX(created_at) AS ultimo_pedido,
+          COALESCE(SUM(cantidad::NUMERIC) FILTER (WHERE created_at >= NOW() - INTERVAL '90 days'), 0) AS qty_90d,
+          COALESCE(SUM(cantidad::NUMERIC) FILTER (
+            WHERE created_at >= NOW() - INTERVAL '180 days'
+              AND created_at <  NOW() - INTERVAL '90 days'
+          ), 0) AS qty_prev90d
+        FROM gaps
+        GROUP BY cliente_id, producto_id
         HAVING COUNT(*) >= 2
+      ),
+      ultimos AS (
+        SELECT cliente_id, producto_id,
+          json_agg(json_build_object(
+            'fecha', TO_CHAR(created_at, 'YYYY-MM-DD'),
+            'cantidad', cantidad
+          ) ORDER BY created_at DESC) AS lista
+        FROM (
+          SELECT cliente_id, producto_id, created_at, cantidad,
+                 ROW_NUMBER() OVER (PARTITION BY cliente_id, producto_id ORDER BY created_at DESC) AS rn
+          FROM pedidos
+          WHERE estado = 'completado' AND cantidad > 0
+            AND created_at >= NOW() - INTERVAL '2 years'
+        ) p
+        WHERE rn <= 5
+        GROUP BY cliente_id, producto_id
       )
-      SELECT *,
-        -- Fecha estimada: basada en el intervalo medio + rango de ±2 días
+      SELECT a.*,
+        COALESCE(u.lista, '[]'::json) AS ultimos_pedidos,
+        CASE
+          WHEN qty_prev90d > 0 THEN LEAST(1.5, GREATEST(0.5, qty_90d / qty_prev90d))
+          ELSE 1.0
+        END AS factor_tendencia,
+        ROUND(cantidad_media *
+          CASE WHEN qty_prev90d > 0 THEN LEAST(1.5, GREATEST(0.5, qty_90d / qty_prev90d)) ELSE 1.0 END
+        )::NUMERIC AS cantidad_esperada,
+        CASE
+          WHEN EXTRACT(DAY FROM NOW() - ultimo_pedido) > 2 * dias_intervalo THEN 'dormido'
+          ELSE 'activo'
+        END AS estado,
         TO_CHAR((ultimo_pedido + (dias_intervalo || ' days')::INTERVAL)::DATE, 'YYYY-MM-DD') AS fecha_estimada,
-        TO_CHAR((ultimo_pedido + ((dias_intervalo - LEAST(dias_desviacion, dias_intervalo * 0.3)) || ' days')::INTERVAL)::DATE, 'YYYY-MM-DD') AS fecha_estimada_desde,
-        TO_CHAR((ultimo_pedido + ((dias_intervalo + LEAST(dias_desviacion, dias_intervalo * 0.3)) || ' days')::INTERVAL)::DATE, 'YYYY-MM-DD') AS fecha_estimada_hasta,
+        TO_CHAR((ultimo_pedido + ((dias_intervalo - LEAST(COALESCE(dias_desviacion, 0), dias_intervalo * 0.3)) || ' days')::INTERVAL)::DATE, 'YYYY-MM-DD') AS fecha_estimada_desde,
+        TO_CHAR((ultimo_pedido + ((dias_intervalo + LEAST(COALESCE(dias_desviacion, 0), dias_intervalo * 0.3)) || ' days')::INTERVAL)::DATE, 'YYYY-MM-DD') AS fecha_estimada_hasta,
         CASE
           WHEN dias_desviacion IS NULL OR dias_desviacion < dias_intervalo * 0.3 THEN 'alta'
           WHEN dias_desviacion < dias_intervalo * 0.6 THEN 'media'
           ELSE 'baja'
         END AS probabilidad,
-        EXTRACT(DAY FROM (ultimo_pedido + (dias_intervalo || ' days')::INTERVAL) - NOW()) AS dias_restantes
-      FROM analisis
+        EXTRACT(DAY FROM (ultimo_pedido + (dias_intervalo || ' days')::INTERVAL) - NOW())::INT AS dias_restantes
+      FROM analisis a
+      LEFT JOIN ultimos u ON u.cliente_id = a.cliente_id AND u.producto_id = a.producto_id
       WHERE dias_intervalo > 0 AND cantidad_media > 10
       ORDER BY
-        -- Priorizar: próximos primero, luego por volumen
+        CASE WHEN EXTRACT(DAY FROM NOW() - ultimo_pedido) > 2 * dias_intervalo THEN 1 ELSE 0 END ASC,
         EXTRACT(DAY FROM (ultimo_pedido + (dias_intervalo || ' days')::INTERVAL) - NOW()) ASC,
         cantidad_total DESC
-      LIMIT 100
+      LIMIT 150
     `);
 
-    const predicciones = rows.map(r => ({
-      cliente_nombre: r.cliente_nombre,
-      cliente_email: r.cliente_email,
-      cliente_nivel: r.cliente_nivel,
-      producto_nombre: r.producto_nombre,
-      producto_codigo: r.producto_codigo,
-      unidad_medida: r.unidad_medida,
-      num_pedidos: parseInt(r.num_pedidos),
-      cantidad_media: parseFloat(r.cantidad_media),
-      cantidad_total: parseFloat(r.cantidad_total),
-      dias_intervalo: parseInt(r.dias_intervalo),
-      ultimo_pedido: r.ultimo_pedido,
-      fecha_estimada: r.fecha_estimada,
-      fecha_rango: `${new Date(r.fecha_estimada_desde + 'T12:00').toLocaleDateString('es-ES')} - ${new Date(r.fecha_estimada_hasta + 'T12:00').toLocaleDateString('es-ES')}`,
-      dias_restantes: parseInt(r.dias_restantes),
-      probabilidad: r.probabilidad,
-      urgente: parseInt(r.dias_restantes) <= 60,
-      vencido: parseInt(r.dias_restantes) < 0,
-    }));
+    const predicciones = rows.map(r => {
+      const factor = parseFloat(r.factor_tendencia);
+      const tendencia = factor > 1.05 ? 'subiendo' : factor < 0.95 ? 'bajando' : 'estable';
+      return {
+        cliente_nombre: r.cliente_nombre,
+        cliente_email: r.cliente_email,
+        cliente_nivel: r.cliente_nivel,
+        producto_nombre: r.producto_nombre,
+        producto_codigo: r.producto_codigo,
+        unidad_medida: r.unidad_medida,
+        num_pedidos: parseInt(r.num_pedidos),
+        cantidad_media: parseFloat(r.cantidad_media),
+        cantidad_esperada: parseFloat(r.cantidad_esperada),
+        cantidad_total: parseFloat(r.cantidad_total),
+        dias_intervalo: parseInt(r.dias_intervalo),
+        ultimo_pedido: r.ultimo_pedido,
+        fecha_estimada: r.fecha_estimada,
+        fecha_rango: `${new Date(r.fecha_estimada_desde + 'T12:00').toLocaleDateString('es-ES')} - ${new Date(r.fecha_estimada_hasta + 'T12:00').toLocaleDateString('es-ES')}`,
+        dias_restantes: parseInt(r.dias_restantes),
+        probabilidad: r.probabilidad,
+        urgente: parseInt(r.dias_restantes) <= 60,
+        vencido: parseInt(r.dias_restantes) < 0,
+        estado: r.estado as 'activo' | 'dormido',
+        factor_tendencia: factor,
+        tendencia: tendencia as 'subiendo' | 'bajando' | 'estable',
+        tendencia_pct: Math.round((factor - 1) * 100),
+        ultimos_pedidos: (r.ultimos_pedidos || []) as { fecha: string; cantidad: string }[],
+      };
+    });
 
     return res.json(predicciones);
   } catch (err: unknown) {
