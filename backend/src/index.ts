@@ -28,6 +28,7 @@ import { automatizacionesService } from './services/automatizaciones.service';
 import { cronHeartbeat } from './services/cron-heartbeat.service';
 import automatizacionesRoutes from './routes/automatizaciones.routes';
 import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
+import { runMigrations } from './db/migrations';
 
 dotenv.config();
 
@@ -310,6 +311,20 @@ const server = http.createServer(app);
 // defensivo runtime sigue siendo red de seguridad si esto falla).
 // Override: BOOTSTRAP_DB=false para saltarlo (útil en debugging).
 async function startup() {
+  // 1. Aplicar migraciones pendientes ANTES de bootstrap (puede crear tablas
+  //    que el bootstrap necesita verificar). Auto-baseline si BD pre-existente.
+  //    Fail-fast: si una migración falla, NO arranca — datos intactos.
+  if (process.env.SKIP_MIGRATIONS !== 'true') {
+    try {
+      await runMigrations();
+    } catch (err) {
+      logger.error('[startup] FALLO APLICANDO MIGRACIONES — backend NO arranca', { err: err instanceof Error ? err.message : err });
+      process.exit(1);
+    }
+  } else {
+    logger.warn('[startup] migraciones SALTADAS por SKIP_MIGRATIONS=true');
+  }
+
   if (process.env.BOOTSTRAP_DB !== 'false') {
     try {
       const result = await bootstrapDatabase();

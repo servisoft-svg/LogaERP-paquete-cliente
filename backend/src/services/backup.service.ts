@@ -1,20 +1,25 @@
 /**
- * Backup Service — cifrado AES-256 + subida a Google Drive via rclone
- * Retención: 2 locales (más recientes), 10 en Drive
+ * Backup Service — AES-256-GCM + Argon2id (formato "LOGA1").
+ * Retrocompat lectura: backups antiguos AES-256-CBC + PBKDF2 (openssl) siguen restaurables.
+ *
+ * Retención: 2 locales (más recientes), 10 en Drive.
  * Nombre: backup-YYYY-MM-DD_HH-mm-ss.sql.gz.enc  (lex == cronológico, con hora)
  * Formatos legacy aceptados (lectura/cleanup): backup-DD-MM-YYYY.* y loga_YYYYMMDD_HHMMSS.*
  *
  * Seguridad:
  *  - BACKUP_PASSWORD obligatorio (sin fallback hardcodeado)
- *  - Password pasada vía env var al openssl (-pass env:VAR), nunca en cmdline
+ *  - Argon2id memory-hard (64 MiB × 4 iter) → cracking GPU inviable
+ *  - GCM AEAD: si alguien modifica 1 bit del .enc → descifrado falla limpiamente
  *  - rclone copy con execFileSync + array de args (sin shell interpolation)
  *  - Filenames generados por servidor (no input usuario)
  */
 
-import { execSync, execFileSync, spawnSync } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { Readable, Writable } from 'stream';
 import { logger } from '../lib/logger';
+import { encryptStream, decryptStream, isLogaV1 } from '../lib/cryptoBackup';
 
 const BACKUP_DIR = path.join(process.cwd(), '..', 'backups');
 
@@ -22,14 +27,14 @@ const BACKUP_DIR = path.join(process.cwd(), '..', 'backups');
 const RX_NEW    = /^backup-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.sql\.gz\.enc$/;
 const RX_OLD    = /^backup-(\d{2})-(\d{2})-(\d{4})\.sql\.gz\.enc$/;
 const RX_LEGACY = /^loga_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.sql\.gz\.enc$/;
+const RX_PRE    = /^pre-restore-(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.sql\.gz\.enc$/;
 
 function isBackupFilename(f: string): boolean {
-  return RX_NEW.test(f) || RX_OLD.test(f) || RX_LEGACY.test(f);
+  return RX_NEW.test(f) || RX_OLD.test(f) || RX_LEGACY.test(f) || RX_PRE.test(f);
 }
 
-/** Parsea timestamp del nombre. Devuelve epoch ms. Fallback a 0 si no matchea. */
 function backupTimestamp(filename: string, fallbackMtimeMs?: number): number {
-  let m = filename.match(RX_NEW);
+  let m = filename.match(RX_NEW) || filename.match(RX_PRE);
   if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
   m = filename.match(RX_LEGACY);
   if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
@@ -38,9 +43,8 @@ function backupTimestamp(filename: string, fallbackMtimeMs?: number): number {
   return fallbackMtimeMs ?? 0;
 }
 
-/** Etiqueta legible "DD/MM/YYYY HH:MM" o "DD/MM/YYYY" si no hay hora. */
 function backupDateLabel(filename: string, fallbackMtime: Date): string {
-  let m = filename.match(RX_NEW);
+  let m = filename.match(RX_NEW) || filename.match(RX_PRE);
   if (m) return `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}`;
   m = filename.match(RX_LEGACY);
   if (m) return `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}`;
@@ -74,7 +78,103 @@ function getBackupPassword(): string {
   return pw;
 }
 
-export async function ejecutarBackup(): Promise<BackupResult> {
+/**
+ * Stream que emite: pg_dump bytes + (opcional: separator + base64 de tar uploads).
+ * Generator async: las piezas se generan secuencialmente, sin cargar todo en RAM
+ * (excepto el tar de uploads que se buffer-iza para base64 — uploads suele ser <50MB).
+ */
+async function* assembleSource(cwd: string, hasUploads: boolean): AsyncGenerator<Buffer> {
+  const dump = spawn('pg_dump', ['loga_erp'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let dumpErr = '';
+  dump.stderr.on('data', (d: Buffer) => { dumpErr += d.toString(); });
+
+  for await (const chunk of dump.stdout) {
+    yield chunk as Buffer;
+  }
+  const dumpCode: number = await new Promise(r => dump.on('close', (c) => r(c ?? -1)));
+  if (dumpCode !== 0) {
+    throw new Error(`pg_dump falló (exit ${dumpCode}): ${dumpErr.slice(0, 500)}`);
+  }
+
+  if (hasUploads) {
+    yield Buffer.from('\n---UPLOADS_SEPARATOR---\n');
+    const tar = spawn('tar', ['cf', '-', '-C', cwd, 'uploads'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let tarErr = '';
+    tar.stderr.on('data', (d: Buffer) => { tarErr += d.toString(); });
+    const chunks: Buffer[] = [];
+    for await (const c of tar.stdout) chunks.push(c as Buffer);
+    const tarCode: number = await new Promise(r => tar.on('close', (c) => r(c ?? -1)));
+    if (tarCode !== 0) {
+      throw new Error(`tar falló (exit ${tarCode}): ${tarErr.slice(0, 500)}`);
+    }
+    yield Buffer.from(Buffer.concat(chunks).toString('base64'));
+  }
+}
+
+/** Writable que captura solo los primeros `limit` bytes y descarta el resto. Para validación rápida. */
+class HeadCapture extends Writable {
+  private buf: Buffer[] = [];
+  private taken = 0;
+  constructor(private limit: number) { super(); }
+  _write(chunk: Buffer, _enc: BufferEncoding, cb: (err?: Error | null) => void): void {
+    if (this.taken < this.limit) {
+      const take = Math.min(chunk.length, this.limit - this.taken);
+      this.buf.push(chunk.subarray(0, take));
+      this.taken += take;
+    }
+    cb();
+  }
+  text(): string { return Buffer.concat(this.buf).toString('utf-8'); }
+}
+
+/**
+ * Descifra `srcEncrypted` → escribe contenido plano (gunzipped) en `dstPlain`.
+ * Auto-detecta formato:
+ *  - "LOGA1" magic → AES-256-GCM + Argon2id
+ *  - Otro → legacy openssl AES-256-CBC + PBKDF2
+ */
+async function decryptBackupToFile(srcEncrypted: string, dstPlain: string, password: string): Promise<void> {
+  if (isLogaV1(srcEncrypted)) {
+    await new Promise<void>((resolve, reject) => {
+      const out = fs.createWriteStream(dstPlain);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      decryptStream(srcEncrypted, out, password).catch(reject);
+    });
+  } else {
+    // Legacy: openssl CLI (formato CBC + PBKDF2 generado por versiones anteriores)
+    const srcQ = JSON.stringify(srcEncrypted);
+    const dstQ = JSON.stringify(dstPlain);
+    const env = { ...process.env, BK_PASS: password };
+    const { execSync } = await import('child_process');
+    execSync(
+      `openssl enc -aes-256-cbc -d -salt -pbkdf2 -pass env:BK_PASS -in ${srcQ} | gunzip > ${dstQ}`,
+      { timeout: 180000, shell: '/bin/bash', env, stdio: 'pipe' },
+    );
+  }
+}
+
+/** Cifra (pg_dump [+ uploads]) → outputPath con formato LOGA1. */
+async function encryptBackup(outputPath: string, password: string, hasUploads: boolean, cwd: string): Promise<void> {
+  const source = Readable.from(assembleSource(cwd, hasUploads));
+  await encryptStream(source, outputPath, password);
+}
+
+// Lock global: si dos llamadas (p.ej. manual + cron) coinciden, ambas
+// devuelven la MISMA promesa. Sin esto, pg_dump/streams concurrentes producían
+// .enc truncados con authTag GCM inválido — el bug que mostró "Unsupported state
+// or unable to authenticate data" al restaurar.
+let backupEnEjecucion: Promise<BackupResult> | null = null;
+
+export function ejecutarBackup(): Promise<BackupResult> {
+  if (backupEnEjecucion) return backupEnEjecucion;
+  backupEnEjecucion = ejecutarBackupInterno().finally(() => {
+    backupEnEjecucion = null;
+  });
+  return backupEnEjecucion;
+}
+
+async function ejecutarBackupInterno(): Promise<BackupResult> {
   const password = getBackupPassword();
   const now = new Date();
   const yyyy = now.getFullYear();
@@ -92,55 +192,28 @@ export async function ejecutarBackup(): Promise<BackupResult> {
   const uploadsDir = path.join(process.cwd(), 'uploads');
   const hasUploads = fs.existsSync(uploadsDir) && fs.readdirSync(uploadsDir).length > 0;
 
-  // Pipeline pg_dump | gzip | openssl. Password vía env var, no en cmdline.
-  // Uso shell para el pipe pero el password NO se interpola.
-  const env = { ...process.env, BK_PASS: password };
-  const opensslPass = '-pass env:BK_PASS';
-  const cwdQuoted = JSON.stringify(process.cwd());
-  const filepathQuoted = JSON.stringify(filepath);
-
-  // Timeout configurable: default 10 min para BD grandes con muchos uploads.
-  // Antes hardcoded 120s/60s — backup de BD >2GB se cortaba a la mitad
-  // dejando .enc corrupto. Override con BACKUP_TIMEOUT_MS env si necesario.
-  const backupTimeout = Math.max(60_000, Number(process.env.BACKUP_TIMEOUT_MS) || 600_000);
-
-  if (hasUploads) {
-    execSync(
-      `(pg_dump loga_erp && echo "---UPLOADS_SEPARATOR---" && tar cf - -C ${cwdQuoted} uploads 2>/dev/null | base64) | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 ${opensslPass} -out ${filepathQuoted}`,
-      { timeout: backupTimeout, shell: '/bin/bash', env }
-    );
-  } else {
-    execSync(
-      `pg_dump loga_erp | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 ${opensslPass} -out ${filepathQuoted}`,
-      { timeout: backupTimeout, shell: '/bin/bash', env }
-    );
-  }
+  await encryptBackup(filepath, password, hasUploads, process.cwd());
 
   const stats = fs.statSync(filepath);
   const sizeKB = Math.round(stats.size / 1024);
 
-  // ── Validación post-backup: descifrar y verificar magic header pg_dump.
-  // Bloqueante: si falla, NO se borran antiguos ni se sube a Drive.
-  // Anti-pérdida-de-datos: backup corrupto + cleanup local = pérdida total.
+  // Validación post-backup: descifrar y verificar magic header pg_dump.
+  // GCM authTag se valida implícitamente al consumir todo el stream (decipher.final()).
+  // Si falla auth → throw → borramos archivo corrupto.
   try {
-    const probeBytes = execSync(
-      `openssl enc -aes-256-cbc -d -salt -pbkdf2 ${opensslPass} -in ${filepathQuoted} | gunzip 2>/dev/null | head -c 4096`,
-      { timeout: 60_000, shell: '/bin/bash', env, stdio: ['ignore', 'pipe', 'ignore'] }
-    ).toString('utf-8');
-    // pg_dump comienza con "--" comentario o "SET " o "--\n-- PostgreSQL".
-    // Si el descifrado falla, salida vacía o basura binaria → no matchea.
-    const looksValid = /PostgreSQL database dump|^--\s|^SET\s|^CREATE\s/m.test(probeBytes);
-    if (!looksValid) {
+    const cap = new HeadCapture(4096);
+    await decryptStream(filepath, cap, password);
+    const head = cap.text();
+    if (!/PostgreSQL database dump|^--\s|^SET\s|^CREATE\s/m.test(head)) {
       throw new Error('contenido no parece pg_dump válido tras descifrar');
     }
   } catch (e) {
-    // Borrar el archivo corrupto y abortar — NO tocar backups antiguos.
     try { fs.unlinkSync(filepath); } catch { /* ignore */ }
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(`Backup creado pero validación falló: ${msg}. Backups antiguos preservados.`);
   }
 
-  // 2. rclone con execFileSync — args separados, sin shell interpolation
+  // rclone con execFileSync — args separados, sin shell interpolation
   let drive = false;
   let driveError: string | undefined;
 
@@ -155,7 +228,7 @@ export async function ejecutarBackup(): Promise<BackupResult> {
         const files = lsOut.trim().split('\n').filter(Boolean)
           .map(line => line.trim().split(/\s+/).slice(1).join(' '))
           .filter(isBackupFilename)
-          .sort((a, b) => backupTimestamp(b) - backupTimestamp(a)); // más reciente primero
+          .sort((a, b) => backupTimestamp(b) - backupTimestamp(a));
         for (const f of files.slice(10)) {
           execFileSync('rclone', ['deletefile', `y:Loga-Backups/${f}`, '--quiet'], { timeout: 10000, stdio: 'ignore' });
         }
@@ -169,9 +242,10 @@ export async function ejecutarBackup(): Promise<BackupResult> {
     driveError = `rclone no disponible: ${e instanceof Error ? e.message : 'desconocido'}`;
   }
 
-  // 3. Cleanup local — keep only last 2 (orden cronológico real, no lex)
+  // Cleanup local — keep only last 2 (orden cronológico real, no lex)
+  // Excluir pre-restore-*.sql.gz.enc del cleanup (esos los borra el usuario manualmente).
   const localFiles = fs.readdirSync(BACKUP_DIR)
-    .filter(isBackupFilename)
+    .filter(f => isBackupFilename(f) && !RX_PRE.test(f))
     .map(f => ({ f, ts: backupTimestamp(f, fs.statSync(path.join(BACKUP_DIR, f)).mtimeMs) }))
     .sort((a, b) => b.ts - a.ts)
     .map(x => x.f);
@@ -219,7 +293,6 @@ function validarDumpSQL(dumpPath: string): { valido: boolean; motivo?: string } 
     if (!/PostgreSQL database dump|^--\s|^SET\s|^CREATE\s/m.test(head)) {
       return { valido: false, motivo: 'cabecera no es pg_dump válido' };
     }
-    // Últimos 2KB para buscar marker final
     const tailSize = Math.min(2048, stats.size);
     const tailBuf = Buffer.alloc(tailSize);
     fs.readSync(fd, tailBuf, 0, tailSize, stats.size - tailSize);
@@ -233,8 +306,54 @@ function validarDumpSQL(dumpPath: string): { valido: boolean; motivo?: string } 
   }
 }
 
+/** DDL drop completo del schema public + restore SQL en transacción atómica. */
+function buildRestoreScript(sqlContent: string): string {
+  return `
+BEGIN;
+DO $$ DECLARE r RECORD; BEGIN
+  FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+    EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
+  END LOOP;
+END $$;
+DO $$ DECLARE r RECORD; BEGIN
+  FOR r IN (
+    SELECT typname FROM pg_type
+    WHERE typtype = 'e'
+      AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+  ) LOOP
+    EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
+  END LOOP;
+END $$;
+DO $$ DECLARE r RECORD; BEGIN
+  FOR r IN (
+    SELECT viewname FROM pg_views WHERE schemaname = 'public'
+  ) LOOP
+    EXECUTE 'DROP VIEW IF EXISTS public.' || quote_ident(r.viewname) || ' CASCADE';
+  END LOOP;
+  FOR r IN (
+    SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'
+  ) LOOP
+    EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequencename) || ' CASCADE';
+  END LOOP;
+  FOR r IN (
+    SELECT p.oid::regprocedure::text AS sig
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.objid = p.oid AND d.deptype = 'e'
+      )
+  ) LOOP
+    EXECUTE 'DROP FUNCTION IF EXISTS ' || r.sig || ' CASCADE';
+  END LOOP;
+END $$;
+${sqlContent}
+COMMIT;
+`;
+}
+
 export async function restaurarBackup(filepath: string): Promise<{ ok: boolean; message: string; pre_restore_backup?: string }> {
-  // Whitelist: filepath debe estar dentro de BACKUP_DIR y matchear patrón conocido
   const resolved = path.resolve(filepath);
   const expectedDir = path.resolve(BACKUP_DIR);
   if (!resolved.startsWith(expectedDir + path.sep)) {
@@ -251,22 +370,16 @@ export async function restaurarBackup(filepath: string): Promise<{ ok: boolean; 
   try { password = getBackupPassword(); }
   catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Error de configuración' }; }
 
-  const env = { ...process.env, BK_PASS: password };
   const tmpDir = path.join(BACKUP_DIR, 'tmp_restore');
   let preRestoreFilename: string | undefined;
 
   try {
-    // ── PASO 1: descifrar el backup objetivo a tmp y VALIDARLO ANTES de tocar la BD.
+    // PASO 1: descifrar a tmp y VALIDAR ANTES de tocar BD.
     if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true });
     fs.mkdirSync(tmpDir, { recursive: true });
     const tmpFile = path.join(tmpDir, 'dump.sql');
-    const tmpFileQuoted = JSON.stringify(tmpFile);
-    const resolvedQuoted = JSON.stringify(resolved);
     try {
-      execSync(
-        `openssl enc -aes-256-cbc -d -salt -pbkdf2 -pass env:BK_PASS -in ${resolvedQuoted} | gunzip > ${tmpFileQuoted}`,
-        { timeout: 180000, shell: '/bin/bash', env, stdio: 'pipe' }
-      );
+      await decryptBackupToFile(resolved, tmpFile, password);
     } catch (e) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       return { ok: false, message: `No se pudo descifrar/descomprimir el backup: ${e instanceof Error ? e.message : 'error'}. La base de datos NO ha sido tocada.` };
@@ -283,10 +396,7 @@ export async function restaurarBackup(filepath: string): Promise<{ ok: boolean; 
     } else {
       sqlContent = fullContent;
     }
-    // pg_dump 16+ inserta meta-comandos psql `\restrict <token>` / `\unrestrict <token>`
-    // al inicio y final del dump. Cuando ejecutamos el dump dentro de una
-    // transacción explícita (BEGIN; ... COMMIT;) con ON_ERROR_STOP=1, esos
-    // meta-comandos abortan la transacción. Filtrarlos:
+    // pg_dump 16+ inserta `\restrict`/`\unrestrict` que rompen transacción explícita.
     sqlContent = sqlContent
       .split('\n')
       .filter(line => !/^\s*\\(restrict|unrestrict)\b/.test(line))
@@ -300,96 +410,23 @@ export async function restaurarBackup(filepath: string): Promise<{ ok: boolean; 
       return { ok: false, message: `Backup inválido: ${val.motivo}. La base de datos NO ha sido tocada.` };
     }
 
-    // ── PASO 2: PRE-BACKUP automático del estado actual (red de seguridad).
-    // Si el restore falla a mitad, restauramos este pre-backup automáticamente.
+    // PASO 2: PRE-BACKUP automático del estado actual (red de seguridad). Formato LOGA1.
     const now = new Date();
     const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
     preRestoreFilename = `pre-restore-${ts}.sql.gz.enc`;
     const preRestorePath = path.join(BACKUP_DIR, preRestoreFilename);
-    const preRestoreQuoted = JSON.stringify(preRestorePath);
-    const cwdQuoted = JSON.stringify(process.cwd());
     const uploadsDir = path.join(process.cwd(), 'uploads');
     const hasUploads = fs.existsSync(uploadsDir) && fs.readdirSync(uploadsDir).length > 0;
     try {
-      if (hasUploads) {
-        execSync(
-          `(pg_dump loga_erp && echo "---UPLOADS_SEPARATOR---" && tar cf - -C ${cwdQuoted} uploads 2>/dev/null | base64) | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 -pass env:BK_PASS -out ${preRestoreQuoted}`,
-          { timeout: 600000, shell: '/bin/bash', env }
-        );
-      } else {
-        execSync(
-          `pg_dump loga_erp | gzip | openssl enc -aes-256-cbc -salt -pbkdf2 -pass env:BK_PASS -out ${preRestoreQuoted}`,
-          { timeout: 600000, shell: '/bin/bash', env }
-        );
-      }
+      await encryptBackup(preRestorePath, password, hasUploads, process.cwd());
     } catch (e) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
       return { ok: false, message: `No se pudo crear el pre-backup de seguridad: ${e instanceof Error ? e.message : 'error'}. La base de datos NO ha sido tocada.` };
     }
     logger.info('[restaurarBackup] pre-backup creado', { archivo: preRestoreFilename });
 
-    // ── PASO 3: restore en transacción atómica (psql --single-transaction).
-    // El dump de pg_dump no incluye BEGIN/COMMIT por sí mismo. --single-transaction
-    // envuelve TODO en una transacción: si una sentencia falla → ROLLBACK total
-    // → BD queda como estaba. NO necesitamos DROP previo: el dump incluye los
-    // CREATE TABLE y, dentro de la transacción, los DROP necesarios.
-    //
-    // PERO: pg_dump por defecto NO genera DROP statements. Necesitamos preceder
-    // el dump con un DROP TABLE de todo, también dentro de la misma transacción.
-    // CRÍTICO: el dump contiene `COPY ... FROM stdin; <data> \.` que solo funciona
-    // si psql lee desde un archivo (-f). Pasarlo por stdin con BEGIN/COMMIT
-    // envolventes rompe la lectura del COPY (psql confunde wrapper SQL con datos
-    // COPY). Escribir todo a un .sql temporal y usar -f.
-    const dropScript = `
-BEGIN;
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-    EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
-  END LOOP;
-END $$;
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (
-    SELECT typname FROM pg_type
-    WHERE typtype = 'e'
-      AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-  ) LOOP
-    EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
-  END LOOP;
-END $$;
--- DROP dinámico de FUNCTIONS del schema public. Las funciones persisten tras
--- DROP TABLE CASCADE; sin esto, al recrear con CREATE FUNCTION del dump da
--- "already exists with same argument types". Incluimos también las views.
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (
-    SELECT viewname FROM pg_views WHERE schemaname = 'public'
-  ) LOOP
-    EXECUTE 'DROP VIEW IF EXISTS public.' || quote_ident(r.viewname) || ' CASCADE';
-  END LOOP;
-  -- DROP SEQUENCES (no se borran con DROP TABLE CASCADE si son standalone).
-  FOR r IN (
-    SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'
-  ) LOOP
-    EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequencename) || ' CASCADE';
-  END LOOP;
-  FOR r IN (
-    SELECT p.oid::regprocedure::text AS sig
-    FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public'
-      -- Excluir funciones que pertenecen a extensiones (ej: pgcrypto.digest).
-      -- pg_depend.deptype='e' = "depends on extension" → no se pueden borrar
-      -- directamente, son dependencias de la extensión.
-      AND NOT EXISTS (
-        SELECT 1 FROM pg_depend d
-        WHERE d.objid = p.oid AND d.deptype = 'e'
-      )
-  ) LOOP
-    EXECUTE 'DROP FUNCTION IF EXISTS ' || r.sig || ' CASCADE';
-  END LOOP;
-END $$;
-${sqlContent}
-COMMIT;
-`;
+    // PASO 3: restore en transacción atómica.
+    const dropScript = buildRestoreScript(sqlContent);
     const scriptFile = path.join(tmpDir, 'restore_script.sql');
     fs.writeFileSync(scriptFile, dropScript);
 
@@ -399,88 +436,28 @@ COMMIT;
     });
 
     if (restoreResult.status !== 0) {
-      // Restore falló. Intentar rollback automático restaurando el pre-backup.
       const stderr = restoreResult.stderr?.toString() ?? '';
       logger.error('[restaurarBackup] restore principal falló — iniciando rollback al pre-backup', { stderr });
 
       try {
-        // Descifrar pre-backup
         const rollbackTmp = path.join(tmpDir, 'rollback.sql');
-        const rollbackQuoted = JSON.stringify(rollbackTmp);
-        execSync(
-          `openssl enc -aes-256-cbc -d -salt -pbkdf2 -pass env:BK_PASS -in ${preRestoreQuoted} | gunzip > ${rollbackQuoted}`,
-          { timeout: 180000, shell: '/bin/bash', env, stdio: 'pipe' }
-        );
-        // Separar SQL del pre-backup (puede tener uploads)
+        await decryptBackupToFile(preRestorePath, rollbackTmp, password);
         const rbContent = fs.readFileSync(rollbackTmp, 'utf-8');
         const rbSep = rbContent.indexOf('---UPLOADS_SEPARATOR---');
         const rbSqlRaw = rbSep > 0 ? rbContent.substring(0, rbSep) : rbContent;
-        // Mismo filtro de \restrict/\unrestrict para el rollback (el pre-backup
-        // se generó con pg_dump 16+ y lleva los mismos meta-comandos).
         const rbSql = rbSqlRaw
           .split('\n')
           .filter(line => !/^\s*\\(restrict|unrestrict)\b/.test(line))
           .join('\n');
 
-        const rbScript = `
-BEGIN;
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-    EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
-  END LOOP;
-END $$;
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (
-    SELECT typname FROM pg_type
-    WHERE typtype = 'e'
-      AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-  ) LOOP
-    EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
-  END LOOP;
-END $$;
--- DROP dinámico de FUNCTIONS del schema public. Las funciones persisten tras
--- DROP TABLE CASCADE; sin esto, al recrear con CREATE FUNCTION del dump da
--- "already exists with same argument types". Incluimos también las views.
-DO $$ DECLARE r RECORD; BEGIN
-  FOR r IN (
-    SELECT viewname FROM pg_views WHERE schemaname = 'public'
-  ) LOOP
-    EXECUTE 'DROP VIEW IF EXISTS public.' || quote_ident(r.viewname) || ' CASCADE';
-  END LOOP;
-  -- DROP SEQUENCES (no se borran con DROP TABLE CASCADE si son standalone).
-  FOR r IN (
-    SELECT sequencename FROM pg_sequences WHERE schemaname = 'public'
-  ) LOOP
-    EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequencename) || ' CASCADE';
-  END LOOP;
-  FOR r IN (
-    SELECT p.oid::regprocedure::text AS sig
-    FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public'
-      -- Excluir funciones que pertenecen a extensiones (ej: pgcrypto.digest).
-      -- pg_depend.deptype='e' = "depends on extension" → no se pueden borrar
-      -- directamente, son dependencias de la extensión.
-      AND NOT EXISTS (
-        SELECT 1 FROM pg_depend d
-        WHERE d.objid = p.oid AND d.deptype = 'e'
-      )
-  ) LOOP
-    EXECUTE 'DROP FUNCTION IF EXISTS ' || r.sig || ' CASCADE';
-  END LOOP;
-END $$;
-${rbSql}
-COMMIT;
-`;
+        const rbScript = buildRestoreScript(rbSql);
         const rbScriptFile = path.join(tmpDir, 'rollback_script.sql');
         fs.writeFileSync(rbScriptFile, rbScript);
-        // Mismo motivo: escribir a archivo y usar -f para que COPY FROM stdin funcione.
         const rbResult = spawnSync('psql', ['-v', 'ON_ERROR_STOP=1', '-f', rbScriptFile, 'loga_erp'], {
           timeout: 600000,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         if (rbResult.status !== 0) {
-          // Catastrófico: ni siquiera el pre-backup restaura.
           logger.error('[restaurarBackup] ROLLBACK TAMBIÉN FALLÓ', { stderr: rbResult.stderr?.toString() });
           return {
             ok: false,
@@ -503,8 +480,7 @@ COMMIT;
       }
     }
 
-    // ── PASO 4: Restore de uploads (post-commit DB, no atómico con DB pero
-    // recuperable via pre-backup que también incluye uploads).
+    // PASO 4: Restore de uploads
     if (uploadsPart.trim()) {
       try {
         const uploadsDir2 = path.join(process.cwd(), 'uploads');

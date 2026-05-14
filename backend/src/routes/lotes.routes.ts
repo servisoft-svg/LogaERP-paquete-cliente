@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
+import { nextLoteCode } from '../lib/loteCode';
 
 const router = Router();
 
@@ -65,17 +66,8 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'cantidad debe ser mayor que 0' });
     }
 
-    // Auto-generate readable lote code: LMP-DDMMYY-XXXX
     let lote_interno = loteInternoBody?.trim().toUpperCase();
-    if (!lote_interno) {
-      const d = new Date();
-      const dd = String(d.getDate()).padStart(2, '0');
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const yy = String(d.getFullYear()).slice(-2);
-      const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-      lote_interno = `LMP-${dd}${mm}${yy}-${rand}`;
-    }
-    const qty_actual   = cantidad_actual ?? qty;
+    const qty_actual = cantidad_actual ?? qty;
 
     // Auto-calcular caducidad si el producto tiene caducidad_meses y no se proporcionó fecha
     let fechaCad = fecha_caducidad ?? null;
@@ -88,26 +80,44 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const { rows: [lote] } = await pool.query(
-      `INSERT INTO lotes
-         (producto_id, lote_interno, lote_proveedor, cantidad_inicial, cantidad_actual,
-          fecha_fabricacion, fecha_caducidad, ubicacion, observaciones, estado, precio_compra)
-       VALUES ($1,$2,$3,$4::NUMERIC,$5::NUMERIC,$6,$7,$8,$9,COALESCE($10::estado_lote,'cuarentena'),$11::NUMERIC)
-       RETURNING *`,
-      [
-        producto_id,
-        lote_interno,
-        lote_proveedor ?? null,
-        Number(qty).toFixed(6),
-        Number(qty_actual).toFixed(6),
-        fecha_fabricacion ?? null,
-        fechaCad          ?? null,
-        ubicacion         ?? null,
-        observaciones     ?? null,
-        estado            ?? null,
-        precio_compra     ?? null,
-      ]
-    );
+    // Generación de código + INSERT en una sola transacción para que el
+    // advisory_xact_lock de nextLoteCode serialice frente a otros creadores
+    // concurrentes (otra ruta o produccion.service).
+    const client = await pool.connect();
+    let lote: any;
+    try {
+      await client.query('BEGIN');
+      if (!lote_interno) {
+        lote_interno = await nextLoteCode(client);
+      }
+      const result = await client.query(
+        `INSERT INTO lotes
+           (producto_id, lote_interno, lote_proveedor, cantidad_inicial, cantidad_actual,
+            fecha_fabricacion, fecha_caducidad, ubicacion, observaciones, estado, precio_compra)
+         VALUES ($1,$2,$3,$4::NUMERIC,$5::NUMERIC,$6,$7,$8,$9,COALESCE($10::estado_lote,'cuarentena'),$11::NUMERIC)
+         RETURNING *`,
+        [
+          producto_id,
+          lote_interno,
+          lote_proveedor ?? null,
+          Number(qty).toFixed(6),
+          Number(qty_actual).toFixed(6),
+          fecha_fabricacion ?? null,
+          fechaCad          ?? null,
+          ubicacion         ?? null,
+          observaciones     ?? null,
+          estado            ?? null,
+          precio_compra     ?? null,
+        ]
+      );
+      lote = result.rows[0];
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
     // [H2.1 audit v3] Eliminado UPDATE defensivo de stock_actual.
     // El trigger fn_trg_lotes_stock_actual (migración 025) ya recalcula
     // productos.stock_actual = SUM(lotes aprobados con stock>0) automáticamente

@@ -715,240 +715,85 @@ router.post('/:id/consumir', async (req, res) => {
   }
 });
 
-// GET /api/pedidos/:id/albaran.pdf — Albaran de entrega conforme legislacion espanola (RD 1619/2012)
+// Helper interno: carga pedido + líneas + datos empresa para PDF mercantil
+async function cargarDatosDoc(id: string): Promise<{ pedido: any; lineas: any[]; empresa: any } | null> {
+  const { rows: [pedido] } = await pool.query(`
+    SELECT pd.*, c.nombre AS cliente_nombre_rel, c.email AS cliente_email_rel,
+           c.direccion AS cliente_direccion, c.nif AS cliente_nif, c.telefono AS cliente_telefono
+    FROM pedidos pd LEFT JOIN clientes c ON c.id = pd.cliente_id
+    WHERE pd.id = $1`, [id]);
+  if (!pedido) return null;
+
+  const { rows: lineas } = await pool.query(`
+    SELECT lp.*, p.nombre AS producto_nombre_rel, p.codigo AS producto_codigo
+    FROM lineas_pedido lp LEFT JOIN productos p ON p.id = lp.producto_id
+    WHERE lp.pedido_id = $1 ORDER BY lp.created_at ASC`, [id]);
+
+  // Si no hay líneas pero el pedido tiene producto único antiguo, sintetizar 1 línea
+  if (lineas.length === 0 && pedido.producto_id) {
+    lineas.push({
+      producto_nombre_rel: null, producto_nombre: pedido.producto_nombre, producto_codigo: pedido.producto_codigo,
+      cantidad: pedido.cantidad, unidad_medida: pedido.unidad_medida, precio_unitario: null, subtotal: null,
+    });
+  }
+
+  const { rows: [cfg] } = await pool.query(`SELECT * FROM configuracion_global WHERE id = 1`);
+  const empresa = {
+    nombre: cfg?.empresa_nombre || 'Colas Loga S.L.',
+    cif: cfg?.empresa_cif || '',
+    direccion: cfg?.empresa_direccion || '',
+    telefono: cfg?.empresa_telefono || '',
+    web: cfg?.empresa_web || '',
+    email: cfg?.email_remitente || '',
+  };
+  return { pedido, lineas, empresa };
+}
+
+// GET /api/pedidos/:id/albaran.pdf — Albarán de entrega minimalista (sin trazabilidad/fotos)
 router.get('/:id/albaran.pdf', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { rows: [pedido] } = await pool.query(`
-      SELECT pd.*, c.nombre AS cliente_nombre_rel, c.email AS cliente_email_rel,
-             c.direccion AS cliente_direccion, c.nif AS cliente_nif, c.telefono AS cliente_telefono
-      FROM pedidos pd LEFT JOIN clientes c ON c.id = pd.cliente_id
-      WHERE pd.id = $1`, [id]);
-    if (!pedido) return res.status(404).json({ error: 'Pedido no encontrado' });
-
-    const { rows: lineas } = await pool.query(`
-      SELECT lp.*, p.nombre AS producto_nombre_rel, p.codigo AS producto_codigo
-      FROM lineas_pedido lp LEFT JOIN productos p ON p.id = lp.producto_id
-      WHERE lp.pedido_id = $1 ORDER BY lp.created_at ASC`, [id]);
-
-    // Lotes consumidos (trazabilidad)
-    const { rows: movimientos } = await pool.query(`
-      SELECT sm.cantidad, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
-             l.lote_interno, l.fecha_caducidad, l.fecha_entrada
-      FROM stock_moves sm
-      JOIN productos p ON p.id = sm.producto_id
-      LEFT JOIN lotes l ON l.id = sm.lote_id
-      WHERE sm.motivo LIKE $1
-      ORDER BY p.nombre ASC, sm.created_at ASC`, [`%${pedido.numero_pedido}%`]);
-
-    // Fotos del lote de produccion
-    let fotosProd: string[] = [];
-    if (pedido.orden_produccion_id) {
-      const { rows: [op] } = await pool.query(`SELECT foto_urls, archivos, registro_limpieza FROM ordenes_produccion WHERE id = $1`, [pedido.orden_produccion_id]);
-      if (op) fotosProd = op.foto_urls ?? [];
-    }
-
-    // Datos empresa desde configuracion
-    const { rows: [cfg] } = await pool.query(`SELECT * FROM configuracion_global WHERE id = 1`);
-    const EMP = {
-      nombre: cfg?.empresa_nombre || 'Colas Loga S.L.',
-      cif: cfg?.empresa_cif || '',
-      dir: cfg?.empresa_direccion || '',
-      tel: cfg?.empresa_telefono || '',
-      web: cfg?.empresa_web || '',
-      email: cfg?.email_remitente || '',
-    };
+    const datos = await cargarDatosDoc(req.params.id);
+    if (!datos) return res.status(404).json({ error: 'Pedido no encontrado' });
 
     const PDFDocument = require('pdfkit');
-    const fs = require('fs');
-    const path = require('path');
+    const { renderDocumentoPDF } = require('../lib/pdfDocumento');
 
     const doc = new PDFDocument({ margin: 0, size: 'A4' });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="albaran-${pedido.numero_pedido}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="albaran-${datos.pedido.numero_pedido}.pdf"`);
     doc.pipe(res);
 
-    const RED = '#E8001C'; const DARK = '#1A1A1A'; const GRAY = '#6B7280';
-    const LGRAY = '#F9FAFB'; const WHITE = '#FFFFFF'; const BORDER = '#E5E7EB';
-    const BLUE = '#1D4ED8';
-    const W = 495; const L = 50;
-    const LOGO = path.join(process.cwd(), 'assets', 'logo-real.png');
-    const hasLogo = fs.existsSync(LOGO);
-    const fmtDate = (d: string | null) => d ? new Date(d).toLocaleDateString('es-ES') : '---';
-    const fmtNum = (n: string | number) => parseFloat(String(n)).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
-
-    // ── CABECERA ─────────────────────────────────────────
-    doc.rect(0, 0, 595, 90).fill(RED);
-    if (hasLogo) { doc.roundedRect(20, 8, 74, 74, 8).fill(WHITE); try { doc.image(LOGO, 22, 10, { fit: [70, 70] }); } catch {} }
-    doc.fillColor(WHITE).fontSize(20).font('Helvetica-Bold').text('ALBARAN DE ENTREGA', 105, 16);
-    doc.fillColor(WHITE).fontSize(9).font('Helvetica').text(EMP.nombre, 105, 40);
-    doc.fillColor(WHITE).fontSize(7.5).font('Helvetica').text((EMP.cif ? 'CIF: ' + EMP.cif + '  |  ' : '') + EMP.dir + (EMP.tel ? '  |  Tel: ' + EMP.tel : ''), 105, 54);
-    doc.fillColor(WHITE).fontSize(14).font('Helvetica-Bold').text(pedido.numero_pedido, 340, 16, { align: 'right', width: 220 });
-    doc.fillColor(WHITE).fontSize(8).font('Helvetica')
-      .text('Fecha emision: ' + new Date().toLocaleDateString('es-ES', { day: '2-digit', month: 'long', year: 'numeric' }), 340, 40, { align: 'right', width: 220 });
-    if (pedido.fecha_entrega) doc.text('Fecha entrega: ' + fmtDate(pedido.fecha_entrega), 340, 52, { align: 'right', width: 220 });
-    doc.rect(0, 90, 595, 3).fill(WHITE);
-
-    let y = 106;
-
-    // ── DATOS EMISOR + RECEPTOR ──────────────────────────
-    const boxW = (W - 10) / 2;
-    // Emisor
-    doc.rect(L, y, boxW, 52).fill(LGRAY).strokeColor(BORDER).lineWidth(0.5).stroke();
-    doc.fillColor(RED).fontSize(7).font('Helvetica-Bold').text('EMISOR', L + 6, y + 4);
-    doc.fillColor(DARK).fontSize(8).font('Helvetica-Bold').text(EMP.nombre, L + 6, y + 16);
-    doc.fillColor(GRAY).fontSize(7).font('Helvetica');
-    doc.text('CIF: ' + (EMP.cif || '---'), L + 6, y + 28);
-    doc.text(EMP.dir || '', L + 6, y + 38);
-
-    // Receptor
-    const rx = L + boxW + 10;
-    doc.rect(rx, y, boxW, 52).fill(LGRAY).strokeColor(BORDER).lineWidth(0.5).stroke();
-    doc.fillColor(RED).fontSize(7).font('Helvetica-Bold').text('DESTINATARIO', rx + 6, y + 4);
-    doc.fillColor(DARK).fontSize(8).font('Helvetica-Bold').text(pedido.cliente_nombre_rel ?? pedido.cliente_nombre ?? '---', rx + 6, y + 16);
-    doc.fillColor(GRAY).fontSize(7).font('Helvetica');
-    doc.text('NIF/CIF: ' + (pedido.cliente_nif ?? '---'), rx + 6, y + 28);
-    doc.text(pedido.cliente_direccion ?? '', rx + 6, y + 38);
-    y += 60;
-
-    // ── DETALLE DE MERCANCIA ─────────────────────────────
-    doc.rect(L, y, W, 15).fill(RED);
-    doc.fillColor(WHITE).fontSize(7.5).font('Helvetica-Bold');
-    const cols = [30, 190, 65, 50, 75, 85];
-    const heads = ['#', 'Descripcion mercancia', 'Cantidad', 'Ud.', 'Precio ud.', 'Importe'];
-    let cx = L;
-    heads.forEach((h, i) => { doc.text(h, cx + 4, y + 4, { width: cols[i] - 4 }); cx += cols[i]; });
-    y += 15;
-
-    const items = lineas.length > 0 ? lineas : (pedido.producto_id ? [{
-      producto_nombre_rel: null, producto_nombre: pedido.producto_nombre, producto_codigo: pedido.producto_codigo,
-      cantidad: pedido.cantidad, unidad_medida: pedido.unidad_medida, precio_unitario: null, subtotal: null,
-    }] : []);
-
-    items.forEach((l: any, i: number) => {
-      const bg = i % 2 === 0 ? LGRAY : WHITE;
-      doc.rect(L, y, W, 17).fill(bg).strokeColor(BORDER).lineWidth(0.5).stroke();
-      cx = L;
-      const nombre = (l.producto_nombre_rel ?? l.producto_nombre ?? '---');
-      const codigo = l.producto_codigo ? ` (${l.producto_codigo})` : '';
-      const vals = [
-        String(i + 1),
-        nombre + codigo,
-        l.cantidad ? fmtNum(l.cantidad) : '',
-        l.unidad_medida ?? 'kg',
-        l.precio_unitario ? fmtNum(l.precio_unitario) + ' EUR' : '',
-        l.subtotal ? fmtNum(l.subtotal) + ' EUR' : '',
-      ];
-      vals.forEach((v, vi) => {
-        doc.fillColor(DARK).fontSize(7.5).font(vi === 1 ? 'Helvetica-Bold' : 'Helvetica').text(v, cx + 4, y + 5, { width: cols[vi] - 4 });
-        cx += cols[vi];
-      });
-      y += 17;
+    renderDocumentoPDF(doc, 'albaran', {
+      empresa: datos.empresa,
+      pedido: datos.pedido,
+      lineas: datos.lineas,
     });
 
-    // ── TOTALES ──────────────────────────────────────────
-    if (pedido.subtotal && parseFloat(pedido.subtotal) > 0) {
-      y += 4;
-      const tX = L + cols[0] + cols[1] + cols[2] + cols[3];
-      const tW = cols[4] + cols[5];
+    doc.end();
+  } catch (err) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
 
-      const row = (label: string, val: string, bold = false, bg = LGRAY) => {
-        doc.rect(tX, y, tW, 14).fill(bg).strokeColor(BORDER).lineWidth(0.5).stroke();
-        doc.fillColor(GRAY).fontSize(7.5).font('Helvetica').text(label, tX + 4, y + 3, { width: cols[4] - 4 });
-        doc.fillColor(DARK).fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica').text(val, tX + cols[4] + 4, y + 3, { width: cols[5] - 4 });
-        y += 14;
-      };
+// GET /api/pedidos/:id/factura.pdf — Factura conforme RD 1619/2012, misma estética minimalista
+router.get('/:id/factura.pdf', async (req, res) => {
+  try {
+    const datos = await cargarDatosDoc(req.params.id);
+    if (!datos) return res.status(404).json({ error: 'Pedido no encontrado' });
 
-      row('Base imponible', fmtNum(pedido.subtotal) + ' EUR');
-      if (pedido.portes && parseFloat(pedido.portes) > 0) row('Portes', fmtNum(pedido.portes) + ' EUR');
-      const ivaPct = parseFloat(pedido.iva_porcentaje ?? '21');
-      const base = parseFloat(pedido.subtotal) + parseFloat(pedido.portes ?? '0');
-      const ivaAmt = base * ivaPct / 100;
-      row('IVA ' + ivaPct + '%', fmtNum(ivaAmt) + ' EUR');
+    const PDFDocument = require('pdfkit');
+    const { renderDocumentoPDF } = require('../lib/pdfDocumento');
 
-      doc.rect(tX, y, tW, 18).fill(RED);
-      doc.fillColor(WHITE).fontSize(9).font('Helvetica-Bold').text('TOTAL', tX + 4, y + 5, { width: cols[4] - 4 });
-      doc.fillColor(WHITE).fontSize(10).font('Helvetica-Bold').text(fmtNum(pedido.total) + ' EUR', tX + cols[4] + 4, y + 3, { width: cols[5] - 4 });
-      y += 22;
-    }
+    const doc = new PDFDocument({ margin: 0, size: 'A4' });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="factura-${datos.pedido.numero_pedido}.pdf"`);
+    doc.pipe(res);
 
-    // ── TRAZABILIDAD DE LOTES ────────────────────────────
-    if (movimientos.length > 0) {
-      if (y > 660) { doc.addPage(); y = 40; doc.rect(0, 0, 595, 3).fill(RED); y += 10; }
-      y += 6;
-      doc.rect(L, y, W, 15).fill(BLUE);
-      doc.fillColor(WHITE).fontSize(7.5).font('Helvetica-Bold').text('TRAZABILIDAD DE LOTES EXPEDIDOS', L + 8, y + 4);
-      y += 15;
-
-      // Header
-      doc.rect(L, y, W, 13).fill('#EFF6FF').strokeColor(BORDER).lineWidth(0.5).stroke();
-      const tc = [200, 120, 90, 85];
-      ['Producto', 'Lote', 'Caducidad', 'Cantidad'].forEach((h, i) => {
-        let tx = L; for (let j = 0; j < i; j++) tx += tc[j];
-        doc.fillColor(BLUE).fontSize(7).font('Helvetica-Bold').text(h, tx + 4, y + 3, { width: tc[i] - 4 });
-      });
-      y += 13;
-
-      movimientos.forEach((m: any, i: number) => {
-        if (y > 770) { doc.addPage(); y = 40; doc.rect(0, 0, 595, 3).fill(RED); y += 10; }
-        const bg = i % 2 === 0 ? LGRAY : WHITE;
-        doc.rect(L, y, W, 14).fill(bg).strokeColor(BORDER).lineWidth(0.5).stroke();
-        let tx = L;
-        [m.producto_nombre + ' (' + m.producto_codigo + ')', m.lote_interno ?? '---', fmtDate(m.fecha_caducidad), Math.abs(parseFloat(m.cantidad)).toFixed(3)].forEach((v, vi) => {
-          doc.fillColor(DARK).fontSize(7).font(vi === 0 ? 'Helvetica-Bold' : 'Helvetica').text(v, tx + 4, y + 3, { width: tc[vi] - 4 });
-          tx += tc[vi];
-        });
-        y += 14;
-      });
-    }
-
-    // ── FOTOS DEL LOTE ───────────────────────────────────
-    const validFotos = fotosProd.map(u => path.join(process.cwd(), u.replace(/^\//, ''))).filter(p => fs.existsSync(p));
-    if (validFotos.length > 0) {
-      if (y > 550) { doc.addPage(); y = 40; doc.rect(0, 0, 595, 3).fill(RED); y += 10; }
-      y += 6;
-      doc.rect(L, y, W, 15).fill(DARK);
-      doc.fillColor(WHITE).fontSize(7.5).font('Helvetica-Bold').text('FOTOGRAFIAS DEL LOTE', L + 8, y + 4);
-      y += 20;
-      for (const fotoPath of validFotos.slice(0, 4)) {
-        if (y > 580) { doc.addPage(); y = 40; doc.rect(0, 0, 595, 3).fill(RED); y += 10; }
-        try { doc.image(fotoPath, L + (W - 250) / 2, y, { fit: [250, 180] }); y += 190; } catch {}
-      }
-    }
-
-    // ── OBSERVACIONES ────────────────────────────────────
-    if (pedido.notas) {
-      if (y > 740) { doc.addPage(); y = 40; }
-      y += 6;
-      doc.fillColor(GRAY).fontSize(7.5).font('Helvetica-Bold').text('OBSERVACIONES:', L, y);
-      doc.fillColor(DARK).fontSize(7.5).font('Helvetica').text(pedido.notas, L, y + 12, { width: W });
-      y += 30;
-    }
-
-    // ── FIRMAS ───────────────────────────────────────────
-    const signY = Math.max(y + 10, 710);
-    if (signY < 770) {
-      doc.fillColor(GRAY).fontSize(7.5).font('Helvetica-Bold');
-      doc.text('Entregado por:', L, signY);
-      doc.text('Recibido por (sello y firma):', L + 260, signY);
-      doc.rect(L, signY + 12, 200, 50).strokeColor(BORDER).lineWidth(0.5).stroke();
-      doc.rect(L + 260, signY + 12, 200, 50).strokeColor(BORDER).lineWidth(0.5).stroke();
-      doc.fillColor(GRAY).fontSize(6.5).font('Helvetica');
-      doc.text('Nombre:', L + 4, signY + 48);
-      doc.text('Nombre:', L + 264, signY + 48);
-      doc.text('Fecha:', L + 4, signY + 56);
-      doc.text('Fecha:', L + 264, signY + 56);
-    }
-
-    // ── PIE LEGAL ────────────────────────────────────────
-    doc.rect(0, 818, 595, 3).fill(RED);
-    doc.fillColor(GRAY).fontSize(6).font('Helvetica')
-      .text(
-        EMP.nombre + (EMP.cif ? ' | CIF: ' + EMP.cif : '') + (EMP.dir ? ' | ' + EMP.dir : '') + ' | ' + EMP.email +
-        ' | Albaran n. ' + pedido.numero_pedido + ' | ' + new Date().toLocaleDateString('es-ES') +
-        ' | Este documento sirve como justificante de entrega de la mercancia descrita.',
-        L, 824, { align: 'center', width: W, lineGap: 1 }
-      );
+    renderDocumentoPDF(doc, 'factura', {
+      empresa: datos.empresa,
+      pedido: datos.pedido,
+      lineas: datos.lineas,
+    });
 
     doc.end();
   } catch (err) {

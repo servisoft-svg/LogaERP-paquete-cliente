@@ -17,6 +17,7 @@ import { toNum }  from '../types';
 import { alertaService } from './alerta.service';
 import { automatizacionesService } from './automatizaciones.service';
 import { fetchMeteoSnapshot } from './meteo.service';
+import { nextLoteCode } from '../lib/loteCode';
 
 interface LoteFIFO {
   id: string;
@@ -266,7 +267,10 @@ class ProduccionService {
       const merma = cantidadPlanificada - cantidadReal;
       const mermaPct = cantidadPlanificada > 0 ? (merma / cantidadPlanificada) * 100 : 0;
 
-      const loteInterno = `PT-${orden.numero_orden}-${Date.now()}`;
+      // Código de lote en formato YYL### (e.g. 26E265). Compartido con creación
+      // manual desde lotes.routes — el advisory_xact_lock dentro de nextLoteCode
+      // serializa ambos flujos sobre el mismo prefijo mensual.
+      const loteInterno = await nextLoteCode(client);
 
       // Calculate cost from consumed ingredients
       const costePorUd = cantidadReal > 0 ? costeConsumos / cantidadReal : 0;

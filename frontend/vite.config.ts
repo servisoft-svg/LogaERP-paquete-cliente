@@ -19,20 +19,18 @@ export default defineConfig({
       },
     },
   },
-  server: {
-    host: true,
-    port: 5173,
-    allowedHosts: ['.ngrok-free.app', '.ngrok.io', '.railway.app'],
-    hmr: { clientPort: 443 },
-    proxy: {
-      '/api': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
+  server: (() => {
+    // BACKEND_PORT permite apuntar el proxy a otra instancia de backend (default 3001).
+    const backendTarget = `http://localhost:${process.env.BACKEND_PORT ?? '3001'}`;
+    return {
+      host: true,
+      port: Number(process.env.PORT ?? 5173),
+      allowedHosts: ['.ngrok-free.app', '.ngrok.io', '.railway.app'],
+      hmr: { clientPort: 443 },
+      proxy: {
+        '/api':     { target: backendTarget, changeOrigin: true },
+        '/uploads': { target: backendTarget, changeOrigin: true },
       },
-      '/uploads': {
-        target: 'http://localhost:3001',
-        changeOrigin: true,
-      },
-    },
-  },
+    };
+  })(),
 });

@@ -9,3 +9,4 @@ backups/
 .pm2/
 .postgres_password.txt
 logs/
+.claude/

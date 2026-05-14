@@ -83,6 +83,12 @@ class AutomatizacionesService {
   private configCache: { value: ConfigAuto; ts: number } | null = null;
   private readonly CONFIG_TTL_MS = 30_000;
 
+  // Lock anti-concurrencia para tickBackupNocturno. setInterval cada 60s puede
+  // disparar un nuevo tick antes de que el anterior termine (ejecutarBackup
+  // con Argon2id + upload a Drive puede pasar de 60s). Dos pg_dump/cipher
+  // concurrentes producían .enc truncados con authTag GCM inválido.
+  private backupTickEnCurso = false;
+
   async getConfig(): Promise<ConfigAuto> {
     const now = Date.now();
     if (this.configCache && now - this.configCache.ts < this.CONFIG_TTL_MS) {
@@ -1294,6 +1300,12 @@ class AutomatizacionesService {
    * ejecución fue hace >12h. Lanza backup.
    */
   async tickBackupNocturno(force = false): Promise<void> {
+    // Lock anti-concurrencia: si ya hay un tick procesando, saltar este.
+    // Sin este lock, ticks solapados causaban .enc corruptos (authTag GCM inválido).
+    if (this.backupTickEnCurso) {
+      return;
+    }
+
     try {
       const cfg = await this.getConfig();
       if (!force && !cfg.backup_auto_activo) return;
@@ -1312,6 +1324,11 @@ class AutomatizacionesService {
           if (ultima >= horaProgramada) return;
         }
       }
+
+      // Tomar el lock JUSTO antes de empezar el trabajo pesado.
+      // Si se tomara antes de las condiciones de skip, ticks rápidos quedarían
+      // bloqueados innecesariamente por cualquier excepción transitoria.
+      this.backupTickEnCurso = true;
 
       const { ejecutarBackup } = await import('./backup.service.js');
       const resultado = await ejecutarBackup();
@@ -1333,6 +1350,8 @@ class AutomatizacionesService {
         error_msg: err instanceof Error ? err.message : String(err),
         detalle: { accion: 'backup_nocturno' },
       }).catch(() => {});
+    } finally {
+      this.backupTickEnCurso = false;
     }
   }
 

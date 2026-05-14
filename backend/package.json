@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
     "@types/compression": "^1.8.1",
     "@types/multer": "^2.1.0",
     "@types/pdfkit": "^0.17.6",
