@@ -319,7 +319,15 @@ Write-Ok "PostgreSQL responde en puerto $PgPort"
 $env:PGPASSWORD = $PgPass
 $userExists = & $psql -h localhost -p $PgPort -U $PgUser -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$AppUser'" 2>$null
 if ($userExists -and $userExists.Trim() -eq "1") {
-    Write-Ok "Usuario '$AppUser' ya existe"
+    # User ya existe: forzar password al valor esperado. Sin esto, si una
+    # instalacion previa fallida dejo el user con OTRA password, los pasos
+    # siguientes fallan con "password authentication failed for user loga".
+    Write-Step "Usuario '$AppUser' ya existe — reseteando password al valor estandar..."
+    & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "ALTER USER $AppUser WITH PASSWORD '$AppPass' CREATEDB SUPERUSER;" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Fallo al resetear password de '$AppUser'."
+    }
+    Write-Ok "Password de '$AppUser' reseteado"
 } else {
     Write-Step "Creando usuario '$AppUser'..."
     & $psql -h localhost -p $PgPort -U $PgUser -d postgres -c "CREATE USER $AppUser WITH PASSWORD '$AppPass' CREATEDB SUPERUSER;" | Out-Null
