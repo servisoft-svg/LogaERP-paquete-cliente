@@ -2,7 +2,6 @@ node_modules/
 dist/
 .env
 *.log
-uploads/
 .DS_Store
 *.enc
 backups/

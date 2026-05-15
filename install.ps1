@@ -357,18 +357,45 @@ if ($dbExists -and $dbExists.Trim() -eq "1") {
 # salen por stderr y se confundirian con errores).
 # Usamos -v ON_ERROR_STOP=1 para que psql salga con exit!=0 SOLO en
 # ERRORs reales y verificamos $LASTEXITCODE.
-Write-Step "Aplicando migraciones SQL..."
 $env:PGPASSWORD = $AppPass
-$applied = 0
-Get-ChildItem "$ProjectDir\backend\database\migrations\*.sql" | Sort-Object Name | ForEach-Object {
-    $name = $_.Name
-    & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -v ON_ERROR_STOP=1 -q -f $_.FullName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Migracion fallida: $name (exit=$LASTEXITCODE). Revisa los mensajes psql arriba."
+
+# Si existe un dump inicial (database\dump-inicial.sql), restaurarlo en lugar
+# de aplicar las migraciones individuales. Ese dump contiene schema + datos
+# de partida (ej: cliente que recibe el ERP precargado con productos/usuarios).
+# El migration runner del backend hara auto-baseline al arrancar.
+$DumpInicial = "$ProjectDir\database\dump-inicial.sql"
+if (Test-Path $DumpInicial) {
+    Write-Step "Restaurando BD desde dump-inicial.sql (schema + datos)..."
+    # pg_dump 16+ inserta meta-comandos `\restrict <token>` / `\unrestrict <token>`
+    # que rompen psql cuando hay errores. Filtrarlos antes de aplicar.
+    $cleanDump = "$env:TEMP\loga-dump-clean.sql"
+    Get-Content $DumpInicial | Where-Object { $_ -notmatch '^\s*\\(restrict|unrestrict)\b' } | Set-Content $cleanDump
+    & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -v ON_ERROR_STOP=1 -q -f $cleanDump | Out-Null
+    $restoreExit = $LASTEXITCODE
+    Remove-Item $cleanDump -ErrorAction SilentlyContinue
+    if ($restoreExit -ne 0) {
+        throw "Restauracion del dump inicial fallo (exit=$restoreExit). Borra database\dump-inicial.sql para arrancar con BD vacia + migraciones."
     }
-    $applied++
+    Write-Ok "BD inicial restaurada desde dump-inicial.sql"
+} else {
+    # NOTA: NO usamos 2>&1 porque PowerShell 5.1 envuelve cada linea de
+    # stderr como ErrorRecord y, con ErrorActionPreference=Stop, eleva
+    # excepcion aunque psql devuelva exit 0 (los NOTICE de "IF NOT EXISTS"
+    # salen por stderr y se confundirian con errores).
+    # Usamos -v ON_ERROR_STOP=1 para que psql salga con exit!=0 SOLO en
+    # ERRORs reales y verificamos $LASTEXITCODE.
+    Write-Step "Aplicando migraciones SQL..."
+    $applied = 0
+    Get-ChildItem "$ProjectDir\backend\database\migrations\*.sql" | Sort-Object Name | ForEach-Object {
+        $name = $_.Name
+        & $psql -h localhost -p $PgPort -U $AppUser -d $DbName -v ON_ERROR_STOP=1 -q -f $_.FullName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Migracion fallida: $name (exit=$LASTEXITCODE). Revisa los mensajes psql arriba."
+        }
+        $applied++
+    }
+    Write-Ok "Procesadas $applied migraciones"
 }
-Write-Ok "Procesadas $applied migraciones"
 
 # =============================================================
 # 7. backend/.env y frontend/.env
