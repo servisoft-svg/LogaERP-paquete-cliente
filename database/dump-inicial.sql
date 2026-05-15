@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict IiRnTpzoF2iaJEVMdsdNFB3aXGuENOVKczQN5fsPGO1e0KwKJOd93u9UcOlEkw3
+\restrict 5My3j5zi3gPDw2q2kA9Uj8F6kb4PTfeq1pghFemhhXGhWvf7hfTN67muL5BxQsM
 
 -- Dumped from database version 16.13 (Homebrew)
 -- Dumped by pg_dump version 16.13 (Homebrew)
@@ -2416,10 +2416,10 @@ COPY public.configuracion_global (id, porcentaje_alerta, plantilla_email, email_
 --
 
 COPY public.cron_heartbeat (nombre, ultimo_run, ultimo_status, ultimo_error, intervalo_ms, umbral_ms, created_at) FROM stdin;
-sweep_pedidos	2026-05-15 13:06:14.546564+02	ok	\N	90000	300000	2026-05-07 18:24:22.913083+02
-retry_email_proveedor	2026-05-15 13:06:18.650113+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
-sweep_stock_reglas	2026-05-15 13:06:18.651298+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
-backup_nocturno_tick	2026-05-15 13:06:18.671155+02	ok	\N	60000	240000	2026-05-07 18:24:22.913083+02
+retry_email_proveedor	2026-05-15 13:37:14.568189+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
+sweep_stock_reglas	2026-05-15 13:37:14.569555+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
+sweep_pedidos	2026-05-15 13:39:48.726979+02	ok	\N	90000	300000	2026-05-07 18:24:22.913083+02
+backup_nocturno_tick	2026-05-15 13:40:18.737811+02	ok	\N	60000	240000	2026-05-07 18:24:22.913083+02
 \.
 
 
@@ -8447,7 +8447,6 @@ COPY public.stock_moves_default (id, producto_id, lote_id, tipo, cantidad, canti
 --
 
 COPY public.usuarios (id, nombre, email, password_hash, rol, activo, created_at) FROM stdin;
-459ccd75-dfb4-4a9d-9bfd-39f0c5e20a0f	Administrador	admin@loga.es	$2b$12$DwB7/mM5RsPvTQs9u84Ek.BQWCt1DUK9jAWrTlDPJisEw77rc14KS	admin	t	2026-04-20 09:19:26.928596+02
 e5f9286a-5367-468a-9c4d-8321a02b90c7	Operario	operario@loga.es	$2b$12$QDeTtpeNGZLyL7XxYnj/VuROEnfzgfIhVlfScWmGBfpSKhZrZWJuu	trabajador	t	2026-04-20 09:26:52.158412+02
 45199067-43d0-4df8-9547-a5d3bace85bd	Operario 1	operario1@loga.es	$2b$12$gUkcpMoCo1pLhtZRSZdTaeJZ.dfac0k.6a4/0OklEFrEnvP1s3YOS	trabajador	t	2026-04-21 10:05:08.819422+02
 03a885ee-9670-47cd-861e-fedaa525690e	Operario 2	operario2@loga.es	$2b$12$QNI3HPdZBvSluf1woomYC.dOVeyc8UnkGUvf5r1kvrEpo8PX6NpN6	trabajador	t	2026-04-21 10:05:08.870796+02
@@ -8455,6 +8454,7 @@ caec48b2-ab32-47c3-8a0b-d36fd82390c4	Operario 3	operario3@loga.es	$2b$12$qM423ye
 eb6010f9-5e15-4b1c-b7ac-2fd67af3f470	Operario 4	operario4@loga.es	$2b$12$9fW/4be0tSYapPmaU4hBZuXXVXyazc.07.LWchOWs/fljDRXaS1tC	trabajador	t	2026-04-21 10:05:08.970024+02
 da702d25-40b1-4295-8042-2e7adb2e6e60	Operario 5	operario5@loga.es	$2b$12$ybu3FxvE2h.zcPx57GjDQOp.OaiMyW3ZMFrvzaeWaZshZs2xaMMBm	trabajador	t	2026-04-21 10:05:09.019381+02
 9fce5607-c552-4ecd-aaa8-c8cdf8e50e96	Paco	paco@loga.es	$2b$12$KsPmg7SyEflKMAlY2sg2kuxQvFnX46paANc0NFqT.GEjQGlZEbeuK	trabajador	t	2026-05-07 19:49:35.719635+02
+459ccd75-dfb4-4a9d-9bfd-39f0c5e20a0f	Administrador	admin@loga.es	$2b$12$QnEMrjmae2dJP4N5b9egS.ZJa167TrIn8wviLrPpPcvaZd.59BH4q	admin	t	2026-04-20 09:19:26.928596+02
 \.
 
 
@@ -11431,5 +11431,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE adrianmartinlopez IN SCHEMA public GRANT SELEC
 -- PostgreSQL database dump complete
 --
 
-\unrestrict IiRnTpzoF2iaJEVMdsdNFB3aXGuENOVKczQN5fsPGO1e0KwKJOd93u9UcOlEkw3
+\unrestrict 5My3j5zi3gPDw2q2kA9Uj8F6kb4PTfeq1pghFemhhXGhWvf7hfTN67muL5BxQsM
 
