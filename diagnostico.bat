@@ -1,89 +1,102 @@
 @echo off
 REM ============================================================
-REM ERP Loga - Diagnostico Windows
+REM ERP Loga - DIAGNOSTICO completo
+REM Genera diagnostico-loga.txt en el Escritorio. Pegamelo en chat.
 REM ============================================================
-REM Recopila informacion del sistema + intenta instalar capturando
-REM TODO el output. Genera diagnostico-loga.txt para enviar.
-REM ============================================================
-
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
+title Diagnostico ERP Loga
+color 0E
 
-set LOGFILE=%~dp0diagnostico-loga.txt
-
-net session >nul 2>&1
-if %errorlevel% NEQ 0 (
-    echo Pidiendo permisos de administrador...
-    powershell -NoProfile -Command "Start-Process -FilePath \"%~f0\" -Verb RunAs"
-    exit /b 0
-)
-
-echo Generando %LOGFILE%
-echo Esto tardara varios minutos. NO cierres la ventana.
-echo.
+set "OUT=%USERPROFILE%\Desktop\diagnostico-loga.txt"
+set "PG_BIN=C:\LogaERP\postgresql\bin"
 
 (
-    echo ===== ERP Loga DIAGNOSTICO =====
-    echo Fecha: %date% %time%
-    echo Usuario: %USERNAME%
-    echo Carpeta: %~dp0
-    echo.
-    echo ===== Sistema =====
-    ver
-    systeminfo ^| findstr /B /C:"OS Name" /C:"OS Version" /C:"System Type"
-    echo.
-    echo ===== PowerShell =====
-    powershell -Command "$PSVersionTable | Format-Table"
-    echo.
-    echo ===== Node.js =====
-    where node 2^>^&1
-    node -v 2^>^&1
-    npm -v 2^>^&1
-    echo.
-    echo ===== PostgreSQL existente =====
-    where psql 2^>^&1
-    sc query postgresql-x64-16 2^>^&1
-    sc query postgresql-loga 2^>^&1
-    dir "C:\Program Files\PostgreSQL\" 2^>^&1
-    dir "C:\LogaERP\" 2^>^&1
-    echo.
-    echo ===== Carpeta proyecto =====
-    dir "%~dp0" /b
-    echo.
-    echo ===== Tarea ERPLoga =====
-    schtasks /query /tn ERPLoga /v /fo LIST 2^>^&1
-    echo.
-    echo ===== Conexion internet =====
-    ping -n 2 nodejs.org
-    ping -n 2 get.enterprisedb.com
-    echo.
-    echo ===== EJECUTANDO install.ps1 =====
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Fresh
-    echo.
-    echo ===== FIN install.ps1 (exit=%errorlevel%) =====
-    echo.
-    echo ===== Ultimos logs =====
-    if exist "%~dp0logs\backend.log" (
-        echo --- backend.log [tail 30] ---
-        powershell -Command "Get-Content '%~dp0logs\backend.log' -Tail 30"
-    )
-    if exist "%~dp0logs\frontend.log" (
-        echo --- frontend.log [tail 30] ---
-        powershell -Command "Get-Content '%~dp0logs\frontend.log' -Tail 30"
-    )
-    if exist "%~dp0logs\npm-Backend_npm_install.log" (
-        echo --- npm backend [tail 30] ---
-        powershell -Command "Get-Content '%~dp0logs\npm-Backend_npm_install.log' -Tail 30"
-    )
-) > "%LOGFILE%" 2>&1
+echo ============================================================
+echo  ERP Loga - Diagnostico
+echo  Fecha: %DATE% %TIME%
+echo  Usuario Windows: %USERNAME%
+echo ============================================================
+echo.
+
+echo --- 1. Node.js ---
+where node 2^>nul
+node -v 2^>nul
+echo.
+
+echo --- 2. Git ---
+where git 2^>nul
+git --version 2^>nul
+echo.
+
+echo --- 3. Directorio actual ---
+cd
+echo Archivos en raiz:
+dir /b
+echo.
+
+echo --- 4. Backend/.env ---
+if exist "backend\.env" ( type "backend\.env" ) else ( echo NO EXISTE )
+echo.
+
+echo --- 5. Frontend/.env ---
+if exist "frontend\.env" ( type "frontend\.env" ) else ( echo NO EXISTE )
+echo.
+
+echo --- 6. node_modules ---
+if exist "backend\node_modules" ( echo backend SI ) else ( echo backend NO )
+if exist "frontend\node_modules" ( echo frontend SI ) else ( echo frontend NO )
+echo.
+
+echo --- 7. PostgreSQL ---
+if exist "%PG_BIN%\psql.exe" ( "%PG_BIN%\psql.exe" --version ) else ( echo NO existe en %PG_BIN% )
+echo.
+
+echo --- 8. Servicio postgresql-loga ---
+sc query postgresql-loga 2^>nul
+echo.
+
+echo --- 9. Puertos LISTENING ---
+echo Puerto 3001:
+netstat -ano ^| findstr ":3001 " ^| findstr LISTENING
+echo Puerto 5173:
+netstat -ano ^| findstr ":5173 " ^| findstr LISTENING
+echo Puerto 5433:
+netstat -ano ^| findstr ":5433 " ^| findstr LISTENING
+echo.
+
+echo --- 10. Conexion PG con todas las passwords conocidas ---
+for %%P in ( "Loga_postgres_2024!" "postgres" "admin" "loga123" ) do (
+  set "PGPASSWORD=%%~P"
+  "%PG_BIN%\psql.exe" -h localhost -p 5433 -U postgres -d postgres -c "SELECT 'OK: ' ^|^| version();" 2^>nul ^| findstr OK
+  if not errorlevel 1 echo OK con: %%~P
+)
+echo.
+
+echo --- 11. BD loga_erp existe? ---
+"%PG_BIN%\psql.exe" -h localhost -p 5433 -U postgres -d postgres -c "SELECT datname FROM pg_database WHERE datname='loga_erp';" 2^>nul
+echo.
+
+echo --- 12. Counts en loga_erp ---
+"%PG_BIN%\psql.exe" -h localhost -p 5433 -U postgres -d loga_erp -c "SELECT 'productos' AS tabla, COUNT(*) FROM productos UNION ALL SELECT 'lotes', COUNT(*) FROM lotes WHERE cantidad_actual ^> 0 UNION ALL SELECT 'proveedores', COUNT(*) FROM proveedores UNION ALL SELECT 'clientes', COUNT(*) FROM clientes UNION ALL SELECT 'usuarios', COUNT(*) FROM usuarios;" 2^>nul
+echo.
+
+echo --- 13. Usuarios ---
+"%PG_BIN%\psql.exe" -h localhost -p 5433 -U postgres -d loga_erp -c "SELECT email, rol, activo FROM usuarios ORDER BY rol DESC;" 2^>nul
+echo.
+
+echo --- 14. dump-inicial.sql ---
+if exist "database\dump-inicial.sql" (
+  for %%I in ("database\dump-inicial.sql") do echo Tamano: %%~zI bytes
+) else ( echo NO existe — haz git pull )
+echo.
+
+echo ============================================================
+) > "%OUT%" 2>&1
 
 echo.
-echo ============================================================
-echo Diagnostico generado en:
-echo   %LOGFILE%
-echo.
-echo Abrelo con bloc de notas, copia TODO el contenido y mandamelo.
-echo ============================================================
-echo.
-notepad "%LOGFILE%"
+echo Diagnostico en: %OUT%
+echo Abriendo en notepad...
+start "" notepad "%OUT%"
 pause
+endlocal
