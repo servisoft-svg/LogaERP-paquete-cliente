@@ -63,8 +63,10 @@ export const produccionApi = {
     ph?: string; solidos?: string; viscosidad?: string;
     fecha_fabricacion?: string; fotos?: File[]; cantidad_real_producida?: string; registro_limpieza?: string;
     fecha_inicio_cliente?: string;
+    ingredientes_ajustados?: { materia_prima_id: string; cantidad: number }[];
   }) => {
-    const hasData = data && (data.ph || data.solidos || data.viscosidad || data.fecha_fabricacion || data.cantidad_real_producida || data.registro_limpieza || data.fecha_inicio_cliente || (data.fotos && data.fotos.length > 0));
+    const hasAjustes = data?.ingredientes_ajustados && data.ingredientes_ajustados.length > 0;
+    const hasData = data && (data.ph || data.solidos || data.viscosidad || data.fecha_fabricacion || data.cantidad_real_producida || data.registro_limpieza || data.fecha_inicio_cliente || (data.fotos && data.fotos.length > 0) || hasAjustes);
     if (hasData) {
       const fd = new FormData();
       if (data!.ph) fd.append('ph', data!.ph);
@@ -75,6 +77,7 @@ export const produccionApi = {
       if (data!.registro_limpieza) fd.append('registro_limpieza', data!.registro_limpieza);
       if (data!.fecha_inicio_cliente) fd.append('fecha_inicio_cliente', data!.fecha_inicio_cliente);
       if (data!.fotos) data!.fotos.forEach(f => fd.append('fotos', f));
+      if (hasAjustes) fd.append('ingredientes_ajustados', JSON.stringify(data!.ingredientes_ajustados));
       return api.post(`/produccion/${id}/confirmar`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });

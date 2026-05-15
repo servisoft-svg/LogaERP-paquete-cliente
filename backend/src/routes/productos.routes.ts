@@ -228,6 +228,8 @@ router.put('/:id', adminOnly, async (req, res) => {
     const {
       codigo, nombre, descripcion, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id, activo, caducidad_meses, peso_unitario_kg, peso_plastico_kg, unidades_por_envase,
+      // Specs físico-químicas (materias primas)
+      solidos_min, solidos_max, ph_min, ph_max, viscosidad_min, viscosidad_max,
       reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
@@ -304,7 +306,13 @@ router.put('/:id', adminOnly, async (req, res) => {
          peso_unitario_kg = $13,
          peso_plastico_kg = COALESCE($14::NUMERIC, peso_plastico_kg),
          precio_coste_manual = COALESCE($15, precio_coste_manual),
-         unidades_por_envase = $16
+         unidades_por_envase = $16,
+         solidos_min    = $17::NUMERIC,
+         solidos_max    = $18::NUMERIC,
+         ph_min         = $19::NUMERIC,
+         ph_max         = $20::NUMERIC,
+         viscosidad_min = $21::NUMERIC,
+         viscosidad_max = $22::NUMERIC
        WHERE id = $11
        RETURNING *`,
       [
@@ -326,6 +334,12 @@ router.put('/:id', adminOnly, async (req, res) => {
         unidades_por_envase != null && unidades_por_envase !== ''
           ? (Number(unidades_por_envase) > 0 ? Math.floor(Number(unidades_por_envase)) : null)
           : null,
+        solidos_min    != null && solidos_min    !== '' ? Number(solidos_min)    : null,
+        solidos_max    != null && solidos_max    !== '' ? Number(solidos_max)    : null,
+        ph_min         != null && ph_min         !== '' ? Number(ph_min)         : null,
+        ph_max         != null && ph_max         !== '' ? Number(ph_max)         : null,
+        viscosidad_min != null && viscosidad_min !== '' ? Number(viscosidad_min) : null,
+        viscosidad_max != null && viscosidad_max !== '' ? Number(viscosidad_max) : null,
       ]
     );
 

@@ -56,7 +56,7 @@ class ProduccionService {
   async confirmarOrden(
     ordenId: string,
     usuarioId?: string,
-    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string }
+    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string; ingredientes_ajustados?: { materia_prima_id: string; cantidad: number }[] }
   ): Promise<ResultadoConfirmacion> {
     // Closure variables para disparar automatizaciones tras COMMIT
     let prodFinalId: string | null = null;
@@ -170,9 +170,17 @@ class ProduccionService {
       );
       const stockMap = new Map(stockRows.map(r => [r.id, toNum(r.stock_actual)]));
 
+      // Mapa de overrides: materia_prima_id → cantidad ajustada por el operario.
+      // Si existe override, se usa esa cantidad para descontar stock en vez de
+      // la calculada de la receta (permite ajustes en vivo durante fabricación).
+      const overrideMap = new Map<string, number>();
+      for (const o of (extra?.ingredientes_ajustados ?? [])) {
+        overrideMap.set(o.materia_prima_id, o.cantidad);
+      }
+
       for (const ing of ingredientes) {
-        const cantidadNeta = ing.cantidad_base * multiplicador;
-        const cantidadReal = cantidadNeta * (1 + ing.porcentaje_merma / 100);
+        const cantidadTeorica = ing.cantidad_base * multiplicador * (1 + ing.porcentaje_merma / 100);
+        const cantidadReal = overrideMap.get(ing.materia_prima_id) ?? cantidadTeorica;
 
         // Lotes disponibles FIFO (excluir cantidades reservadas)
         const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(

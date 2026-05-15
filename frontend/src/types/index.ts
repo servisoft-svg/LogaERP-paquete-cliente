@@ -59,6 +59,13 @@ export interface Producto {
   granel_nombre?: string;
   granel_stock?: string;
   granel_unidad?: string;
+  // Specs físico-químicas (materia prima)
+  solidos_min?: string | null;
+  solidos_max?: string | null;
+  ph_min?: string | null;
+  ph_max?: string | null;
+  viscosidad_min?: string | null;
+  viscosidad_max?: string | null;
 }
 
 export interface Lote {
@@ -77,6 +84,12 @@ export interface Lote {
   ubicacion?: string;
   unidad_medida: string;
   observaciones?: string;
+  precio_compra?: string | null;
+  created_at?: string;
+  // Valores físico-químicos medidos del lote
+  solidos?: string | null;
+  ph?: string | null;
+  viscosidad?: string | null;
 }
 
 export interface IngredienteReceta {

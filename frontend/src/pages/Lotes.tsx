@@ -25,6 +25,10 @@ interface FormLote {
   fecha_caducidad: string;
   ubicacion:       string;
   observaciones:   string;
+  // Valores físico-químicos medidos del lote
+  solidos:    string;
+  ph:         string;
+  viscosidad: string;
 }
 
 interface TrazabilidadItem {
@@ -40,6 +44,7 @@ interface TrazabilidadItem {
 const EMPTY_FORM: FormLote = {
   producto_id: '', lote_proveedor: '', cantidad: '',
   fecha_fabricacion: '', fecha_caducidad: '', ubicacion: '', observaciones: '',
+  solidos: '', ph: '', viscosidad: '',
 };
 
 export default function Lotes() {
@@ -110,6 +115,9 @@ export default function Lotes() {
         fecha_caducidad:   form.fecha_caducidad   || null,
         ubicacion:         form.ubicacion          || null,
         observaciones:     form.observaciones      || null,
+        solidos:    form.solidos    !== '' ? Number(form.solidos)    : null,
+        ph:         form.ph         !== '' ? Number(form.ph)         : null,
+        viscosidad: form.viscosidad !== '' ? Number(form.viscosidad) : null,
       });
       setModalOpen(false);
       cargar();
@@ -593,6 +601,83 @@ export default function Lotes() {
               placeholder="Estante A-03, Cámara 2…"
             />
           </FormField>
+
+          {/* ── Valores físico-químicos medidos del lote ── */}
+          {(() => {
+            const prod = productos.find(p => p.id === form.producto_id) as any;
+            // Solo mostrar si el producto tiene al menos una spec definida
+            const hasAnySpec = prod && (
+              prod.solidos_min != null || prod.solidos_max != null ||
+              prod.ph_min != null || prod.ph_max != null ||
+              prod.viscosidad_min != null || prod.viscosidad_max != null
+            );
+            if (!hasAnySpec) return null;
+
+            const rangeStr = (min: any, max: any, unit = '') => {
+              if (min == null && max == null) return null;
+              const fmt = (v: any) => v != null ? parseFloat(v).toString() : '?';
+              return `Rango: ${fmt(min)}–${fmt(max)}${unit}`;
+            };
+            const checkOk = (val: string, min: any, max: any): boolean | null => {
+              if (val === '') return null;
+              const n = Number(val);
+              if (isNaN(n)) return null;
+              if (min != null && n < parseFloat(min)) return false;
+              if (max != null && n > parseFloat(max)) return false;
+              return true;
+            };
+            const okSolidos = checkOk(form.solidos, prod.solidos_min, prod.solidos_max);
+            const okPh      = checkOk(form.ph, prod.ph_min, prod.ph_max);
+            const okVisc    = checkOk(form.viscosidad, prod.viscosidad_min, prod.viscosidad_max);
+
+            return (
+              <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
+                <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Valores medidos del lote</p>
+
+                {(prod.solidos_min != null || prod.solidos_max != null) && (
+                  <FormField label="% Sólidos" hint={rangeStr(prod.solidos_min, prod.solidos_max, ' %') ?? undefined}>
+                    <div className="flex items-center gap-2">
+                      <Input type="number" step="0.01"
+                        value={form.solidos}
+                        onChange={(e) => setForm((f) => ({ ...f, solidos: e.target.value }))}
+                        placeholder="Ej: 49.50"
+                      />
+                      {okSolidos === false && <span className="text-xs text-loga-red font-semibold">Fuera de rango ⚠</span>}
+                      {okSolidos === true  && <span className="text-xs text-emerald-600 font-semibold">OK ✓</span>}
+                    </div>
+                  </FormField>
+                )}
+
+                {(prod.ph_min != null || prod.ph_max != null) && (
+                  <FormField label="pH" hint={rangeStr(prod.ph_min, prod.ph_max) ?? undefined}>
+                    <div className="flex items-center gap-2">
+                      <Input type="number" step="0.01"
+                        value={form.ph}
+                        onChange={(e) => setForm((f) => ({ ...f, ph: e.target.value }))}
+                        placeholder="Ej: 6.5"
+                      />
+                      {okPh === false && <span className="text-xs text-loga-red font-semibold">Fuera de rango ⚠</span>}
+                      {okPh === true  && <span className="text-xs text-emerald-600 font-semibold">OK ✓</span>}
+                    </div>
+                  </FormField>
+                )}
+
+                {(prod.viscosidad_min != null || prod.viscosidad_max != null) && (
+                  <FormField label="Viscosidad (cP)" hint={rangeStr(prod.viscosidad_min, prod.viscosidad_max, ' cP') ?? undefined}>
+                    <div className="flex items-center gap-2">
+                      <Input type="number" step="0.01"
+                        value={form.viscosidad}
+                        onChange={(e) => setForm((f) => ({ ...f, viscosidad: e.target.value }))}
+                        placeholder="Ej: 1200"
+                      />
+                      {okVisc === false && <span className="text-xs text-loga-red font-semibold">Fuera de rango ⚠</span>}
+                      {okVisc === true  && <span className="text-xs text-emerald-600 font-semibold">OK ✓</span>}
+                    </div>
+                  </FormField>
+                )}
+              </div>
+            );
+          })()}
 
           <FormField label="Observaciones">
             <Textarea

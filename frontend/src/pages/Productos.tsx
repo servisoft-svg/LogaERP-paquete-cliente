@@ -51,6 +51,13 @@ interface FormData {
   caducidad_meses: string;
   peso_unitario_kg: string;
   unidades_por_envase: string;
+  // Specs físico-químicas (rangos aceptables — solo materia prima)
+  solidos_min: string;
+  solidos_max: string;
+  ph_min: string;
+  ph_max: string;
+  viscosidad_min: string;
+  viscosidad_max: string;
 }
 
 interface LoteDisponible { id: string; lote_interno: string; lote_proveedor?: string; cantidad_actual: string; cantidad_inicial?: string; fecha_caducidad?: string; }
@@ -59,6 +66,7 @@ const EMPTY: FormData = {
   codigo: '', nombre: '', descripcion: '', tipo: 'materia_prima',
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
   precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
+  solidos_min: '', solidos_max: '', ph_min: '', ph_max: '', viscosidad_min: '', viscosidad_max: '',
 };
 
 const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
@@ -154,6 +162,9 @@ export default function Productos() {
   const [stockCaducidad, setStockCaducidad]         = useState('');
   const [stockUbicacion, setStockUbicacion]         = useState('');
   const [stockPrecio, setStockPrecio]               = useState('');
+  const [stockSolidos, setStockSolidos]             = useState('');
+  const [stockPh, setStockPh]                       = useState('');
+  const [stockViscosidad, setStockViscosidad]       = useState('');
   const [savingStock, setSavingStock]       = useState(false);
   const [errorStock, setErrorStock]         = useState('');
 
@@ -238,6 +249,12 @@ export default function Productos() {
       caducidad_meses: p.caducidad_meses ? String(p.caducidad_meses) : '',
       peso_unitario_kg: p.peso_unitario_kg ? String(p.peso_unitario_kg) : '',
       unidades_por_envase: (p as any).unidades_por_envase ? String((p as any).unidades_por_envase) : '',
+      solidos_min:    (p as any).solidos_min    != null ? String((p as any).solidos_min)    : '',
+      solidos_max:    (p as any).solidos_max    != null ? String((p as any).solidos_max)    : '',
+      ph_min:         (p as any).ph_min         != null ? String((p as any).ph_min)         : '',
+      ph_max:         (p as any).ph_max         != null ? String((p as any).ph_max)         : '',
+      viscosidad_min: (p as any).viscosidad_min != null ? String((p as any).viscosidad_min) : '',
+      viscosidad_max: (p as any).viscosidad_max != null ? String((p as any).viscosidad_max) : '',
     });
     setEditLotes([]);
     setEditLoteId('');
@@ -272,7 +289,20 @@ export default function Productos() {
     }
     setSaving(true);
     setError('');
-    const payload: any = { ...form, proveedor_id: form.proveedor_id || null, codigo: form.codigo || undefined, caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null, peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null, unidades_por_envase: form.unidades_por_envase ? Number(form.unidades_por_envase) : null };
+    const payload: any = {
+      ...form,
+      proveedor_id: form.proveedor_id || null,
+      codigo: form.codigo || undefined,
+      caducidad_meses: form.caducidad_meses ? Number(form.caducidad_meses) : null,
+      peso_unitario_kg: form.peso_unitario_kg ? Number(form.peso_unitario_kg) : null,
+      unidades_por_envase: form.unidades_por_envase ? Number(form.unidades_por_envase) : null,
+      solidos_min:    form.solidos_min    !== '' ? Number(form.solidos_min)    : null,
+      solidos_max:    form.solidos_max    !== '' ? Number(form.solidos_max)    : null,
+      ph_min:         form.ph_min         !== '' ? Number(form.ph_min)         : null,
+      ph_max:         form.ph_max         !== '' ? Number(form.ph_max)         : null,
+      viscosidad_min: form.viscosidad_min !== '' ? Number(form.viscosidad_min) : null,
+      viscosidad_max: form.viscosidad_max !== '' ? Number(form.viscosidad_max) : null,
+    };
     // Si user pulsó "Restaurar auto", indicar al backend que vuelva a modo automático
     if (resetAuto) payload.reset_coste_auto = true;
     const ejecutarGuardar = async () => {
@@ -358,6 +388,9 @@ export default function Productos() {
     setStockCaducidad(cadDefault.toISOString().slice(0, 10));
     setStockUbicacion('');
     setStockPrecio(p.precio_unitario ?? '');
+    setStockSolidos('');
+    setStockPh('');
+    setStockViscosidad('');
     setErrorStock('');
     setModalStock(true);
   };
@@ -386,6 +419,9 @@ export default function Productos() {
         estado:            'aprobado',
         ubicacion:         stockUbicacion.trim() || null,
         precio_compra:     stockPrecio ? Number(stockPrecio) : undefined,
+        solidos:    stockSolidos    !== '' ? Number(stockSolidos)    : null,
+        ph:         stockPh         !== '' ? Number(stockPh)         : null,
+        viscosidad: stockViscosidad !== '' ? Number(stockViscosidad) : null,
       });
       // Update precio del producto — secundario, no debe romper el flujo si falla
       if (stockPrecio && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001) {
@@ -819,7 +855,23 @@ export default function Productos() {
                     <td colSpan={7} className="px-4 py-2 bg-gray-50/80">
                       {expandedLotes.length === 0 ? (
                         <p className="text-xs text-gray-400 py-2">Sin lotes con stock</p>
-                      ) : (
+                      ) : (() => {
+                        // Specs del producto — para mostrar columnas físico-químicas solo si hay specs
+                        const pp = p as any;
+                        const showSolidos = pp.solidos_min != null || pp.solidos_max != null;
+                        const showPh      = pp.ph_min != null || pp.ph_max != null;
+                        const showVisc    = pp.viscosidad_min != null || pp.viscosidad_max != null;
+                        // Helper: clase de color según si valor está dentro del rango
+                        const cls = (v: any, min: any, max: any): string => {
+                          if (v == null || v === '') return 'text-gray-400';
+                          const n = parseFloat(String(v));
+                          if (isNaN(n)) return 'text-gray-400';
+                          if (min != null && n < parseFloat(min)) return 'text-loga-red font-semibold';
+                          if (max != null && n > parseFloat(max)) return 'text-loga-red font-semibold';
+                          return 'text-emerald-700 font-semibold';
+                        };
+                        const fmt = (v: any) => v != null && v !== '' ? parseFloat(String(v)).toString() : '—';
+                        return (
                         <table className="w-full text-xs">
                           <thead>
                             <tr className="text-gray-400">
@@ -829,6 +881,9 @@ export default function Productos() {
                               <th className="text-right py-1 font-medium">Restante</th>
                               {isAdmin && <th className="text-right py-1 font-medium">Precio</th>}
                               {isAdmin && <th className="text-right py-1 font-medium">Valor actual</th>}
+                              {showSolidos && <th className="text-right py-1 font-medium">% Sól.</th>}
+                              {showPh      && <th className="text-right py-1 font-medium">pH</th>}
+                              {showVisc    && <th className="text-right py-1 font-medium">Visc.</th>}
                               <th className="text-right py-1 font-medium">Fecha entrada</th>
                               <th className="text-right py-1 font-medium">Caducidad</th>
                             </tr>
@@ -840,6 +895,7 @@ export default function Productos() {
                               const precio = parseFloat(l.precio_compra ?? '0');
                               const agotado = actual <= 0;
                               const gastado = actual < inicial && actual > 0;
+                              const ll = l as any;
                               return (
                                 <tr key={li} className={agotado ? 'opacity-25' : 'hover:bg-gray-100/50'}>
                                   <td className={clsx('py-1.5 font-mono', agotado ? 'text-gray-400 line-through' : 'text-gray-700')}>{l.lote_interno}</td>
@@ -852,6 +908,9 @@ export default function Productos() {
                                   </td>
                                   {isAdmin && <td className="py-1.5 text-right tabular-nums text-gray-500">{precio > 0 ? `${precio.toFixed(2)} EUR` : '—'}</td>}
                                   {isAdmin && <td className="py-1.5 text-right tabular-nums font-semibold text-gray-800">{precio > 0 && actual > 0 ? `${(actual * precio).toFixed(2)} EUR` : agotado ? '0.00 EUR' : '—'}</td>}
+                                  {showSolidos && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.solidos, pp.solidos_min, pp.solidos_max))}>{fmt(ll.solidos)}</td>}
+                                  {showPh      && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.ph,      pp.ph_min,      pp.ph_max))}>{fmt(ll.ph)}</td>}
+                                  {showVisc    && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.viscosidad, pp.viscosidad_min, pp.viscosidad_max))}>{fmt(ll.viscosidad)}</td>}
                                   <td className="py-1.5 text-right text-gray-500 whitespace-nowrap">{l.created_at ? new Date(l.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
                                   <td className="py-1.5 text-right text-gray-500">{l.fecha_caducidad ? new Date(l.fecha_caducidad).toLocaleDateString('es-ES') : '—'}</td>
                                 </tr>
@@ -864,12 +923,16 @@ export default function Productos() {
                               <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual), 0).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}</td>
                               {isAdmin && <td></td>}
                               {isAdmin && <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual) * parseFloat(l.precio_compra ?? '0'), 0).toFixed(2)} EUR</td>}
+                              {showSolidos && <td></td>}
+                              {showPh      && <td></td>}
+                              {showVisc    && <td></td>}
                               <td></td>
                               <td></td>
                             </tr>
                           </tbody>
                         </table>
-                      )}
+                        );
+                      })()}
                     </td>
                   </tr>
                 )}
@@ -1042,6 +1105,78 @@ export default function Productos() {
                 )}
               </FormField>
             )}
+
+            {/* ── Valores físico-químicos medidos del lote — solo si producto tiene specs ── */}
+            {stockProducto && (() => {
+              const p = stockProducto as any;
+              const hasAnySpec =
+                p.solidos_min != null || p.solidos_max != null ||
+                p.ph_min != null || p.ph_max != null ||
+                p.viscosidad_min != null || p.viscosidad_max != null;
+              if (!hasAnySpec) return null;
+
+              const rangeStr = (min: any, max: any, unit = '') => {
+                if (min == null && max == null) return null;
+                const fmt = (v: any) => v != null ? parseFloat(v).toString() : '?';
+                return `Rango: ${fmt(min)}–${fmt(max)}${unit}`;
+              };
+              const checkOk = (val: string, min: any, max: any): boolean | null => {
+                if (val === '') return null;
+                const n = Number(val);
+                if (isNaN(n)) return null;
+                if (min != null && n < parseFloat(min)) return false;
+                if (max != null && n > parseFloat(max)) return false;
+                return true;
+              };
+              const okSolidos = checkOk(stockSolidos, p.solidos_min, p.solidos_max);
+              const okPh      = checkOk(stockPh, p.ph_min, p.ph_max);
+              const okVisc    = checkOk(stockViscosidad, p.viscosidad_min, p.viscosidad_max);
+
+              return (
+                <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
+                  <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Valores medidos de este lote</p>
+
+                  {(p.solidos_min != null || p.solidos_max != null) && (
+                    <FormField label="% Sólidos" hint={rangeStr(p.solidos_min, p.solidos_max, ' %') ?? undefined}>
+                      <div className="flex items-center gap-2">
+                        <Input type="number" step="0.01"
+                          value={stockSolidos}
+                          onChange={(e) => setStockSolidos(e.target.value)}
+                          placeholder="Ej: 49.50" />
+                        {okSolidos === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
+                        {okSolidos === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
+                      </div>
+                    </FormField>
+                  )}
+
+                  {(p.ph_min != null || p.ph_max != null) && (
+                    <FormField label="pH" hint={rangeStr(p.ph_min, p.ph_max) ?? undefined}>
+                      <div className="flex items-center gap-2">
+                        <Input type="number" step="0.01"
+                          value={stockPh}
+                          onChange={(e) => setStockPh(e.target.value)}
+                          placeholder="Ej: 6.5" />
+                        {okPh === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
+                        {okPh === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
+                      </div>
+                    </FormField>
+                  )}
+
+                  {(p.viscosidad_min != null || p.viscosidad_max != null) && (
+                    <FormField label="Viscosidad (cP)" hint={rangeStr(p.viscosidad_min, p.viscosidad_max, ' cP') ?? undefined}>
+                      <div className="flex items-center gap-2">
+                        <Input type="number" step="0.01"
+                          value={stockViscosidad}
+                          onChange={(e) => setStockViscosidad(e.target.value)}
+                          placeholder="Ej: 1200" />
+                        {okVisc === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
+                        {okVisc === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
+                      </div>
+                    </FormField>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Motivo */}
             <FormField label="Motivo / Observaciones">
@@ -1247,6 +1382,52 @@ export default function Productos() {
               placeholder="Ej: 36 (3 años)"
             />
           </FormField>
+
+          {/* ── Especificaciones físico-químicas (rangos aceptables) — solo para materia prima ── */}
+          {form.tipo === 'materia_prima' && (
+            <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
+              <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Especificaciones del producto</p>
+              <p className="text-[11px] text-gray-500 -mt-2">Rangos aceptables. Cada lote tendrá su valor medido y se comparará contra esto.</p>
+
+              <FormField label="% Sólidos (rango)">
+                <div className="flex items-center gap-2">
+                  <Input type="number" step="0.01" placeholder="mín"
+                    value={form.solidos_min}
+                    onChange={(e) => setForm((f) => ({ ...f, solidos_min: e.target.value }))} />
+                  <span className="text-gray-400">—</span>
+                  <Input type="number" step="0.01" placeholder="máx"
+                    value={form.solidos_max}
+                    onChange={(e) => setForm((f) => ({ ...f, solidos_max: e.target.value }))} />
+                  <span className="text-sm text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5">%</span>
+                </div>
+              </FormField>
+
+              <FormField label="pH (rango)">
+                <div className="flex items-center gap-2">
+                  <Input type="number" step="0.01" placeholder="mín"
+                    value={form.ph_min}
+                    onChange={(e) => setForm((f) => ({ ...f, ph_min: e.target.value }))} />
+                  <span className="text-gray-400">—</span>
+                  <Input type="number" step="0.01" placeholder="máx"
+                    value={form.ph_max}
+                    onChange={(e) => setForm((f) => ({ ...f, ph_max: e.target.value }))} />
+                </div>
+              </FormField>
+
+              <FormField label="Viscosidad (rango)">
+                <div className="flex items-center gap-2">
+                  <Input type="number" step="0.01" placeholder="mín"
+                    value={form.viscosidad_min}
+                    onChange={(e) => setForm((f) => ({ ...f, viscosidad_min: e.target.value }))} />
+                  <span className="text-gray-400">—</span>
+                  <Input type="number" step="0.01" placeholder="máx"
+                    value={form.viscosidad_max}
+                    onChange={(e) => setForm((f) => ({ ...f, viscosidad_max: e.target.value }))} />
+                  <span className="text-sm text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5">cP</span>
+                </div>
+              </FormField>
+            </div>
+          )}
 
           {editando && (
             <div className="rounded-xl border border-amber-100 bg-amber-50/40 p-3 space-y-3">

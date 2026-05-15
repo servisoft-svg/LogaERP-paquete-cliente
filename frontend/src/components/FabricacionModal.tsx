@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { recetasApi, produccionApi, lotesApi, proveedoresApi } from '../api/client';
+import { recetasApi, produccionApi, lotesApi, proveedoresApi, productosApi } from '../api/client';
 import type { OrdenProduccion, IngredienteReceta, Receta, PasoReceta } from '../types';
 import clsx from 'clsx';
 import axios from 'axios';
@@ -45,6 +45,14 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   const [scanning, setScanning] = useState(false);
   const [scanIngId, setScanIngId] = useState<string | null>(null);
   const [lotesMP, setLotesMP] = useState<Record<string, { lote_interno: string; cantidad_actual: string; fecha_caducidad?: string }[]>>({});
+  // Cantidades ajustadas en vivo por el operario (id ingrediente → kg). Persistido en
+  // localStorage para sobrevivir a recargas durante la fabricación.
+  const [cantidadesAjustadas, setCantidadesAjustadas] = useState<Record<string, number>>({});
+  // Últimos lotes del producto que se fabrica + specs (para comparar QC con históricos)
+  const [historicoQC, setHistoricoQC] = useState<{
+    productoSpecs: { solidos_min?: any; solidos_max?: any; ph_min?: any; ph_max?: any; viscosidad_min?: any; viscosidad_max?: any } | null;
+    ultimosLotes: { lote_interno: string; created_at: string; solidos?: any; ph?: any; viscosidad?: any }[];
+  }>({ productoSpecs: null, ultimosLotes: [] });
   const [pasoActual, setPasoActual] = useState(0);
   const [temperatura, setTemperatura] = useState(25);
   const [registroLimpieza, setRegistroLimpieza] = useState('');
@@ -97,6 +105,10 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       setFillPct(savedSet.size * pctPorIng);
       setFase(savedSet.size === ingredientesTotal && ingredientesTotal > 0 ? 'confirmando' : 'preparando');
 
+      // Restore cantidades ajustadas (id → kg) — persistido en cada cambio
+      const savedAjustes = localStorage.getItem(`fab_ajustes_${orden.id}`);
+      setCantidadesAjustadas(savedAjustes ? JSON.parse(savedAjustes) : {});
+
       // Restore paso from localStorage
       const savedPaso = localStorage.getItem(`fab_paso_${orden.id}`);
       const pasoIdx = savedPaso ? parseInt(savedPaso, 10) : 0;
@@ -110,6 +122,31 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
         } catch { lotesMap[ing.materia_prima_id] = []; }
       }
       setLotesMP(lotesMap);
+
+      // Histórico QC del producto que se fabrica: últimos 2 lotes con valores físico-químicos
+      try {
+        const prodId = recetaData.producto_id;
+        if (prodId) {
+          const [prodRes, lotesRes] = await Promise.all([
+            productosApi.obtener(prodId).catch(() => null),
+            lotesApi.listar({ producto_id: prodId }).catch(() => null),
+          ]);
+          const prodData = (prodRes?.data as any) ?? null;
+          const lotesData = (lotesRes?.data as any[]) ?? [];
+          const ultimos = lotesData
+            .filter(l => l.solidos != null || l.ph != null || l.viscosidad != null)
+            .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+            .slice(0, 2);
+          setHistoricoQC({
+            productoSpecs: prodData ? {
+              solidos_min: prodData.solidos_min, solidos_max: prodData.solidos_max,
+              ph_min: prodData.ph_min, ph_max: prodData.ph_max,
+              viscosidad_min: prodData.viscosidad_min, viscosidad_max: prodData.viscosidad_max,
+            } : null,
+            ultimosLotes: ultimos,
+          });
+        }
+      } catch { /* silencioso */ }
     } catch {
       setFase('error');
       setErrorMsg('No se pudo cargar la receta');
@@ -221,6 +258,13 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       setFillPct(prev => Math.min(prev + 3, 90));
     }, 150);
 
+    // Construir lista de ingredientes ajustados (solo los que el operario tocó).
+    // Backend usará estas cantidades para descontar stock en vez de las teóricas.
+    const ingredientesAjustados = Object.entries(cantidadesAjustadas).map(([ingId, cant]) => {
+      const ing = ingredientes.find(i => i.id === ingId);
+      return ing ? { materia_prima_id: ing.materia_prima_id, cantidad: cant } : null;
+    }).filter((x): x is { materia_prima_id: string; cantidad: number } => x !== null);
+
     try {
       const { data } = await produccionApi.confirmar(orden.id, {
         ph: ph || undefined,
@@ -231,6 +275,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
         cantidad_real_producida: cantidadReal || undefined,
         registro_limpieza: registroLimpieza || undefined,
         fecha_inicio_cliente: inicioFabRef.current ?? undefined,
+        ingredientes_ajustados: ingredientesAjustados.length > 0 ? ingredientesAjustados : undefined,
       });
       clearInterval(fillInterval);
       setFillPct(100);
@@ -238,6 +283,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       setLoteProd(res.lote_producido ?? '');
       if (lsKey) localStorage.removeItem(lsKey);
       if (orden) localStorage.removeItem(`fab_paso_${orden.id}`);
+      if (orden) localStorage.removeItem(`fab_ajustes_${orden.id}`);
       // If QC out of range, show warning before completing
       if (res.qc_fuera_de_rango) {
         const errMsg = `⚠ Control de calidad fuera de rango:\n${(res.qc_desviaciones ?? []).join('\n')}\n\nEl lote se ha creado en CUARENTENA. Requiere aprobación manual en Lotes.`;
@@ -378,6 +424,60 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
               ) : hasPasos && fase === 'preparando' ? (
                 /* ── Step-by-step view ── */
                 <div className="space-y-4">
+                  {/* ── Histórico QC: últimas fabricaciones del mismo producto ── */}
+                  {historicoQC.ultimosLotes.length > 0 && (() => {
+                    const specs = historicoQC.productoSpecs;
+                    // SIEMPRE muestra las 3 columnas (pH, %Sól, Visc). Sin rango → gris.
+                    const cls = (v: any, min: any, max: any) => {
+                      if (v == null) return 'text-gray-300';
+                      const n = parseFloat(String(v));
+                      if (isNaN(n)) return 'text-gray-300';
+                      if (min == null && max == null) return 'text-gray-600'; // sin rango → neutro
+                      if (min != null && n < parseFloat(min)) return 'text-loga-red font-bold';
+                      if (max != null && n > parseFloat(max)) return 'text-loga-red font-bold';
+                      return 'text-emerald-700 font-bold';
+                    };
+                    const fmt = (v: any) => v == null ? '—' : parseFloat(String(v)).toString();
+                    const rangoStr = (min: any, max: any, unit = '') => {
+                      if (min == null && max == null) return '—';
+                      const f = (v: any) => v != null ? parseFloat(v).toString() : '?';
+                      return `${f(min)}–${f(max)}${unit}`;
+                    };
+                    return (
+                      <div className="rounded-xl border border-violet-200 bg-violet-50/40 px-3 py-2.5">
+                        <p className="text-[11px] font-semibold text-violet-700 uppercase tracking-wider mb-1.5">Últimas fabricaciones · QC</p>
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-gray-500">
+                              <th className="text-left py-0.5 font-medium">Lote</th>
+                              <th className="text-left py-0.5 font-medium">Fecha</th>
+                              <th className="text-right py-0.5 font-medium">pH</th>
+                              <th className="text-right py-0.5 font-medium">%Sól.</th>
+                              <th className="text-right py-0.5 font-medium">Visc.</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {historicoQC.ultimosLotes.map((l, i) => (
+                              <tr key={i} className="border-t border-violet-100">
+                                <td className="py-1 font-mono text-gray-700">{l.lote_interno}</td>
+                                <td className="py-1 text-gray-500">{new Date(l.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit' })}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.ph,         specs?.ph_min,         specs?.ph_max))}>{fmt(l.ph)}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.solidos,    specs?.solidos_min,    specs?.solidos_max))}>{fmt(l.solidos)}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.viscosidad, specs?.viscosidad_min, specs?.viscosidad_max))}>{fmt(l.viscosidad)}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-violet-200 text-gray-500 text-[10px]">
+                              <td className="py-0.5" colSpan={2}>Rango aceptable</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.ph_min, specs?.ph_max)}</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.solidos_min, specs?.solidos_max, ' %')}</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.viscosidad_min, specs?.viscosidad_max, ' cP')}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+
                   {/* Step timeline mini */}
                   <div className="flex items-center gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
                     {pasos.map((_p, i) => {
@@ -445,16 +545,63 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                           )}
                         </div>
 
+                        {/* Acumulado en tanque — running total de ingredientes confirmados
+                            (todos los pasos). Usa cantidades AJUSTADAS por el operario (si
+                            las hubo); en caso contrario, el valor teórico calculado. */}
+                        {ingredientes.length > 0 && receta && (() => {
+                          const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta.rendimiento);
+                          let acumulado = 0;
+                          let totalTeorico = 0;
+                          for (const ing of ingredientes) {
+                            const teorico = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                            const real = cantidadesAjustadas[ing.id] ?? teorico;
+                            totalTeorico += teorico;
+                            if (confirmados.has(ing.id)) acumulado += real;
+                          }
+                          const pct = totalTeorico > 0 ? (acumulado / totalTeorico) * 100 : 0;
+                          return (
+                            <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[11px] font-semibold text-blue-700 uppercase tracking-wider">Acumulado en tanque</span>
+                                <span className="text-[11px] font-semibold text-blue-700">{pct.toFixed(0)}%</span>
+                              </div>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-2xl font-bold font-mono text-blue-900">{acumulado.toFixed(2)}</span>
+                                <span className="text-sm text-blue-600">/ {totalTeorico.toFixed(2)} kg</span>
+                              </div>
+                              <div className="mt-2 h-1.5 rounded-full bg-blue-100 overflow-hidden">
+                                <div
+                                  className="h-full bg-blue-500 transition-all duration-300"
+                                  style={{ width: `${Math.min(100, pct)}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })()}
+
                         {/* Ingredients for this step */}
                         {stepIngs.length > 0 && (
                           <div className="space-y-1.5">
                             <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Ingredientes de este paso</p>
                             {stepIngs.map((ing, i) => {
                               const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
-                              const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                              const teorico = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                              const ajustado = cantidadesAjustadas[ing.id];
+                              const necesario = ajustado ?? teorico;
                               const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                               const suficiente = stock >= necesario;
                               const conf = confirmados.has(ing.id);
+
+                              const setAjuste = (val: number | null) => {
+                                setCantidadesAjustadas(prev => {
+                                  const next = { ...prev };
+                                  if (val == null || val === teorico) delete next[ing.id];
+                                  else next[ing.id] = val;
+                                  if (orden) localStorage.setItem(`fab_ajustes_${orden.id}`, JSON.stringify(next));
+                                  return next;
+                                });
+                              };
+                              const step = teorico >= 100 ? 1 : teorico >= 10 ? 0.5 : teorico >= 1 ? 0.1 : 0.01;
 
                               return (
                                 <motion.div
@@ -486,10 +633,47 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                         </a>
                                       )}
                                     </div>
-                                    <p className="text-base font-bold font-mono text-gray-800">
-                                      {necesario.toFixed(2)} <span className="text-xs font-semibold text-gray-500">{ing.unidad_medida}</span>
-                                      {!suficiente && <span className="ml-2 text-xs text-loga-red font-semibold">⚠ Stock: {stock.toFixed(2)}</span>}
-                                    </p>
+                                    {/* Cantidad — editable mientras no esté confirmado */}
+                                    {conf ? (
+                                      <p className="text-base font-bold font-mono text-emerald-700 line-through">
+                                        {necesario.toFixed(2)} <span className="text-xs font-semibold">{ing.unidad_medida}</span>
+                                      </p>
+                                    ) : (
+                                      <div className="flex items-center gap-1.5 mt-0.5">
+                                        <button
+                                          onClick={() => setAjuste(Math.max(0, necesario - step))}
+                                          className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
+                                          title={`-${step}`}
+                                        >−</button>
+                                        <input
+                                          type="number"
+                                          step={step}
+                                          min={0}
+                                          value={necesario.toFixed(2)}
+                                          onChange={(e) => {
+                                            const v = parseFloat(e.target.value);
+                                            if (!isNaN(v) && v >= 0) setAjuste(v);
+                                          }}
+                                          className="w-20 text-center font-mono font-bold text-base bg-white border border-gray-200 rounded-md px-1.5 py-0.5 focus:border-loga-red focus:outline-none"
+                                        />
+                                        <button
+                                          onClick={() => setAjuste(necesario + step)}
+                                          className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
+                                          title={`+${step}`}
+                                        >+</button>
+                                        <span className="text-xs font-semibold text-gray-500">{ing.unidad_medida}</span>
+                                        {ajustado != null && (
+                                          <button
+                                            onClick={() => setAjuste(null)}
+                                            className="text-[10px] text-amber-600 hover:text-amber-800 underline ml-1"
+                                            title={`Receta: ${teorico.toFixed(2)} ${ing.unidad_medida}`}
+                                          >
+                                            ajustado (vs {teorico.toFixed(2)}) — reset
+                                          </button>
+                                        )}
+                                        {!suficiente && <span className="ml-1 text-xs text-loga-red font-semibold">⚠ Stock: {stock.toFixed(2)}</span>}
+                                      </div>
+                                    )}
                                     {lotesMP[ing.materia_prima_id]?.length > 0 && (() => {
                                       const lotes = [...lotesMP[ing.materia_prima_id]].sort((a, b) => {
                                         if (a.fecha_caducidad && b.fecha_caducidad) return a.fecha_caducidad.localeCompare(b.fecha_caducidad);
@@ -608,6 +792,88 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
               ) : (
                 /* ── Flat list (no pasos or other phases) ── */
                 <>
+                  {/* Histórico QC (últimas 2 fabricaciones) — también disponible sin pasos */}
+                  {historicoQC.ultimosLotes.length > 0 && (() => {
+                    const specs = historicoQC.productoSpecs;
+                    const cls = (v: any, min: any, max: any) => {
+                      if (v == null) return 'text-gray-300';
+                      const n = parseFloat(String(v));
+                      if (isNaN(n)) return 'text-gray-300';
+                      if (min == null && max == null) return 'text-gray-600';
+                      if (min != null && n < parseFloat(min)) return 'text-loga-red font-bold';
+                      if (max != null && n > parseFloat(max)) return 'text-loga-red font-bold';
+                      return 'text-emerald-700 font-bold';
+                    };
+                    const fmt = (v: any) => v == null ? '—' : parseFloat(String(v)).toString();
+                    const rangoStr = (min: any, max: any, unit = '') => {
+                      if (min == null && max == null) return '—';
+                      const f = (v: any) => v != null ? parseFloat(v).toString() : '?';
+                      return `${f(min)}–${f(max)}${unit}`;
+                    };
+                    return (
+                      <div className="rounded-xl border border-violet-200 bg-violet-50/40 px-3 py-2.5 mb-3">
+                        <p className="text-[11px] font-semibold text-violet-700 uppercase tracking-wider mb-1.5">Últimas fabricaciones · QC</p>
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="text-gray-500">
+                              <th className="text-left py-0.5 font-medium">Lote</th>
+                              <th className="text-left py-0.5 font-medium">Fecha</th>
+                              <th className="text-right py-0.5 font-medium">pH</th>
+                              <th className="text-right py-0.5 font-medium">%Sól.</th>
+                              <th className="text-right py-0.5 font-medium">Visc.</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {historicoQC.ultimosLotes.map((l, i) => (
+                              <tr key={i} className="border-t border-violet-100">
+                                <td className="py-1 font-mono text-gray-700">{l.lote_interno}</td>
+                                <td className="py-1 text-gray-500">{new Date(l.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit' })}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.ph,         specs?.ph_min,         specs?.ph_max))}>{fmt(l.ph)}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.solidos,    specs?.solidos_min,    specs?.solidos_max))}>{fmt(l.solidos)}</td>
+                                <td className={clsx('py-1 text-right tabular-nums', cls(l.viscosidad, specs?.viscosidad_min, specs?.viscosidad_max))}>{fmt(l.viscosidad)}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-violet-200 text-gray-500 text-[10px]">
+                              <td className="py-0.5" colSpan={2}>Rango aceptable</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.ph_min, specs?.ph_max)}</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.solidos_min, specs?.solidos_max, ' %')}</td>
+                              <td className="py-0.5 text-right tabular-nums">{rangoStr(specs?.viscosidad_min, specs?.viscosidad_max, ' cP')}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Acumulado en tanque (running total ingredientes confirmados) */}
+                  {ingredientes.length > 0 && receta && (() => {
+                    const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta.rendimiento);
+                    let acumulado = 0;
+                    let totalTeorico = 0;
+                    for (const ing of ingredientes) {
+                      const teorico = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                      const real = cantidadesAjustadas[ing.id] ?? teorico;
+                      totalTeorico += teorico;
+                      if (confirmados.has(ing.id)) acumulado += real;
+                    }
+                    const pct = totalTeorico > 0 ? (acumulado / totalTeorico) * 100 : 0;
+                    return (
+                      <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 mb-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[11px] font-semibold text-blue-700 uppercase tracking-wider">Acumulado en tanque</span>
+                          <span className="text-[11px] font-semibold text-blue-700">{pct.toFixed(0)}%</span>
+                        </div>
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-2xl font-bold font-mono text-blue-900">{acumulado.toFixed(2)}</span>
+                          <span className="text-sm text-blue-600">/ {totalTeorico.toFixed(2)} kg</span>
+                        </div>
+                        <div className="mt-2 h-1.5 rounded-full bg-blue-100 overflow-hidden">
+                          <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${Math.min(100, pct)}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="flex items-center justify-between mb-3">
                     <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Ingredientes</p>
                     <p className="text-[11px] text-gray-400">{nConf}/{total} confirmados</p>
@@ -615,10 +881,22 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                   <div className="space-y-2">
                     {ingredientes.map((ing, i) => {
                       const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
-                      const necesario = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                      const teorico = parseFloat(ing.cantidad) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                      const ajustado = cantidadesAjustadas[ing.id];
+                      const necesario = ajustado ?? teorico;
                       const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                       const suficiente = stock >= necesario;
                       const conf = confirmados.has(ing.id);
+                      const setAjuste = (val: number | null) => {
+                        setCantidadesAjustadas(prev => {
+                          const next = { ...prev };
+                          if (val == null || val === teorico) delete next[ing.id];
+                          else next[ing.id] = val;
+                          if (orden) localStorage.setItem(`fab_ajustes_${orden.id}`, JSON.stringify(next));
+                          return next;
+                        });
+                      };
+                      const step = teorico >= 100 ? 1 : teorico >= 10 ? 0.5 : teorico >= 1 ? 0.1 : 0.01;
                       return (
                         <motion.div
                           key={ing.id || ing.materia_prima_id || `ing2-${i}`}
@@ -649,10 +927,46 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                 </a>
                               )}
                             </div>
-                            <p className="text-sm font-bold font-mono text-gray-800">
-                              {necesario.toFixed(2)} <span className="text-xs font-semibold text-gray-500">{ing.unidad_medida}</span>
-                              {!suficiente && <span className="ml-2 text-xs text-loga-red font-semibold">⚠ Stock: {stock.toFixed(2)}</span>}
-                            </p>
+                            {conf ? (
+                              <p className="text-sm font-bold font-mono text-emerald-700 line-through">
+                                {necesario.toFixed(2)} <span className="text-xs font-semibold">{ing.unidad_medida}</span>
+                              </p>
+                            ) : (
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <button
+                                  onClick={() => setAjuste(Math.max(0, necesario - step))}
+                                  className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
+                                  title={`-${step}`}
+                                >−</button>
+                                <input
+                                  type="number"
+                                  step={step}
+                                  min={0}
+                                  value={necesario.toFixed(2)}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    if (!isNaN(v) && v >= 0) setAjuste(v);
+                                  }}
+                                  className="w-20 text-center font-mono font-bold text-sm bg-white border border-gray-200 rounded-md px-1.5 py-0.5 focus:border-loga-red focus:outline-none"
+                                />
+                                <button
+                                  onClick={() => setAjuste(necesario + step)}
+                                  className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
+                                  title={`+${step}`}
+                                >+</button>
+                                <span className="text-xs font-semibold text-gray-500">{ing.unidad_medida}</span>
+                                {ajustado != null && (
+                                  <button
+                                    onClick={() => setAjuste(null)}
+                                    className="text-[10px] text-amber-600 hover:text-amber-800 underline ml-1"
+                                    title={`Receta: ${teorico.toFixed(2)} ${ing.unidad_medida}`}
+                                  >
+                                    ajustado (vs {teorico.toFixed(2)}) — reset
+                                  </button>
+                                )}
+                                {!suficiente && <span className="ml-1 text-xs text-loga-red font-semibold">⚠ Stock: {stock.toFixed(2)}</span>}
+                              </div>
+                            )}
                             {lotesMP[ing.materia_prima_id]?.length > 0 && (() => {
                               const lotes = [...lotesMP[ing.materia_prima_id]].sort((a, b) => {
                                 if (a.fecha_caducidad && b.fecha_caducidad) return a.fecha_caducidad.localeCompare(b.fecha_caducidad);

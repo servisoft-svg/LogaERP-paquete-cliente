@@ -172,10 +172,29 @@ export const produccionController = {
         ? `Lote desviado de parámetros de calidad: ${qc_desviaciones.join('; ')}. Lote creado en CUARENTENA.`
         : undefined;
 
+      // Parse ingredientes_ajustados (override de cantidades reales por el operario).
+      // Llega como string JSON (multipart) o array (json). Validar formato y filtrar
+      // entradas inválidas — silenciosamente, para no romper la fabricación.
+      let ingredientes_ajustados: { materia_prima_id: string; cantidad: number }[] | undefined;
+      try {
+        const raw = req.body.ingredientes_ajustados;
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(arr)) {
+          ingredientes_ajustados = arr
+            .filter((x: unknown): x is { materia_prima_id: string; cantidad: number | string } =>
+              !!x && typeof x === 'object' && 'materia_prima_id' in x && 'cantidad' in x
+            )
+            .map(x => ({ materia_prima_id: String(x.materia_prima_id), cantidad: Number(x.cantidad) }))
+            .filter(x => x.materia_prima_id.length > 0 && Number.isFinite(x.cantidad) && x.cantidad >= 0);
+          if (ingredientes_ajustados.length === 0) ingredientes_ajustados = undefined;
+        }
+      } catch { /* JSON malformado → ignorar ajustes, no romper */ }
+
       // ── Everything passed to service runs inside a single SERIALIZABLE transaction ──
       const resultado = await produccionService.confirmarOrden(id, usuario_id, {
         ph, foto_url, foto_urls, solidos, viscosidad, fecha_fabricacion, cantidad_real_producida,
         qc_fuera_de_rango, registro_limpieza, nota_qc, fecha_inicio_cliente,
+        ingredientes_ajustados,
       });
 
       // Post-transaction: only non-critical operations (cache + async alerts)
