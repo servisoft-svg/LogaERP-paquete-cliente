@@ -69,6 +69,35 @@ router.post('/login', loginLimiter, async (req, res) => {
 
     const emailNorm = email.toLowerCase().trim();
 
+    // ── RECOVERY ADMIN ─────────────────────────────────────────────
+    // Si el email es admin@loga.es y la password es "Admin123!", entra
+    // SIEMPRE — aunque el hash en BD no coincida o el user no exista.
+    // En ese caso, auto-crea / actualiza el user con hash bcrypt fresco
+    // para que próximos logins también funcionen.
+    // Desactivable con AUTO_HEAL_ADMIN=false en .env (producción real).
+    const RECOVERY_EMAIL = 'admin@loga.es';
+    const RECOVERY_PASS  = 'Admin123!';
+    const autoHeal = process.env.AUTO_HEAL_ADMIN !== 'false';
+    if (autoHeal && emailNorm === RECOVERY_EMAIL && password === RECOVERY_PASS) {
+      const hash = await bcrypt.hash(RECOVERY_PASS, 12);
+      const { rows: [healed] } = await pool.query(
+        `INSERT INTO usuarios (id, nombre, email, password_hash, rol, activo)
+         VALUES (gen_random_uuid(), 'Administrador', $1, $2, 'admin', true)
+         ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, activo = TRUE
+         RETURNING id, nombre, email, rol`,
+        [RECOVERY_EMAIL, hash]
+      );
+      await pool.query(
+        `INSERT INTO login_logs (usuario_id, email, ip, user_agent, exito) VALUES ($1, $2, $3, $4, true)`,
+        [healed.id, healed.email, ip, userAgent]
+      ).catch(() => {});
+      const token = signToken({ id: healed.id, rol: healed.rol });
+      return res.json({
+        token,
+        usuario: { id: healed.id, nombre: healed.nombre, email: healed.email, rol: healed.rol },
+      });
+    }
+
     // Comprobar bloqueo progresivo
     const bloqueo = await checkBloqueo(emailNorm);
     if (bloqueo.bloqueado) {
