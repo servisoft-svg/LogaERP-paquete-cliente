@@ -16,6 +16,7 @@ import proveedoresRoutes      from './routes/proveedores.routes';
 import clientesRoutes         from './routes/clientes.routes';
 import pedidosRoutes, { webhookHandler } from './routes/pedidos.routes';
 import configuracionRoutes    from './routes/configuracion.routes';
+import controlesCalidadRoutes from './routes/controles-calidad.routes';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
 import { authMiddleware, adminOnly, verifyToken } from './middleware/auth';
@@ -287,6 +288,7 @@ app.use('/api/pedidos',       authMiddleware, pedidosRoutes);
 app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
 app.use('/api/automatizaciones', authMiddleware, adminOnly, automatizacionesRoutes);
+app.use('/api/controles-calidad', authMiddleware, controlesCalidadRoutes);
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });

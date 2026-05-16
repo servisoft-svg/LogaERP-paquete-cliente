@@ -22,6 +22,7 @@ const Configuracion = lazy(() => import('./pages/Configuracion'));
 const Finanzas = lazy(() => import('./pages/Finanzas'));
 const Recuento = lazy(() => import('./pages/Recuento'));
 const Automatizaciones = lazy(() => import('./pages/Automatizaciones'));
+const ControlCalidad = lazy(() => import('./pages/ControlCalidad'));
 
 function AppContent() {
   const { user, loading, isAdmin } = useAuth();
@@ -58,6 +59,7 @@ function AppContent() {
             <Route path="/configuracion" element={isAdmin ? <Configuracion /> : <Navigate to="/" replace />} />
             <Route path="/recuento" element={isAdmin ? <Recuento /> : <Navigate to="/" replace />} />
             <Route path="/automatizaciones" element={isAdmin ? <Automatizaciones /> : <Navigate to="/" replace />} />
+            <Route path="/control-calidad" element={<ControlCalidad />} />
           </Routes>
         </Suspense>
       </main>

@@ -161,6 +161,13 @@ export const automatizacionesApi = {
   sistemaRun:       (accion: string) => api.post(`/automatizaciones/sistema/${accion}/run`),
 };
 
+export const controlesCalidadApi = {
+  listar:   (tipo?: string) => api.get('/controles-calidad', { params: tipo ? { tipo } : {} }),
+  crear:    (data: object) => api.post('/controles-calidad', data),
+  editar:   (id: string, data: object) => api.put(`/controles-calidad/${id}`, data),
+  eliminar: (id: string) => api.delete(`/controles-calidad/${id}`),
+};
+
 export const finanzasApi = {
   resumen: (año?: number) => api.get('/finanzas/resumen', { params: año ? { año } : {} }),
   historialPrecios: (productoId?: string) => api.get('/finanzas/historial-precios', { params: productoId ? { producto_id: productoId } : {} }),

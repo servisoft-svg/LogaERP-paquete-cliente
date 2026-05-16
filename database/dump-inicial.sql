@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict xFIz3fVLRIqKES8T7hyzDtZdpe7mTSH90E4ktgdW9gUSV8nZav4ghsANuT6kfwy
+\restrict mFlozdQXNJSizf5izEN3hUoyn1uGNbTHCjGVbaUd4Aw5k1nBmhKsiIqyEIl1r0Q
 
 -- Dumped from database version 16.13 (Homebrew)
 -- Dumped by pg_dump version 16.13 (Homebrew)
@@ -1081,6 +1081,41 @@ CREATE TABLE public.configuracion_global (
 
 
 ALTER TABLE public.configuracion_global OWNER TO loga;
+
+--
+-- Name: controles_calidad; Type: TABLE; Schema: public; Owner: loga
+--
+
+CREATE TABLE public.controles_calidad (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tipo character varying(20) NOT NULL,
+    fecha date DEFAULT CURRENT_DATE NOT NULL,
+    lote_codigo text,
+    metodo text,
+    producto_id uuid,
+    producto_nombre text,
+    ph_spec text,
+    ph_valor numeric(6,2),
+    solidos_spec text,
+    solidos_valor numeric(6,2),
+    viscosidad_spec text,
+    viscosidad_valor numeric(10,2),
+    deposito_equipo text,
+    accion text,
+    resultado character varying(20),
+    observaciones text,
+    firmado_por_id uuid,
+    firmado_por_nombre text,
+    firmado_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by_id uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT controles_calidad_resultado_check CHECK (((resultado)::text = ANY ((ARRAY['apto'::character varying, 'no_apto'::character varying, 'correcto'::character varying, 'pendiente'::character varying, 'revisar'::character varying])::text[]))),
+    CONSTRAINT controles_calidad_tipo_check CHECK (((tipo)::text = ANY ((ARRAY['analitico'::character varying, 'limpieza'::character varying, 'mantenimiento'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.controles_calidad OWNER TO loga;
 
 --
 -- Name: cron_heartbeat; Type: TABLE; Schema: public; Owner: loga
@@ -2412,14 +2447,32 @@ COPY public.configuracion_global (id, porcentaje_alerta, plantilla_email, email_
 
 
 --
+-- Data for Name: controles_calidad; Type: TABLE DATA; Schema: public; Owner: loga
+--
+
+COPY public.controles_calidad (id, tipo, fecha, lote_codigo, metodo, producto_id, producto_nombre, ph_spec, ph_valor, solidos_spec, solidos_valor, viscosidad_spec, viscosidad_valor, deposito_equipo, accion, resultado, observaciones, firmado_por_id, firmado_por_nombre, firmado_at, created_at, created_by_id, updated_at) FROM stdin;
+b6292119-f1a1-4edf-b7e3-bb87d93630e1	analitico	2026-01-20	260114	CB-2001	\N	Látex-410	4.5-5.5	4.80	41±1	40.10	300-360	346.00	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+28072b27-8e85-40e6-b950-f3bec85a29fa	analitico	2026-03-14	260312	CB-2001	\N	Látex-410	4.5-5.5	4.80	41±1	40.00	300-360	331.00	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+4bcb86dc-f1cb-4fb5-a967-71e324a4f7b5	analitico	2026-04-28	6042021	CB-2001	\N	Vinavil KA/R	4.0-5.0	4.40	50±2	49.20	420-540	489.00	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+7d02132e-3878-4ca4-8032-a9dd3e5a5da1	analitico	2026-04-28	6042027	CB-2001	\N	Vinavil EVA202	4.5-5.5	5.00	55±1	54.30	40-60	45.00	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+6cb204cb-abd9-49ce-80eb-241d576f8392	analitico	2026-05-07	0300913068	CB-2001	\N	COL 9350	4.0-5.0	4.70	60±1	60.00	\N	\N	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+f3abe12c-c148-4abb-9790-2f5826a2abbf	analitico	2026-05-07	0300913068	CB-2001	\N	COL 9300	4.0-5.0	4.70	60±1	60.00	250-350	225.00	\N	\N	apto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.416107+02	2026-05-15 19:40:25.416107+02	\N	2026-05-15 19:40:25.416107+02
+bbb3d5ce-7c37-42fa-84d4-8618aa840cd5	limpieza	2026-05-12	\N	\N	\N	\N	\N	\N	\N	\N	\N	\N	Reactor R-1	Limpieza con agua + sosa 5%, enjuague final 2x	correcto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.417592+02	2026-05-15 19:40:25.417592+02	\N	2026-05-15 19:40:25.417592+02
+e599f2ef-1788-41e6-ba7b-0a5603cc9250	limpieza	2026-05-14	\N	\N	\N	\N	\N	\N	\N	\N	\N	\N	Tanque T-3	Vaciado y limpieza, junta cambiada	correcto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.417592+02	2026-05-15 19:40:25.417592+02	\N	2026-05-15 19:40:25.417592+02
+fd218faf-fddd-4002-9a80-94a6afdb0a62	mantenimiento	2026-05-10	\N	\N	\N	\N	\N	\N	\N	\N	\N	\N	Bomba P-101	Cambio de rodamientos y ajuste de presión a 4 bar	correcto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.417592+02	2026-05-15 19:40:25.417592+02	\N	2026-05-15 19:40:25.417592+02
+da508b78-7f41-4374-bf01-f13baf8f1d3e	mantenimiento	2026-05-13	\N	\N	\N	\N	\N	\N	\N	\N	\N	\N	Filtro F-3	Revisión y limpieza de filtro 200µm	correcto	\N	\N	Jesús López Alonso	2026-05-15 19:40:25.417592+02	2026-05-15 19:40:25.417592+02	\N	2026-05-15 19:40:25.417592+02
+\.
+
+
+--
 -- Data for Name: cron_heartbeat; Type: TABLE DATA; Schema: public; Owner: loga
 --
 
 COPY public.cron_heartbeat (nombre, ultimo_run, ultimo_status, ultimo_error, intervalo_ms, umbral_ms, created_at) FROM stdin;
-retry_email_proveedor	2026-05-15 13:46:18.693354+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
-sweep_stock_reglas	2026-05-15 13:46:18.701034+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
-backup_nocturno_tick	2026-05-15 13:46:18.733917+02	ok	\N	60000	240000	2026-05-07 18:24:22.913083+02
-sweep_pedidos	2026-05-15 13:46:44.600651+02	ok	\N	90000	300000	2026-05-07 18:24:22.913083+02
+retry_email_proveedor	2026-05-15 15:43:57.145925+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
+sweep_stock_reglas	2026-05-15 15:43:57.147041+02	ok	\N	300000	960000	2026-05-07 18:24:22.913083+02
+backup_nocturno_tick	2026-05-15 15:47:57.155379+02	ok	\N	60000	240000	2026-05-07 18:24:22.913083+02
+sweep_pedidos	2026-05-15 15:48:27.147001+02	ok	\N	90000	300000	2026-05-07 18:24:22.913083+02
 \.
 
 
@@ -8528,6 +8581,14 @@ ALTER TABLE ONLY public.configuracion_global
 
 
 --
+-- Name: controles_calidad controles_calidad_pkey; Type: CONSTRAINT; Schema: public; Owner: loga
+--
+
+ALTER TABLE ONLY public.controles_calidad
+    ADD CONSTRAINT controles_calidad_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: cron_heartbeat cron_heartbeat_pkey; Type: CONSTRAINT; Schema: public; Owner: loga
 --
 
@@ -8926,6 +8987,27 @@ CREATE INDEX idx_autlog_producto ON public.automatizaciones_log USING btree (pro
 --
 
 CREATE INDEX idx_autlog_regla ON public.automatizaciones_log USING btree (regla_id, created_at DESC) WHERE (regla_id IS NOT NULL);
+
+
+--
+-- Name: idx_cc_firmado_por; Type: INDEX; Schema: public; Owner: loga
+--
+
+CREATE INDEX idx_cc_firmado_por ON public.controles_calidad USING btree (firmado_por_id) WHERE (firmado_por_id IS NOT NULL);
+
+
+--
+-- Name: idx_cc_producto; Type: INDEX; Schema: public; Owner: loga
+--
+
+CREATE INDEX idx_cc_producto ON public.controles_calidad USING btree (producto_id) WHERE (producto_id IS NOT NULL);
+
+
+--
+-- Name: idx_cc_tipo_fecha; Type: INDEX; Schema: public; Owner: loga
+--
+
+CREATE INDEX idx_cc_tipo_fecha ON public.controles_calidad USING btree (tipo, fecha DESC);
 
 
 --
@@ -11064,6 +11146,30 @@ ALTER TABLE ONLY public.automatizaciones_reglas
 
 
 --
+-- Name: controles_calidad controles_calidad_created_by_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
+--
+
+ALTER TABLE ONLY public.controles_calidad
+    ADD CONSTRAINT controles_calidad_created_by_id_fkey FOREIGN KEY (created_by_id) REFERENCES public.usuarios(id) ON DELETE SET NULL;
+
+
+--
+-- Name: controles_calidad controles_calidad_firmado_por_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
+--
+
+ALTER TABLE ONLY public.controles_calidad
+    ADD CONSTRAINT controles_calidad_firmado_por_id_fkey FOREIGN KEY (firmado_por_id) REFERENCES public.usuarios(id) ON DELETE SET NULL;
+
+
+--
+-- Name: controles_calidad controles_calidad_producto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
+--
+
+ALTER TABLE ONLY public.controles_calidad
+    ADD CONSTRAINT controles_calidad_producto_id_fkey FOREIGN KEY (producto_id) REFERENCES public.productos(id) ON DELETE SET NULL;
+
+
+--
 -- Name: historial_precios historial_precios_producto_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: loga
 --
 
@@ -11431,5 +11537,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE adrianmartinlopez IN SCHEMA public GRANT SELEC
 -- PostgreSQL database dump complete
 --
 
-\unrestrict xFIz3fVLRIqKES8T7hyzDtZdpe7mTSH90E4ktgdW9gUSV8nZav4ghsANuT6kfwy
+\unrestrict mFlozdQXNJSizf5izEN3hUoyn1uGNbTHCjGVbaUd4Aw5k1nBmhKsiIqyEIl1r0Q
 

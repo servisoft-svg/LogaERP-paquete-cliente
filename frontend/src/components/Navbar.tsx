@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Factory, Layers, Bell,
   Package, ChefHat, Truck, Users, ShoppingBag, BarChart3, Settings, LogOut, MoreHorizontal, X, Zap,
-  Moon, Sun,
+  Moon, Sun, ClipboardCheck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useNotificaciones } from '../hooks/useNotificaciones';
@@ -20,6 +20,7 @@ const LINKS = [
   { to: '/clientes',       label: 'Clientes',    icon: Users            },
   { to: '/pedidos',        label: 'Pedidos',     icon: ShoppingBag      },
   { to: '/finanzas',       label: 'Finanzas',    icon: BarChart3        },
+  { to: '/control-calidad',label: 'Calidad',     icon: ClipboardCheck   },
   { to: '/automatizaciones', label: 'Auto',     icon: Zap              },
   { to: '/configuracion',  label: 'Config.',     icon: Settings         },
 ];
