@@ -59,6 +59,8 @@ export interface Producto {
   granel_nombre?: string;
   granel_stock?: string;
   granel_unidad?: string;
+  // Nº CAS (Chemical Abstracts Service)
+  numero_cas?: string | null;
   // Specs físico-químicas (materia prima)
   solidos_min?: string | null;
   solidos_max?: string | null;

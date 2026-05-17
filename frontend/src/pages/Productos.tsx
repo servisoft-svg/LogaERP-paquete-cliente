@@ -39,6 +39,7 @@ const UNIDADES = ['kg', 'g', 'L', 'mL', 'ud', 'caja', 'saco', 't'];
 interface FormData {
   codigo: string;
   nombre: string;
+  numero_cas: string;
   descripcion: string;
   tipo: TipoProducto;
   unidad_medida: string;
@@ -63,7 +64,7 @@ interface FormData {
 interface LoteDisponible { id: string; lote_interno: string; lote_proveedor?: string; cantidad_actual: string; cantidad_inicial?: string; fecha_caducidad?: string; }
 
 const EMPTY: FormData = {
-  codigo: '', nombre: '', descripcion: '', tipo: 'materia_prima',
+  codigo: '', nombre: '', numero_cas: '', descripcion: '', tipo: 'materia_prima',
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
   precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
   solidos_min: '', solidos_max: '', ph_min: '', ph_max: '', viscosidad_min: '', viscosidad_max: '',
@@ -238,6 +239,7 @@ export default function Productos() {
     setForm({
       codigo:          p.codigo,
       nombre:          p.nombre,
+      numero_cas:      (p as any).numero_cas ?? '',
       descripcion:     p.descripcion ?? '',
       tipo:            p.tipo,
       unidad_medida:   p.unidad_medida,
@@ -1291,6 +1293,15 @@ export default function Productos() {
               value={form.nombre}
               onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))}
               placeholder="Acetato de polivinilo 88%"
+            />
+          </FormField>
+
+          <FormField label="Nº CAS" hint="Chemical Abstracts Service. Identificador único de la sustancia química. Ej: 7732-18-5 (agua)">
+            <Input
+              value={form.numero_cas}
+              onChange={(e) => setForm((f) => ({ ...f, numero_cas: e.target.value }))}
+              placeholder="Ej: 9003-20-7"
+              className="font-mono"
             />
           </FormField>
 

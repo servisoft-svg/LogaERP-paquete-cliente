@@ -163,6 +163,7 @@ router.post('/', adminOnly, async (req, res) => {
       nombre, descripcion, tipo, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
       peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses,
+      numero_cas,
     } = req.body;
 
     // Auto-generar codigo si no viene
@@ -186,9 +187,9 @@ router.post('/', adminOnly, async (req, res) => {
       `INSERT INTO productos
          (codigo, nombre, descripcion, tipo, unidad_medida,
           stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
-          peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses)
+          peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses, numero_cas)
        VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10,
-               $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER)
+               $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER,$15)
        RETURNING *`,
       [
         codigo.trim().toUpperCase(),
@@ -209,6 +210,7 @@ router.post('/', adminOnly, async (req, res) => {
           ? Number(peso_plastico_kg).toFixed(4) : null,
         caducidad_meses != null && caducidad_meses !== '' && Number(caducidad_meses) > 0
           ? Math.floor(Number(caducidad_meses)) : null,
+        numero_cas != null && String(numero_cas).trim() !== '' ? String(numero_cas).trim() : null,
       ]
     );
     invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
@@ -230,6 +232,8 @@ router.put('/:id', adminOnly, async (req, res) => {
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id, activo, caducidad_meses, peso_unitario_kg, peso_plastico_kg, unidades_por_envase,
       // Specs físico-químicas (materias primas)
       solidos_min, solidos_max, ph_min, ph_max, viscosidad_min, viscosidad_max,
+      // Identificador químico
+      numero_cas,
       reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
@@ -312,7 +316,8 @@ router.put('/:id', adminOnly, async (req, res) => {
          ph_min         = $19::NUMERIC,
          ph_max         = $20::NUMERIC,
          viscosidad_min = $21::NUMERIC,
-         viscosidad_max = $22::NUMERIC
+         viscosidad_max = $22::NUMERIC,
+         numero_cas     = $23
        WHERE id = $11
        RETURNING *`,
       [
@@ -340,6 +345,7 @@ router.put('/:id', adminOnly, async (req, res) => {
         ph_max         != null && ph_max         !== '' ? Number(ph_max)         : null,
         viscosidad_min != null && viscosidad_min !== '' ? Number(viscosidad_min) : null,
         viscosidad_max != null && viscosidad_max !== '' ? Number(viscosidad_max) : null,
+        numero_cas != null && String(numero_cas).trim() !== '' ? String(numero_cas).trim() : null,
       ]
     );
 
