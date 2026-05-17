@@ -273,7 +273,7 @@ export default function ControlCalidad() {
 
       {/* Modal nuevo registro */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3">
               <h2 className="text-lg font-bold text-gray-900">Nuevo registro — {tabInfo.label}</h2>
