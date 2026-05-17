@@ -9,3 +9,6 @@ backups/
 .postgres_password.txt
 logs/
 .claude/
+
+# Ya no se versiona .env (logaerp.bat / install.ps1 lo crean automaticamente
+# en Windows con puerto 5433; en Mac dev usar puerto 5432 manualmente)

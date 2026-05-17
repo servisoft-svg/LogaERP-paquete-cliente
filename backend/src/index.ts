@@ -320,8 +320,19 @@ async function startup() {
     try {
       await runMigrations();
     } catch (err) {
-      logger.error('[startup] FALLO APLICANDO MIGRACIONES — backend NO arranca', { err: err instanceof Error ? err.message : err });
-      process.exit(1);
+      // Log detallado (stack + objeto completo) para no quedarnos sin diagnostico.
+      const msg = err instanceof Error ? (err.message || err.stack || 'sin mensaje') : String(err);
+      logger.error('[startup] FALLO APLICANDO MIGRACIONES', {
+        msg,
+        stack: err instanceof Error ? err.stack : undefined,
+        raw: err,
+      });
+      // Si MIGRATIONS_FAIL_SOFT=true, arranca igualmente (modo recovery). Default: muere.
+      if (process.env.MIGRATIONS_FAIL_SOFT === 'true') {
+        logger.warn('[startup] continuando pese al fallo (MIGRATIONS_FAIL_SOFT=true)');
+      } else {
+        process.exit(1);
+      }
     }
   } else {
     logger.warn('[startup] migraciones SALTADAS por SKIP_MIGRATIONS=true');
