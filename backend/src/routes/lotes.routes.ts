@@ -58,6 +58,8 @@ router.post('/', async (req, res) => {
       fecha_caducidad, fecha_fabricacion, ubicacion, observaciones, estado, precio_compra,
       // Valores medidos del lote (físico-químicos)
       solidos, ph, viscosidad,
+      // Coste de porte/transporte
+      porte,
     } = req.body;
 
     const qty = cantidad ?? cantidad_inicial;
@@ -96,9 +98,9 @@ router.post('/', async (req, res) => {
         `INSERT INTO lotes
            (producto_id, lote_interno, lote_proveedor, cantidad_inicial, cantidad_actual,
             fecha_fabricacion, fecha_caducidad, ubicacion, observaciones, estado, precio_compra,
-            solidos, ph, viscosidad)
+            solidos, ph, viscosidad, porte)
          VALUES ($1,$2,$3,$4::NUMERIC,$5::NUMERIC,$6,$7,$8,$9,COALESCE($10::estado_lote,'cuarentena'),$11::NUMERIC,
-                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC)
+                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC,$15::NUMERIC)
          RETURNING *`,
         [
           producto_id,
@@ -115,6 +117,7 @@ router.post('/', async (req, res) => {
           solidos    != null && solidos    !== '' ? Number(solidos)    : null,
           ph         != null && ph         !== '' ? Number(ph)         : null,
           viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
+          porte      != null && porte      !== '' ? Number(porte)      : 0,
         ]
       );
       lote = result.rows[0];
@@ -207,7 +210,7 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad } = req.body;
+    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad, porte } = req.body;
 
     if (cantidad_actual != null && Number(cantidad_actual) < 0) {
       return res.status(400).json({ error: 'La cantidad no puede ser negativa' });
@@ -225,13 +228,15 @@ router.put('/:id', async (req, res) => {
         precio_compra = COALESCE($4::NUMERIC, precio_compra),
         solidos    = COALESCE($6::NUMERIC, solidos),
         ph         = COALESCE($7::NUMERIC, ph),
-        viscosidad = COALESCE($8::NUMERIC, viscosidad)
+        viscosidad = COALESCE($8::NUMERIC, viscosidad),
+        porte      = COALESCE($9::NUMERIC, porte)
        WHERE id = $5 RETURNING *`,
       [
         cantidad_actual ?? null, ubicacion ?? null, observaciones ?? null, precio_compra ?? null, req.params.id,
         solidos    != null && solidos    !== '' ? Number(solidos)    : null,
         ph         != null && ph         !== '' ? Number(ph)         : null,
         viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
+        porte      != null && porte      !== '' ? Number(porte)      : null,
       ]
     );
     if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });

@@ -162,6 +162,7 @@ export default function Productos() {
   const [stockCaducidad, setStockCaducidad]         = useState('');
   const [stockUbicacion, setStockUbicacion]         = useState('');
   const [stockPrecio, setStockPrecio]               = useState('');
+  const [stockPorte, setStockPorte]                 = useState('');
   const [stockSolidos, setStockSolidos]             = useState('');
   const [stockPh, setStockPh]                       = useState('');
   const [stockViscosidad, setStockViscosidad]       = useState('');
@@ -388,6 +389,7 @@ export default function Productos() {
     setStockCaducidad(cadDefault.toISOString().slice(0, 10));
     setStockUbicacion('');
     setStockPrecio(p.precio_unitario ?? '');
+    setStockPorte('');
     setStockSolidos('');
     setStockPh('');
     setStockViscosidad('');
@@ -419,6 +421,7 @@ export default function Productos() {
         estado:            'aprobado',
         ubicacion:         stockUbicacion.trim() || null,
         precio_compra:     stockPrecio ? Number(stockPrecio) : undefined,
+        porte:             stockPorte ? Number(stockPorte) : 0,
         solidos:    stockSolidos    !== '' ? Number(stockSolidos)    : null,
         ph:         stockPh         !== '' ? Number(stockPh)         : null,
         viscosidad: stockViscosidad !== '' ? Number(stockViscosidad) : null,
@@ -1103,6 +1106,47 @@ export default function Productos() {
                     {Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'Subida' : 'Bajada'}: {((Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) / parseFloat(stockProducto.precio_unitario) * 100).toFixed(1)}%
                   </p>
                 )}
+              </FormField>
+            )}
+
+            {/* Porte + total calculado — solo admin */}
+            {isAdmin && (
+              <FormField label="Porte / Transporte (EUR)" hint="Coste adicional del envío. Se suma al precio total del lote.">
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number" min="0" step="0.01"
+                    value={stockPorte}
+                    onChange={(e) => setStockPorte(e.target.value)}
+                    placeholder="0.00"
+                    className="flex-1 font-mono"
+                  />
+                  <span className="text-xs text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">EUR</span>
+                </div>
+                {/* Resumen de coste total del lote */}
+                {(() => {
+                  const cant = parseFloat(stockCantidad || '0');
+                  const precio = parseFloat(stockPrecio || '0');
+                  const porte = parseFloat(stockPorte || '0');
+                  const subtotal = cant * precio;
+                  const total = subtotal + porte;
+                  if (cant <= 0 || (precio <= 0 && porte <= 0)) return null;
+                  return (
+                    <div className="mt-2 rounded-lg bg-emerald-50/50 border border-emerald-100 px-3 py-2 text-xs space-y-0.5 font-mono">
+                      <div className="flex justify-between text-gray-600">
+                        <span>Producto ({cant} × {precio.toFixed(2)})</span>
+                        <span>{subtotal.toFixed(2)} EUR</span>
+                      </div>
+                      <div className="flex justify-between text-gray-600">
+                        <span>Porte</span>
+                        <span>{porte.toFixed(2)} EUR</span>
+                      </div>
+                      <div className="flex justify-between border-t border-emerald-200 pt-0.5 mt-1 font-bold text-emerald-700">
+                        <span>COSTE TOTAL DEL LOTE</span>
+                        <span>{total.toFixed(2)} EUR</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </FormField>
             )}
 
