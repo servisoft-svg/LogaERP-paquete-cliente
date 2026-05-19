@@ -137,17 +137,101 @@ router.post('/', async (req, res) => {
       );
       lote = result.rows[0];
 
-      // Inserta valores de specs dinámicas si vinieron
+      // Inserta valores de specs dinámicas si vinieron + crea control de calidad
+      // analítico firmado automáticamente con esos mismos valores (un único registro
+      // de QC por lote que el responsable puede ver/ampliar luego en Calidad).
       if (Array.isArray(specs_valores) && specs_valores.length > 0) {
-        for (const sv of specs_valores) {
-          if (sv?.spec_id == null) continue;
-          if (sv.valor == null || sv.valor === '') continue;
+        const valoresFiltrados = specs_valores.filter((sv: { spec_id?: number; valor?: string | number }) =>
+          sv?.spec_id != null && sv.valor != null && sv.valor !== ''
+        );
+
+        for (const sv of valoresFiltrados) {
           await client.query(
             `INSERT INTO lote_specs (lote_id, spec_id, valor)
              VALUES ($1, $2, $3::NUMERIC)
              ON CONFLICT (lote_id, spec_id) DO UPDATE SET valor = EXCLUDED.valor`,
             [lote.id, sv.spec_id, Number(sv.valor)]
           );
+        }
+
+        // ── Auto-crear control de calidad analítico ──────────────────────
+        // Solo si hay al menos un valor introducido. Evalúa APTO/NO APTO comparando
+        // con los rangos del producto. Firmado por el usuario actual.
+        if (valoresFiltrados.length > 0) {
+          try {
+            const userId = (req as any).user?.id ?? null;
+            let firmadoPorNombre: string | null = null;
+            if (userId) {
+              const { rows: [u] } = await client.query(`SELECT nombre FROM usuarios WHERE id = $1`, [userId]);
+              firmadoPorNombre = u?.nombre ?? null;
+            }
+            // Carga specs del producto para evaluar rango → resultado
+            const { rows: rangos } = await client.query(
+              `SELECT ps.spec_id, sc.nombre, sc.unidad, ps.min_valor, ps.max_valor
+               FROM producto_specs ps JOIN spec_catalogo sc ON sc.id = ps.spec_id
+               WHERE ps.producto_id = $1`,
+              [producto_id]
+            );
+            const rangosMap = new Map<number, { nombre: string; unidad: string | null; min: number | null; max: number | null }>();
+            for (const r of rangos) rangosMap.set(r.spec_id, {
+              nombre: r.nombre, unidad: r.unidad,
+              min: r.min_valor != null ? parseFloat(r.min_valor) : null,
+              max: r.max_valor != null ? parseFloat(r.max_valor) : null,
+            });
+            let resultado: 'apto' | 'no_apto' = 'apto';
+            for (const sv of valoresFiltrados) {
+              const r = rangosMap.get(sv.spec_id);
+              if (!r) continue;
+              const v = Number(sv.valor);
+              if ((r.min != null && v < r.min) || (r.max != null && v > r.max)) {
+                resultado = 'no_apto'; break;
+              }
+            }
+
+            // Detecta columna estado (migración 045)
+            const { rows: [meta] } = await client.query(
+              `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='controles_calidad' AND column_name='estado') AS has_estado`
+            );
+            const hasEstado = !!meta?.has_estado;
+
+            // Mapea a campos legacy
+            let phVal: number | null = null, solVal: number | null = null, viscVal: number | null = null;
+            const valoresFull: { spec_id: number; nombre: string; valor: number; unidad: string | null }[] = [];
+            for (const sv of valoresFiltrados) {
+              const r = rangosMap.get(sv.spec_id);
+              const nombre = r?.nombre ?? '';
+              const v = Number(sv.valor);
+              valoresFull.push({ spec_id: sv.spec_id, nombre, valor: v, unidad: r?.unidad ?? null });
+              if (nombre === 'pH') phVal = v;
+              if (nombre === 'Sólidos') solVal = v;
+              if (nombre === 'Viscosidad') viscVal = v;
+            }
+
+            const ccCols = `tipo, fecha, lote_codigo, producto_id, producto_nombre,
+                            ph_valor, solidos_valor, viscosidad_valor,
+                            resultado, firmado_por_id, firmado_por_nombre, firmado_at, created_by_id`;
+            const ccVals = `'analitico', CURRENT_DATE, $1, $2, (SELECT nombre FROM productos WHERE id = $2),
+                            $3::NUMERIC, $4::NUMERIC, $5::NUMERIC,
+                            $6, $7, $8, NOW(), $7`;
+            const ccParams: unknown[] = [lote.lote_interno, producto_id, phVal, solVal, viscVal, resultado, userId, firmadoPorNombre];
+            const sqlCC = hasEstado
+              ? `INSERT INTO controles_calidad (${ccCols}, estado) VALUES (${ccVals}, 'completado') RETURNING id`
+              : `INSERT INTO controles_calidad (${ccCols}) VALUES (${ccVals}) RETURNING id`;
+            const { rows: [cc] } = await client.query(sqlCC, ccParams);
+
+            // Guarda valores en tabla nueva (si existe)
+            try {
+              for (const v of valoresFull) {
+                await client.query(
+                  `INSERT INTO controles_calidad_valores (control_id, spec_id, nombre, valor, unidad)
+                   VALUES ($1, $2, $3, $4::NUMERIC, $5)`,
+                  [cc.id, v.spec_id, v.nombre, v.valor, v.unidad]
+                );
+              }
+            } catch { /* migración 047 puede no estar */ }
+          } catch (e) {
+            console.warn('[POST /lotes] Auto-crear control de calidad falló:', (e as Error).message);
+          }
         }
       }
 
