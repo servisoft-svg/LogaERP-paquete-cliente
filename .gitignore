@@ -1,0 +1,21 @@
+# Secretos — NUNCA commitear
+backend/.env
+backend/.env.PRODUCCION
+backend/.env.local
+backend/.env.development
+
+# Dependencias
+node_modules/
+npm-debug.log
+
+# Logs
+*.log
+logaerp.log
+
+# Backups locales
+backups/
+*.sql.gz.enc
+
+# Sistema
+.DS_Store
+Thumbs.db
