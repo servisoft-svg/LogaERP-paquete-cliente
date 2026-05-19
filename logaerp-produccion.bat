@@ -48,15 +48,30 @@ if errorlevel 1 (
 echo       OK
 
 REM ===== 3. .env existe? =====
-echo [3/4] Verificando configuracion...
+echo [3/5] Verificando configuracion...
 if not exist "backend\.env" (
   echo [X] Falta backend\.env. Renombra backend\.env.PRODUCCION a backend\.env.
   pause & exit /b 1
 )
 echo       OK
 
-REM ===== 4. Arrancar backend (puerto 5173, sirve frontend tambien) =====
-echo [4/4] Arrancando backend + frontend en puerto 5173...
+REM ===== 4. Dependencias del backend =====
+echo [4/5] Comprobando dependencias del backend...
+if not exist "backend\node_modules\.bin\tsx.cmd" (
+  echo       Faltan dependencias. Instalando ^(puede tardar varios minutos^)...
+  pushd backend
+  call npm install >> "%LOGFILE%" 2>&1
+  set "NPM_EXIT=!errorlevel!"
+  popd
+  if not "!NPM_EXIT!"=="0" (
+    echo [X] npm install fallo ^(codigo !NPM_EXIT!^). Revisa %LOGFILE%.
+    pause & exit /b 1
+  )
+)
+echo       OK
+
+REM ===== 5. Arrancar backend (puerto 5173, sirve frontend tambien) =====
+echo [5/5] Arrancando backend + frontend en puerto 5173...
 echo.
 echo  ============================================================
 echo    Acceso al ERP:  http://localhost:5173
