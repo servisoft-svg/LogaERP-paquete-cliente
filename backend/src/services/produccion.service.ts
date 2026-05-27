@@ -84,7 +84,9 @@ class ProduccionService {
       );
 
       if (!orden) throw new Error('ORDEN_NO_ENCONTRADA');
-      if (!['borrador', 'confirmada'].includes(orden.estado)) {
+      // 'en_proceso' aparece cuando ha habido dosificaciones parciales. Permitir
+      // confirmar también desde ese estado (backend ya evita doble descuento).
+      if (!['borrador', 'confirmada', 'en_proceso'].includes(orden.estado)) {
         throw new Error(`ESTADO_INVALIDO:${orden.estado}`);
       }
 
@@ -178,9 +180,30 @@ class ProduccionService {
         overrideMap.set(o.materia_prima_id, o.cantidad);
       }
 
+      // Dosificaciones parciales ya efectuadas (descontaron stock al instante
+      // vía /produccion/:id/dosificar). Para evitar doble descuento, se resta
+      // este total al consumo que toca al finalizar la orden.
+      const { rows: dosificadasRows } = await client.query<{ producto_id: string; total: string }>(
+        `SELECT producto_id, COALESCE(SUM(cantidad), 0) AS total
+         FROM dosificaciones_orden WHERE orden_id = $1
+         GROUP BY producto_id`,
+        [ordenId]
+      );
+      const dosificadasMap = new Map<string, number>(
+        dosificadasRows.map(r => [r.producto_id, toNum(r.total)])
+      );
+
       for (const ing of ingredientes) {
         const cantidadTeorica = ing.cantidad_base * multiplicador * (1 + ing.porcentaje_merma / 100);
-        const cantidadReal = overrideMap.get(ing.materia_prima_id) ?? cantidadTeorica;
+        const cantidadObjetivo = overrideMap.get(ing.materia_prima_id) ?? cantidadTeorica;
+        const yaDosificado = dosificadasMap.get(ing.materia_prima_id) ?? 0;
+        const cantidadReal = Math.max(0, cantidadObjetivo - yaDosificado);
+
+        // Si todo ya fue dosificado (cantidadReal=0), saltar el FIFO de este ing.
+        if (cantidadReal <= 1e-6) {
+          consumosLog.push({ producto: ing.nombre_mp, cantidad_consumida: yaDosificado, lotes_usados: [] });
+          continue;
+        }
 
         // Lotes disponibles FIFO (excluir cantidades reservadas)
         const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(

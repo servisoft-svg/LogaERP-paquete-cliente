@@ -36,18 +36,32 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// Normaliza un array/string de emails → array de emails limpios y únicos
+function normalizarEmails(input: unknown): string[] {
+  if (!input) return [];
+  const raw = Array.isArray(input) ? input.join(',') : String(input);
+  const out = new Set<string>();
+  for (const e of raw.split(/[,;\n]/)) {
+    const t = e.trim().toLowerCase();
+    if (t) out.add(t);
+  }
+  return Array.from(out);
+}
+
 // POST /api/proveedores
 router.post('/', adminOnly, async (req, res) => {
   try {
-    const { nombre, email, telefono, direccion } = req.body;
+    const { nombre, email, telefono, direccion, emails_adicionales } = req.body;
     if (!nombre || !email) {
       return res.status(400).json({ error: 'nombre y email son obligatorios' });
     }
+    const adicionales = normalizarEmails(emails_adicionales);
     const { rows: [prov] } = await pool.query(
-      `INSERT INTO proveedores (nombre, email, telefono, direccion)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO proveedores (nombre, email, telefono, direccion, emails_adicionales)
+       VALUES ($1, $2, $3, $4, $5::TEXT[])
        RETURNING *`,
-      [nombre.trim(), email.trim().toLowerCase(), telefono ?? null, direccion ?? null]
+      [nombre.trim(), email.trim().toLowerCase(), telefono ?? null, direccion ?? null,
+       adicionales.length > 0 ? adicionales : null]
     );
     return res.status(201).json(prov);
   } catch (err: unknown) {
@@ -58,18 +72,22 @@ router.post('/', adminOnly, async (req, res) => {
 // PUT /api/proveedores/:id
 router.put('/:id', adminOnly, async (req, res) => {
   try {
-    const { nombre, email, telefono, direccion, activo } = req.body;
+    const { nombre, email, telefono, direccion, activo, emails_adicionales } = req.body;
+    const adicionales = emails_adicionales !== undefined ? normalizarEmails(emails_adicionales) : null;
     const { rows: [prov] } = await pool.query(
       `UPDATE proveedores SET
-         nombre    = COALESCE($1, nombre),
-         email     = COALESCE($2, email),
-         telefono  = $3,
-         direccion = $4,
-         activo    = COALESCE($5, activo)
-       WHERE id = $6
+         nombre              = COALESCE($1, nombre),
+         email               = COALESCE($2, email),
+         telefono            = $3,
+         direccion           = $4,
+         activo              = COALESCE($5, activo),
+         emails_adicionales  = COALESCE($6::TEXT[], emails_adicionales)
+       WHERE id = $7
        RETURNING *`,
       [nombre?.trim() ?? null, email?.trim().toLowerCase() ?? null,
-       telefono ?? null, direccion ?? null, activo ?? null, req.params.id]
+       telefono ?? null, direccion ?? null, activo ?? null,
+       adicionales,
+       req.params.id]
     );
     if (!prov) return res.status(404).json({ error: 'Proveedor no encontrado' });
     return res.json(prov);

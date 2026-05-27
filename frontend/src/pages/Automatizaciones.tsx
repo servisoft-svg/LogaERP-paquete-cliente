@@ -1181,6 +1181,8 @@ function ReglaWizard({ plantilla, editando, productos, onClose, onSaved }: {
   const [destinatario, setDestinatario] = useState<string>(String(editando?.accion_config?.destinatario_email ?? ''));
   const [nombre, setNombre] = useState<string>(editando?.nombre ?? initialPlantilla.titulo);
   const [activa, setActiva] = useState<boolean>(editando?.activa ?? true);
+  const [activarDesde, setActivarDesde] = useState<string>(String((editando?.trigger_config as { activar_desde?: string } | undefined)?.activar_desde ?? ''));
+  const [umbralCustom, setUmbralCustom] = useState<string>(String((editando?.trigger_config as { umbral?: number | string } | undefined)?.umbral ?? ''));
   const [saving, setSaving] = useState(false);
   const [proveedoresMap, setProveedoresMap] = useState<Record<string, { email?: string; nombre?: string }>>({});
 
@@ -1211,7 +1213,10 @@ function ReglaWizard({ plantilla, editando, productos, onClose, onSaved }: {
         icono: initialPlantilla.id,
         color: initialPlantilla.color,
         trigger_tipo: initialPlantilla.trigger,
-        trigger_config: {},
+        trigger_config: {
+          ...(activarDesde ? { activar_desde: activarDesde } : {}),
+          ...(umbralCustom && !isNaN(Number(umbralCustom)) ? { umbral: Number(umbralCustom) } : {}),
+        },
         accion_tipo: initialPlantilla.accion,
         accion_config: {
           ...(cantidadFija ? { cantidad_fija: parseFloat(cantidadFija) } : {}),
@@ -1356,6 +1361,37 @@ function ReglaWizard({ plantilla, editando, productos, onClose, onSaved }: {
                   className="h-4 w-4 rounded text-loga-red focus:ring-loga-red" />
                 Activar la regla al guardar
               </label>
+
+              {initialPlantilla.trigger === 'stock_bajo_minimo' && (
+                <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50/40 p-3 space-y-3">
+                  <p className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">Condiciones extra (opcionales)</p>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide block mb-1">
+                      Umbral custom
+                    </label>
+                    <input
+                      type="number" step="0.01" min="0"
+                      value={umbralCustom}
+                      onChange={(e) => setUmbralCustom(e.target.value)}
+                      placeholder="Ej: 100 (usa stock mínimo del producto si vacío)"
+                      className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-full"
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">Si lo dejas vacío usa el stock mínimo definido en cada producto.</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide block mb-1">
+                      Activar desde
+                    </label>
+                    <input
+                      type="date"
+                      value={activarDesde}
+                      onChange={(e) => setActivarDesde(e.target.value)}
+                      className="rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">Por defecto la regla actúa siempre. Si pones fecha, no se ejecuta hasta ese día.</p>
+                  </div>
+                </div>
+              )}
 
               {/* Resumen */}
               <div className="mt-5 rounded-xl border border-gray-100 bg-gray-50 p-4 space-y-2">

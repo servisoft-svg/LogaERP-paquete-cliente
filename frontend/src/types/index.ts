@@ -20,6 +20,8 @@ export interface Proveedor {
   id: string;
   nombre: string;
   email: string;
+  emails_adicionales?: string[] | null;
+  ultimos_destinatarios?: string[] | null;
   telefono?: string;
   direccion?: string;
   activo: boolean;
@@ -43,6 +45,8 @@ export interface Producto {
   proveedor_id?: string;
   proveedor_nombre?: string;
   proveedor_email?: string;
+  proveedor_emails_adicionales?: string[] | null;
+  proveedor_ultimos_destinatarios?: string[] | null;
   porcentaje_stock?: string;
   porcentaje_alerta?: string;
   alerta_activa?: boolean;
@@ -61,13 +65,40 @@ export interface Producto {
   granel_unidad?: string;
   // Nº CAS (Chemical Abstracts Service)
   numero_cas?: string | null;
-  // Specs físico-químicas (materia prima)
+  // Specs físico-químicas (materia prima) — legacy, sustituido por producto_specs
   solidos_min?: string | null;
   solidos_max?: string | null;
   ph_min?: string | null;
   ph_max?: string | null;
   viscosidad_min?: string | null;
   viscosidad_max?: string | null;
+  // Sub-categoría libre para materias primas (resina, agua, otros…)
+  subcategoria_mp?: string | null;
+  // Flag: materia prima usada como aditivo
+  es_aditivo?: boolean;
+  // Mensaje opcional de confirmación en fabricación (ej: "verifica viscosidad")
+  confirmacion_msg?: string | null;
+}
+
+export interface SpecCatalogo {
+  id: number;
+  nombre: string;
+  unidad?: string | null;
+  decimales: number;
+  rango_min?: string | null;
+  rango_max?: string | null;
+  activo: boolean;
+}
+
+export interface ProductoSpec {
+  spec_id: number;
+  nombre: string;
+  unidad?: string | null;
+  decimales: number;
+  min_valor?: string | null;
+  max_valor?: string | null;
+  orden: number;
+  parametros?: Record<string, string | number | null> | null;
 }
 
 export interface Lote {
@@ -106,6 +137,7 @@ export interface IngredienteReceta {
   stock_actual?: string;
   stock_disponible?: string;
   sds_url?: string | null;
+  confirmacion_msg?: string | null;
 }
 
 export interface Receta {
@@ -132,6 +164,8 @@ export interface Receta {
   viscosidad_max?: string;
   pasos?: PasoReceta[];
   tipo_receta?: 'fabricacion' | 'envasado';
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface PasoReceta {
@@ -142,6 +176,10 @@ export interface PasoReceta {
   duracion_min?: number;
   ingredientes_ids?: string[];
   color?: string;
+  // Cantidad de agua a echar en este paso concreto (subdivide el total de
+  // agua del ingrediente entre varios pasos). Solo aplica si la receta tiene
+  // agua como ingrediente.
+  cantidad_agua?: number | string;
   // Limpieza
   producto_limpieza?: string;
   limpieza_externa?: boolean;

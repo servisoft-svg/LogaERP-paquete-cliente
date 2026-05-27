@@ -70,10 +70,18 @@ interface BackupFile {
   path: string;
 }
 
-function getBackupPassword(): string {
+async function getBackupPassword(): Promise<string> {
+  // 1) Prioridad: contraseña guardada en BD (configurable desde la UI).
+  try {
+    const { pool } = await import('../db/pool');
+    const { rows: [c] } = await pool.query(`SELECT backup_password FROM configuracion_global WHERE id = 1`);
+    const fromDb = c?.backup_password as string | null;
+    if (fromDb && fromDb.length >= 12) return fromDb;
+  } catch { /* migración 048 puede no estar aplicada */ }
+  // 2) Fallback: variable de entorno
   const pw = process.env.BACKUP_PASSWORD;
   if (!pw || pw.length < 12) {
-    throw new Error('BACKUP_PASSWORD no configurada o demasiado corta (mínimo 12 caracteres). Define la variable de entorno antes de hacer backup.');
+    throw new Error('Contraseña de backup no configurada (mínimo 12 caracteres). Configúrala en Configuración → Backup o define BACKUP_PASSWORD en .env.');
   }
   return pw;
 }
@@ -84,16 +92,43 @@ function getBackupPassword(): string {
  * (excepto el tar de uploads que se buffer-iza para base64 — uploads suele ser <50MB).
  */
 async function* assembleSource(cwd: string, hasUploads: boolean): AsyncGenerator<Buffer> {
-  const dump = spawn('pg_dump', ['loga_erp'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Usa DATABASE_URL si está definido (más fiable que asumir BD 'loga_erp').
+  const dbUrl = process.env.DATABASE_URL;
+  const dumpArgs = dbUrl ? ['--dbname', dbUrl] : ['loga_erp'];
+  let dump;
+  try {
+    dump = spawn('pg_dump', dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    throw new Error(`No se pudo lanzar pg_dump: ${(e as Error).message}. ¿Está instalado y en PATH?`);
+  }
   let dumpErr = '';
+  let dumpSpawnErr: Error | null = null;
   dump.stderr.on('data', (d: Buffer) => { dumpErr += d.toString(); });
+  dump.on('error', (e) => { dumpSpawnErr = e; });
 
   for await (const chunk of dump.stdout) {
     yield chunk as Buffer;
   }
   const dumpCode: number = await new Promise(r => dump.on('close', (c) => r(c ?? -1)));
+  if (dumpSpawnErr) {
+    const code = (dumpSpawnErr as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw new Error('pg_dump no encontrado. Instala postgresql-client y asegúrate de que está en PATH (which pg_dump).');
+    }
+    throw new Error(`pg_dump no se pudo iniciar: ${(dumpSpawnErr as Error).message}`);
+  }
   if (dumpCode !== 0) {
-    throw new Error(`pg_dump falló (exit ${dumpCode}): ${dumpErr.slice(0, 500)}`);
+    // Mensajes típicos de pg_dump más útiles
+    const errClean = dumpErr.trim().slice(0, 500);
+    let hint = '';
+    if (/role .* does not exist|FATAL.*authentication|peer authentication/i.test(errClean)) {
+      hint = ' Configura PGUSER/PGPASSWORD o DATABASE_URL con usuario válido.';
+    } else if (/database .* does not exist/i.test(errClean)) {
+      hint = ' La BD no existe o el nombre es incorrecto. Define DATABASE_URL.';
+    } else if (/server version|version mismatch/i.test(errClean)) {
+      hint = ' Versión de pg_dump no coincide con la del servidor. Instala la misma versión.';
+    }
+    throw new Error(`pg_dump falló (exit ${dumpCode}): ${errClean}.${hint}`);
   }
 
   if (hasUploads) {
@@ -175,7 +210,7 @@ export function ejecutarBackup(): Promise<BackupResult> {
 }
 
 async function ejecutarBackupInterno(): Promise<BackupResult> {
-  const password = getBackupPassword();
+  const password = await getBackupPassword();
   const now = new Date();
   const yyyy = now.getFullYear();
   const mm   = String(now.getMonth() + 1).padStart(2, '0');
@@ -213,33 +248,74 @@ async function ejecutarBackupInterno(): Promise<BackupResult> {
     throw new Error(`Backup creado pero validación falló: ${msg}. Backups antiguos preservados.`);
   }
 
-  // rclone con execFileSync — args separados, sin shell interpolation
+  // ── A PARTIR DE AQUÍ EL BACKUP LOCAL YA ESTÁ HECHO Y VALIDADO ─────────────
+  // Subir a Drive es OPCIONAL. Si tarda demasiado o falla, no rompe la operación.
   let drive = false;
   let driveError: string | undefined;
+  const DRIVE_TIMEOUT_MS = 60_000;
 
+  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout ${label} >${ms}ms`)), ms)),
+    ]);
+
+  // 1) Intentar API de Google Drive (OAuth configurado desde la UI) con timeout
   try {
-    const remotes = execFileSync('rclone', ['listremotes'], { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-    if (remotes.includes('y:')) {
-      execFileSync('rclone', ['copy', filepath, 'y:Loga-Backups', '--quiet'], { timeout: 120000 });
-      drive = true;
-
-      try {
-        const lsOut = execFileSync('rclone', ['ls', 'y:Loga-Backups'], { timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-        const files = lsOut.trim().split('\n').filter(Boolean)
-          .map(line => line.trim().split(/\s+/).slice(1).join(' '))
-          .filter(isBackupFilename)
-          .sort((a, b) => backupTimestamp(b) - backupTimestamp(a));
-        for (const f of files.slice(10)) {
-          execFileSync('rclone', ['deletefile', `y:Loga-Backups/${f}`, '--quiet'], { timeout: 10000, stdio: 'ignore' });
+    const gdrive = await import('../lib/gdrive');
+    const cfg = await gdrive.loadConfig();
+    if (cfg?.refresh_token) {
+      logger.info('[backup] subiendo a Google Drive…');
+      const result = await withTimeout(gdrive.uploadFile(filepath), DRIVE_TIMEOUT_MS, 'gdrive.upload');
+      if (result?.id) {
+        drive = true;
+        logger.info('[backup] Drive OK', { id: result.id });
+        // Cleanup: mantener solo 10 más recientes (no crítico, con timeout corto)
+        try {
+          const remotos = await withTimeout(gdrive.listBackups(), 15_000, 'gdrive.list');
+          const sorted = remotos
+            .filter(r => isBackupFilename(r.name))
+            .sort((a, b) => (b.modifiedTime ?? '').localeCompare(a.modifiedTime ?? ''));
+          for (const f of sorted.slice(10)) {
+            await withTimeout(gdrive.deleteFile(f.id), 10_000, 'gdrive.delete');
+          }
+        } catch (e) {
+          logger.warn('[backup] cleanup Drive (API) falló', { err: e instanceof Error ? e.message : String(e) });
         }
-      } catch (e) {
-        logger.warn('[backup] cleanup remoto falló', { err: e instanceof Error ? e.message : String(e) });
       }
-    } else {
-      driveError = 'rclone configurado pero falta remote "y:". Ejecuta: rclone config';
     }
   } catch (e) {
-    driveError = `rclone no disponible: ${e instanceof Error ? e.message : 'desconocido'}`;
+    driveError = `Drive: ${e instanceof Error ? e.message : 'desconocido'}`;
+    logger.warn(`[backup] subida a Drive falló (backup local SÍ creado): ${driveError}`);
+  }
+
+  // 2) Fallback a rclone si la API no está disponible/configurada
+  if (!drive) {
+    try {
+      const remotes = execFileSync('rclone', ['listremotes'], { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+      if (remotes.includes('y:')) {
+        execFileSync('rclone', ['copy', filepath, 'y:Loga-Backups', '--quiet'], { timeout: 30000 });
+        drive = true;
+        driveError = undefined;
+
+        try {
+          const lsOut = execFileSync('rclone', ['ls', 'y:Loga-Backups'], { timeout: 30000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+          const files = lsOut.trim().split('\n').filter(Boolean)
+            .map(line => line.trim().split(/\s+/).slice(1).join(' '))
+            .filter(isBackupFilename)
+            .sort((a, b) => backupTimestamp(b) - backupTimestamp(a));
+          for (const f of files.slice(10)) {
+            execFileSync('rclone', ['deletefile', `y:Loga-Backups/${f}`, '--quiet'], { timeout: 10000, stdio: 'ignore' });
+          }
+        } catch (e) {
+          logger.warn('[backup] cleanup remoto falló', { err: e instanceof Error ? e.message : String(e) });
+        }
+      } else if (!driveError) {
+        driveError = 'Drive no configurado. Configúralo en Configuración → Backup → Google Drive.';
+      }
+    } catch (e) {
+      if (!driveError) driveError = `rclone no disponible: ${e instanceof Error ? e.message : 'desconocido'}`;
+    }
   }
 
   // Cleanup local — keep only last 2 (orden cronológico real, no lex)
@@ -367,7 +443,7 @@ export async function restaurarBackup(filepath: string): Promise<{ ok: boolean; 
   }
 
   let password: string;
-  try { password = getBackupPassword(); }
+  try { password = await getBackupPassword(); }
   catch (e) { return { ok: false, message: e instanceof Error ? e.message : 'Error de configuración' }; }
 
   const tmpDir = path.join(BACKUP_DIR, 'tmp_restore');

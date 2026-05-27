@@ -9,14 +9,17 @@ import {
 import clsx from 'clsx';
 import { useNotificaciones } from '../hooks/useNotificaciones';
 import { useAuth } from '../contexts/AuthContext';
+import RecordatorioModal from './RecordatorioModal';
+import PerfilModal from './PerfilModal';
 
 const LINKS = [
   { to: '/',               label: 'Dashboard',   icon: LayoutDashboard },
   { to: '/productos',      label: 'Productos',   icon: Package          },
-  { to: '/recetas',        label: 'Recetas',     icon: ChefHat          },
+  { to: '/recetas',        label: 'Fórmulas',     icon: ChefHat          },
   { to: '/produccion',     label: 'Produccion',  icon: Factory          },
   { to: '/lotes',          label: 'Lotes',       icon: Layers           },
   { to: '/proveedores',    label: 'Proveedores', icon: Truck            },
+  { to: '/solicitudes-compra', label: 'Compras', icon: ShoppingBag       },
   { to: '/clientes',       label: 'Clientes',    icon: Users            },
   { to: '/pedidos',        label: 'Pedidos',     icon: ShoppingBag      },
   { to: '/finanzas',       label: 'Finanzas',    icon: BarChart3        },
@@ -33,6 +36,8 @@ export default function Navbar() {
   const { user, logout, isAdmin } = useAuth();
   const [mobileMenu, setMobileMenu] = useState(false);
   const [dark, setDark] = useState(() => localStorage.getItem('loga_dark') === '1');
+  const [crearAlerta, setCrearAlerta] = useState(false);
+  const [perfilAbierto, setPerfilAbierto] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -41,7 +46,7 @@ export default function Navbar() {
   }, [dark]);
 
   const visibleLinks = LINKS.filter(l => {
-    if (['/proveedores', '/clientes', '/finanzas', '/configuracion', '/automatizaciones'].includes(l.to)) return isAdmin;
+    if (['/proveedores', '/clientes', '/finanzas', '/configuracion', '/automatizaciones', '/solicitudes-compra'].includes(l.to)) return isAdmin;
     return true;
   });
 
@@ -51,26 +56,27 @@ export default function Navbar() {
     <>
       {/* ── Desktop top bar ── */}
       <header className="sticky top-0 z-40 w-full border-b border-gray-100 bg-white/95 backdrop-blur-sm hidden md:block">
-        <div className="mx-auto flex h-14 max-w-screen-xl items-center justify-between pl-1 pr-24 gap-4">
+        <div className="flex h-14 w-full items-center justify-between pl-3 pr-4 gap-4">
           <Link to="/" className="flex items-center gap-3 shrink-0">
             <img src="/colas-loga.png" alt="Loga" className="h-9 w-auto object-contain" />
             <span className="text-base font-bold text-loga-red">Colas Loga</span>
           </Link>
 
-          <nav className="flex items-center gap-0.5">
+          <nav className="flex items-center gap-0.5 flex-1 justify-center min-w-0 overflow-x-auto">
             {visibleLinks.map(({ to, label, icon: Icon }) => {
               const active = pathname === to || (to !== '/' && pathname.startsWith(to));
               return (
                 <Link
                   key={to}
                   to={to}
+                  title={label}
                   className={clsx(
-                    'relative flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium whitespace-nowrap transition-colors',
+                    'relative flex items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium whitespace-nowrap transition-colors shrink-0',
                     active ? 'text-loga-red' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'
                   )}
                 >
                   <Icon size={14} />
-                  {label}
+                  <span className="hidden xl:inline">{label}</span>
                   {active && (
                     <motion.div
                       layoutId="nav-indicator"
@@ -84,31 +90,19 @@ export default function Navbar() {
           </nav>
 
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setCrearAlerta(true)}
+              title="Nuevo recordatorio"
+              className="flex items-center justify-center w-9 h-9 rounded-lg hover:bg-red-50 transition-colors text-gray-500 hover:text-loga-red"
+            >
+              <Bell size={16} />
+            </button>
             <button onClick={() => setDark(d => !d)} className="flex items-center justify-center w-9 h-9 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
               {dark ? <Sun size={16} className="text-amber-400" /> : <Moon size={16} className="text-gray-500" />}
             </button>
-            <Link
-              to="/"
-              className="relative flex items-center justify-center w-9 h-9 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Bell size={18} className="text-gray-500" />
-              <AnimatePresence>
-                {count > 0 && (
-                  <motion.span
-                    key="badge"
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    exit={{ scale: 0 }}
-                    className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-loga-red px-1 text-[10px] font-bold text-white leading-none"
-                  >
-                    {count > 99 ? '99+' : count}
-                  </motion.span>
-                )}
-              </AnimatePresence>
-            </Link>
             <button
-              onClick={logout}
-              title="Cerrar sesion"
+              onClick={() => setPerfilAbierto(true)}
+              title={user ? `${user.nombre} — editar perfil` : 'Mi perfil'}
               className="w-8 h-8 rounded-full bg-loga-red flex items-center justify-center text-white text-xs font-bold select-none hover:bg-loga-red-dark transition-colors cursor-pointer"
             >
               {initials}
@@ -204,6 +198,8 @@ export default function Navbar() {
           )}
         </AnimatePresence>
       </nav>
+      <RecordatorioModal abierto={crearAlerta} onCerrar={() => setCrearAlerta(false)} />
+      <PerfilModal abierto={perfilAbierto} onCerrar={() => setPerfilAbierto(false)} />
     </>
   );
 }

@@ -11,6 +11,7 @@ import { stockApi, produccionApi, pedidosApi, configuracionApi, finanzasApi } fr
 import type { Producto, OrdenProduccion, Notificacion, Pedido } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import RecordatorioModal from '../components/RecordatorioModal';
 import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
@@ -970,46 +971,20 @@ export default function Dashboard() {
         </div>
       </section>
 
-      {/* Modal crear recordatorio */}
-      {nuevoRec && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setNuevoRec(null)} />
-          <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
-            className="relative z-10 w-full max-w-sm rounded-2xl bg-white shadow-2xl p-5 space-y-3">
-            <h3 className="text-sm font-bold text-gray-900">Nuevo recordatorio — {new Date(nuevoRec.fecha + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'long' })}</h3>
-            <input value={nuevoRec.titulo} onChange={e => setNuevoRec({ ...nuevoRec, titulo: e.target.value })} placeholder="¿Qué quieres recordar?" autoFocus
-              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-indigo-400 outline-none" />
-            <div className="flex gap-2">
-              {(['indigo', 'red', 'green'] as const).map(c => (
-                <button key={c} onClick={() => setNuevoRec({ ...nuevoRec, color: c })}
-                  className={clsx('w-6 h-6 rounded-full border-2 transition-all',
-                    c === 'indigo' ? 'bg-indigo-500' : c === 'red' ? 'bg-red-500' : 'bg-emerald-500',
-                    nuevoRec.color === c ? 'border-gray-900 scale-110' : 'border-transparent'
-                  )} />
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setNuevoRec(null)} className="flex-1 rounded-lg border border-gray-200 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50">Cancelar</button>
-              <button disabled={!nuevoRec.titulo.trim()} onClick={async () => {
-                try {
-                  await notify.promise(produccionApi.crearRecordatorio(nuevoRec), {
-                    loading: 'Guardando recordatorio…',
-                    success: 'Recordatorio guardado',
-                    successDesc: nuevoRec.titulo,
-                    error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo guardar',
-                  });
-                  const mes = `${calMonth.getFullYear()}-${String(calMonth.getMonth() + 1).padStart(2, '0')}`;
-                  const res = await produccionApi.recordatorios(mes);
-                  setRecordatorios(res.data as typeof recordatorios);
-                  setNuevoRec(null);
-                } catch { /* notificado */ }
-              }} className="flex-1 rounded-lg bg-indigo-600 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:bg-gray-300 transition-colors">
-                Guardar
-              </button>
-            </div>
-          </motion.div>
-        </div>
-      )}
+      {/* Modal crear recordatorio (con hora, destinatarios, sonido, notificación) */}
+      <RecordatorioModal
+        abierto={!!nuevoRec}
+        fechaInicial={nuevoRec?.fecha}
+        onCerrar={() => setNuevoRec(null)}
+        onCreado={async () => {
+          const mes = `${calMonth.getFullYear()}-${String(calMonth.getMonth() + 1).padStart(2, '0')}`;
+          try {
+            const res = await produccionApi.recordatorios(mes);
+            setRecordatorios(res.data as typeof recordatorios);
+          } catch { /* silent */ }
+        }}
+      />
+
 
       {/* Modal email sugerencia */}
       {emailSugerido && (

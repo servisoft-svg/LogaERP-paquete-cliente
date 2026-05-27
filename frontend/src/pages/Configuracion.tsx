@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings, Save, Percent, Mail, Bell, Eye, EyeOff, SendHorizontal, HardDrive, Building,
-  ShieldCheck, History, Award, CheckCircle2, AlertCircle, Info, Database, ChevronRight,
+  ShieldCheck, History, Award, CheckCircle2, AlertCircle, Info, Database, ChevronRight, Beaker,
 } from 'lucide-react';
 import { configuracionApi } from '../api/client';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import CatalogoSpecs from '../components/CatalogoSpecs';
+import CatalogoSubcategoriasMP from '../components/CatalogoSubcategoriasMP';
 import { FormField, Input, Textarea } from '../components/FormField';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
@@ -31,6 +33,7 @@ interface Config {
   nivel_bronce:      string;
   nivel_plata:       string;
   nivel_oro:         string;
+  datos_bancarios?:  string;
 }
 
 const TOC = [
@@ -38,6 +41,8 @@ const TOC = [
   { id: 'alertas',  label: 'Alertas',     icon: Percent },
   { id: 'email',    label: 'Email',       icon: Mail },
   { id: 'niveles',  label: 'Niveles',     icon: Award },
+  { id: 'specs',    label: 'Specs',       icon: Beaker },
+  { id: 'subcategorias-mp', label: 'Sub-cat MP', icon: Beaker },
   { id: 'backup',   label: 'Backup',      icon: Database },
   { id: 'historial',label: 'Historial',   icon: History },
 ];
@@ -59,6 +64,15 @@ export default function Configuracion() {
   const [backupsList, setBackupsList]     = useState<{ filename: string; size: string; date: string }[]>([]);
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [restoreResult, setRestoreResult] = useState<string | null>(null);
+  const [backupPassStatus, setBackupPassStatus] = useState<{ configurada: boolean; origen: string; longitud: number } | null>(null);
+  const [backupPassNueva, setBackupPassNueva] = useState('');
+  const [backupPassVisible, setBackupPassVisible] = useState(false);
+  const [backupPassSaving, setBackupPassSaving] = useState(false);
+  const [gdriveStatus, setGdriveStatus] = useState<{ client_id_configurado: boolean; autorizado: boolean; email: string | null; folder_id: string | null } | null>(null);
+  const [gdriveClientId, setGdriveClientId] = useState('');
+  const [gdriveClientSecret, setGdriveClientSecret] = useState('');
+  const [gdriveFolderId, setGdriveFolderId] = useState('');
+  const [gdriveSaving, setGdriveSaving] = useState(false);
   const [auditoria, setAuditoria]         = useState<{ id: string; accion: string; tabla_afectada: string; registro_id: string; motivo: string; created_at: string; usuario_nombre?: string }[]>([]);
 
   // Audit log
@@ -81,6 +95,30 @@ export default function Configuracion() {
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // Carga estado de la password de backup y de Google Drive
+  useEffect(() => {
+    configuracionApi.backupPasswordStatus()
+      .then(({ data }) => setBackupPassStatus(data as { configurada: boolean; origen: string; longitud: number }))
+      .catch(() => {});
+    configuracionApi.gdriveStatus()
+      .then(({ data }) => setGdriveStatus(data as any))
+      .catch(() => {});
+    // Si volvemos del callback OAuth (?gdrive_code=xxx en la URL), intercambiar token
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (code && state === 'gdrive') {
+      const redirectUri = `${window.location.origin}${window.location.pathname}`;
+      configuracionApi.gdriveCallback(code, redirectUri)
+        .then(({ data }) => {
+          notify.success('Google Drive conectado', { description: (data as { email?: string }).email ?? '' });
+          window.history.replaceState(null, '', window.location.pathname + '#specs');
+          configuracionApi.gdriveStatus().then(({ data: s }) => setGdriveStatus(s as any));
+        })
+        .catch((e) => notify.error('Error al conectar Drive', { description: e?.response?.data?.error ?? '' }));
+    }
+  }, []);
 
   const handleRecheck = async () => {
     setRecheckLoading(true);
@@ -115,6 +153,7 @@ export default function Configuracion() {
       nivel_bronce:      config.nivel_bronce ? Number(config.nivel_bronce) : undefined,
       nivel_plata:       config.nivel_plata ? Number(config.nivel_plata) : undefined,
       nivel_oro:         config.nivel_oro ? Number(config.nivel_oro) : undefined,
+      datos_bancarios:   config.datos_bancarios ?? '',
     };
     try {
       const res = await notify.promise(configuracionApi.editar(payload), {
@@ -239,6 +278,17 @@ export default function Configuracion() {
                   />
                 </FormField>
               </div>
+              <FormField
+                label="Datos bancarios"
+                hint="Aparece en el PDF de Pedido a Proveedores. Ej: 'BBVA · Oficina de Aguilar de Campoo · ES12 3456 7890 1234 5678 9012 · Enviar por: «Número de cuenta»'"
+              >
+                <Textarea
+                  rows={3}
+                  value={config?.datos_bancarios ?? ''}
+                  onChange={(e) => setConfig((c) => c ? { ...c, datos_bancarios: e.target.value } : c)}
+                  placeholder="Banco · Oficina · IBAN · Forma de envío"
+                />
+              </FormField>
             </div>
           </section>
 
@@ -528,6 +578,34 @@ export default function Configuracion() {
             </div>
           </section>
 
+          {/* Sección: catálogo de specs */}
+          <section id="specs" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-blue-50/60 to-transparent">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100/70 text-blue-600">
+                <Beaker size={15} />
+              </div>
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-gray-800">Catálogo de especificaciones</h2>
+                <p className="text-[11px] text-gray-400">Parámetros físico-químicos que tus productos pueden requerir</p>
+              </div>
+            </div>
+            <CatalogoSpecs />
+          </section>
+
+          {/* Sección: sub-categorías de materias primas */}
+          <section id="subcategorias-mp" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-purple-50/60 to-transparent">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-100/70 text-purple-600">
+                <Beaker size={15} />
+              </div>
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-gray-800">Sub-categorías de materias primas</h2>
+                <p className="text-[11px] text-gray-400">Familias químicas: resina, agua, pigmento… Editables aquí.</p>
+              </div>
+            </div>
+            <CatalogoSubcategoriasMP />
+          </section>
+
           {/* Sección: backup */}
           <section id="backup" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
             <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-emerald-50/60 to-transparent">
@@ -551,18 +629,24 @@ export default function Configuracion() {
                         loading: 'Creando backup…',
                         success: 'Backup completado',
                         successDesc: (r) => {
-                          const d = (r as { data: { filename?: string; size?: string; local?: boolean; drive?: boolean } }).data;
+                          const d = (r as { data: { filename?: string; size?: string; local?: boolean; drive?: boolean; driveError?: string } }).data;
                           return (
                             <ToastBlock title={d.filename}>
                               <ToastField label="Tamaño" value={d.size} />
-                              <ToastField label="Destinos" value={[d.local && 'local', d.drive && 'Drive'].filter(Boolean).join(' · ') || ''} />
+                              <ToastField label="Local" value={d.local ? 'OK' : 'NO'} />
+                              <ToastField label="Drive" value={d.drive ? 'OK' : (d.driveError ? `Falló: ${d.driveError}` : 'no')} />
                             </ToastBlock>
                           );
                         },
                         error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al crear backup',
                       });
-                      const d = data as { ok?: boolean; mensaje?: string; error?: string };
-                      setBackupResult(d.ok ? d.mensaje ?? 'Backup completado.' : `Error: ${d.error}`);
+                      const d = data as { ok?: boolean; mensaje?: string; error?: string; local?: boolean; drive?: boolean; driveError?: string; filename?: string };
+                      if (d.local) {
+                        const detalle = d.drive ? 'local + Drive OK' : `local OK · Drive falló (${d.driveError ?? 'desconocido'})`;
+                        setBackupResult(`Backup ${d.filename} — ${detalle}`);
+                      } else {
+                        setBackupResult(`Error: ${d.error ?? 'sin detalle'}`);
+                      }
                     } catch (err: unknown) {
                       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
                       setBackupResult(msg ?? 'Error al crear backup');
@@ -582,6 +666,185 @@ export default function Configuracion() {
                     {backupResult}
                   </span>
                 )}
+              </div>
+
+              {/* Contraseña de cifrado del backup */}
+              <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-bold text-blue-700 uppercase tracking-wide">Contraseña de cifrado / Drive</p>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      Cifra cada backup antes de subirlo a Google Drive. Necesaria también para restaurarlo.
+                    </p>
+                  </div>
+                  {backupPassStatus && (
+                    <span className={`text-[10px] font-bold uppercase rounded-full px-2 py-0.5 ${backupPassStatus.configurada ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {backupPassStatus.configurada ? `Configurada · ${backupPassStatus.longitud} chars (${backupPassStatus.origen})` : 'Sin configurar'}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type={backupPassVisible ? 'text' : 'password'}
+                      value={backupPassNueva}
+                      onChange={(e) => setBackupPassNueva(e.target.value)}
+                      placeholder="Nueva contraseña (mín. 12 caracteres)"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono pr-9 focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBackupPassVisible(v => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      title={backupPassVisible ? 'Ocultar' : 'Mostrar'}
+                    >
+                      {backupPassVisible ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      if (backupPassNueva.length < 12) {
+                        setBackupResult('Error: la contraseña debe tener al menos 12 caracteres');
+                        return;
+                      }
+                      if (!window.confirm('IMPORTANTE: si cambias la contraseña, los backups anteriores NO se podrán restaurar con la nueva. Anota la nueva clave en un sitio seguro. ¿Continuar?')) return;
+                      setBackupPassSaving(true);
+                      try {
+                        await configuracionApi.backupPasswordSet(backupPassNueva);
+                        notify.success('Contraseña actualizada');
+                        setBackupPassNueva('');
+                        const { data } = await configuracionApi.backupPasswordStatus();
+                        setBackupPassStatus(data as any);
+                      } catch (err: unknown) {
+                        notify.error('Error', { description: (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '' });
+                      } finally { setBackupPassSaving(false); }
+                    }}
+                    disabled={backupPassSaving || backupPassNueva.length < 12}
+                    className="rounded-lg bg-loga-red px-4 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-40"
+                  >
+                    {backupPassSaving ? 'Guardando…' : 'Guardar'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-amber-700">
+                  ⚠ Anota esta contraseña fuera del ERP. Sin ella no podrás restaurar ningún backup.
+                </p>
+              </div>
+
+              {/* Google Drive OAuth */}
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50/30 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-bold text-emerald-700 uppercase tracking-wide">Google Drive — copia en la nube</p>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      Tras crear el backup local cifrado, se sube a tu Drive automáticamente.
+                    </p>
+                  </div>
+                  {gdriveStatus && (
+                    <span className={`text-[10px] font-bold uppercase rounded-full px-2 py-0.5 ${
+                      gdriveStatus.autorizado ? 'bg-emerald-100 text-emerald-700'
+                      : gdriveStatus.client_id_configurado ? 'bg-amber-100 text-amber-700'
+                      : 'bg-gray-100 text-gray-600'
+                    }`}>
+                      {gdriveStatus.autorizado ? `Conectado · ${gdriveStatus.email ?? ''}`
+                       : gdriveStatus.client_id_configurado ? 'Credenciales OK, sin autorizar'
+                       : 'Sin configurar'}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    value={gdriveClientId}
+                    onChange={(e) => setGdriveClientId(e.target.value)}
+                    placeholder="Client ID (xxx.apps.googleusercontent.com)"
+                    className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-mono"
+                  />
+                  <input
+                    type="password"
+                    value={gdriveClientSecret}
+                    onChange={(e) => setGdriveClientSecret(e.target.value)}
+                    placeholder="Client Secret"
+                    className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-mono"
+                  />
+                </div>
+                <input
+                  value={gdriveFolderId}
+                  onChange={(e) => setGdriveFolderId(e.target.value)}
+                  placeholder="Folder ID (opcional — id de la carpeta de Drive donde subir)"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-xs font-mono"
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      if (!gdriveClientId.trim() || !gdriveClientSecret.trim()) {
+                        notify.error('Client ID y Secret obligatorios'); return;
+                      }
+                      setGdriveSaving(true);
+                      try {
+                        await configuracionApi.gdriveSave({
+                          client_id: gdriveClientId.trim(),
+                          client_secret: gdriveClientSecret.trim(),
+                          folder_id: gdriveFolderId.trim() || undefined,
+                        });
+                        setGdriveClientSecret('');
+                        notify.success('Credenciales guardadas');
+                        const { data } = await configuracionApi.gdriveStatus();
+                        setGdriveStatus(data as any);
+                      } catch (err: any) {
+                        notify.error('Error', { description: err?.response?.data?.error ?? '' });
+                      } finally { setGdriveSaving(false); }
+                    }}
+                    disabled={gdriveSaving}
+                    className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-gray-700 disabled:opacity-40"
+                  >
+                    {gdriveSaving ? 'Guardando…' : 'Guardar credenciales'}
+                  </button>
+
+                  {gdriveStatus?.client_id_configurado && !gdriveStatus.autorizado && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const redirectUri = `${window.location.origin}${window.location.pathname}`;
+                          const { data } = await configuracionApi.gdriveAuthorize(redirectUri);
+                          // Guardamos state para identificar el callback
+                          const url = new URL((data as any).url);
+                          url.searchParams.set('state', 'gdrive');
+                          window.location.href = url.toString();
+                        } catch (err: any) {
+                          notify.error('Error', { description: err?.response?.data?.error ?? '' });
+                        }
+                      }}
+                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                    >
+                      Autorizar acceso a Drive
+                    </button>
+                  )}
+
+                  {gdriveStatus?.autorizado && (
+                    <button
+                      onClick={async () => {
+                        if (!window.confirm('¿Desconectar Drive? Los backups dejarán de subirse automáticamente.')) return;
+                        try {
+                          await configuracionApi.gdriveDisconnect();
+                          notify.success('Drive desconectado');
+                          const { data } = await configuracionApi.gdriveStatus();
+                          setGdriveStatus(data as any);
+                        } catch { /* */ }
+                      }}
+                      className="rounded-lg bg-red-50 text-loga-red px-3 py-1.5 text-xs font-semibold border border-red-200 hover:bg-red-100"
+                    >
+                      Desconectar
+                    </button>
+                  )}
+                </div>
+
+                <div className="text-[10px] text-gray-500 space-y-0.5">
+                  <p>1. En Google Cloud Console crea un OAuth 2.0 Client (tipo Web).</p>
+                  <p>2. <b>Authorized redirect URI</b>: copia esta URL exactamente <code className="bg-white px-1 rounded">{typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}` : ''}</code></p>
+                  <p>3. Habilita la API "Google Drive API" en tu proyecto.</p>
+                  <p>4. Pega Client ID + Secret, guarda, y autoriza.</p>
+                </div>
               </div>
 
               {/* Lista de backups disponibles */}

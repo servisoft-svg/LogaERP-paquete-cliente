@@ -3,7 +3,7 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText } from 'lucide-react';
+import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText, Download } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { recetasApi, produccionApi, lotesApi, proveedoresApi, productosApi } from '../api/client';
 import type { OrdenProduccion, IngredienteReceta, Receta, PasoReceta } from '../types';
@@ -45,6 +45,13 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   const [scanning, setScanning] = useState(false);
   const [scanIngId, setScanIngId] = useState<string | null>(null);
   const [lotesMP, setLotesMP] = useState<Record<string, { lote_interno: string; cantidad_actual: string; fecha_caducidad?: string }[]>>({});
+  // Dosificado parcial acumulado por ingrediente_receta_id (kg). Se carga al abrir
+  // el modal y se refresca tras cada echada parcial. Permite mostrar pendiente
+  // POR PARTE (cuando el agua está dividida en varias filas).
+  const [dosificadoPorMP, setDosificadoPorMP] = useState<Record<string, number>>({});
+  // Echado por (ingrediente_id, paso_index) — permite redistribuir el sobrante
+  // de un paso al siguiente (ej: si echó 28 en lugar de 30, próximo paso suma 2).
+  const [echadoPorPaso, setEchadoPorPaso] = useState<Record<string, Record<number, number>>>({});
   // Cantidades ajustadas en vivo por el operario (id ingrediente → kg). Persistido en
   // localStorage para sobrevivir a recargas durante la fabricación.
   const [cantidadesAjustadas, setCantidadesAjustadas] = useState<Record<string, number>>({});
@@ -153,20 +160,56 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
     }
   }, [orden]);
 
+  // Recarga las dosificaciones parciales (echadas) desde backend.
+  // Indexa por ingrediente_id (fila de receta) — permite mostrar el echado
+  // por parte cuando un MP (agua) aparece varias veces en la receta.
+  const recargarDosificaciones = useCallback(async () => {
+    if (!orden) return;
+    try {
+      const { data } = await produccionApi.listarDosificaciones(orden.id);
+      const items = (data as any).items as Array<{ ingrediente_id: string; echado: number }>;
+      const map: Record<string, number> = {};
+      for (const it of items) map[it.ingrediente_id] = Number(it.echado);
+      setDosificadoPorMP(map);
+      setEchadoPorPaso(((data as any).echadoPorPaso ?? {}) as Record<string, Record<number, number>>);
+    } catch { /* silencioso */ }
+  }, [orden]);
+
   useEffect(() => {
     if (orden) {
       inicioFabRef.current = new Date().toISOString();
       cargar();
+      recargarDosificaciones();
       proveedoresApi.listar().then(r => setProveedores(r.data as typeof proveedores)).catch(() => {});
     } else {
       inicioFabRef.current = null;
     }
-  }, [orden, cargar]);
+  }, [orden, cargar, recargarDosificaciones]);
 
   // Persist pasoActual to localStorage
   useEffect(() => {
     if (orden && hasPasos) localStorage.setItem(`fab_paso_${orden.id}`, String(pasoActual));
   }, [pasoActual, orden, hasPasos]);
+
+  // Recalcular fillPct combinando ingredientes confirmados + echadas parciales
+  // (cada echada de agua suma su fracción al tanque, sin esperar a OK).
+  useEffect(() => {
+    if (fase !== 'preparando' && fase !== 'confirmando') return;
+    if (!orden || !receta || ingredientes.length === 0) return;
+    const ratioR = parseFloat(orden.cantidad_planificada) / parseFloat(receta.rendimiento);
+    let progress = 0;
+    for (const ing of ingredientes) {
+      if (confirmados.has(ing.id)) {
+        progress += 1;
+      } else if (esAgua(ing.nombre_mp)) {
+        const necesario = parseFloat(ing.cantidad) * ratioR * (1 + parseFloat(ing.porcentaje_merma) / 100);
+        const echadoIng = dosificadoPorMP[ing.id] ?? 0;
+        if (necesario > 0) progress += Math.min(1, echadoIng / necesario);
+      }
+    }
+    const newPct = (progress / ingredientes.length) * 90;
+    setFillPct(newPct);
+  }, [confirmados, dosificadoPorMP, ingredientes, receta, orden, fase]);
 
   // Update temperature when paso changes (if pasos exist)
   useEffect(() => {
@@ -248,8 +291,27 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
     setFotoPreviews(prev => prev.filter((_, i) => i !== idx));
   };
 
+  // Checklist de confirmaciones pendientes (mensajes definidos en cada MP).
+  // Se rellena al pulsar "Fabricar" y bloquea hasta marcar todas.
+  const [checklistConfirm, setChecklistConfirm] = useState<{ mpId: string; nombre: string; mensaje: string; ok: boolean }[] | null>(null);
+
   const handleFabricar = async () => {
     if (!orden) return;
+    // Antes de fabricar, recopilar mensajes de confirmación de cada MP.
+    if (!checklistConfirm) {
+      const items = ingredientes
+        .filter(i => i.confirmacion_msg && i.confirmacion_msg.trim())
+        .map(i => ({ mpId: i.materia_prima_id, nombre: i.nombre_mp, mensaje: i.confirmacion_msg!.trim(), ok: false }));
+      // Si hay alguno, mostrar checklist y NO fabricar todavía
+      if (items.length > 0) {
+        setChecklistConfirm(items);
+        return;
+      }
+    } else {
+      // Si ya estaba el checklist abierto, comprobamos que todos estén OK
+      if (checklistConfirm.some(x => !x.ok)) return;
+      setChecklistConfirm(null);
+    }
     setFase('fabricando');
 
     // Progressive fill from 0
@@ -351,9 +413,18 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   });
   const todoConStock = ingredientesSinStock.length === 0 && ingredientes.length > 0;
 
+  // Si el agua está repartida por pasos (alguna paso tiene cantidad_agua),
+  // se gestiona vía la tarjeta azul DosificarAguaPaso — no se duplica en la
+  // lista de ingredientes del paso ni en los huérfanos.
+  const aguaPorPasos = pasos.some(p => Number(p.cantidad_agua) > 0);
+  const aguaIngIds = new Set(
+    aguaPorPasos ? ingredientes.filter(i => esAgua(i.nombre_mp)).map(i => i.id) : []
+  );
+
   // Get ingredients for current step
   const stepIngIds = paso?.ingredientes_ids ?? [];
-  const stepIngs = stepIngIds.map(mpId => ingredientes.find(i => i.materia_prima_id === mpId)).filter(Boolean) as IngredienteReceta[];
+  const stepIngs = (stepIngIds.map(mpId => ingredientes.find(i => i.materia_prima_id === mpId)).filter(Boolean) as IngredienteReceta[])
+    .filter(i => !aguaIngIds.has(i.id));
   const allStepConfirmed = stepIngs.length === 0 || stepIngs.every(i => confirmados.has(i.id));
 
   // Fill tank by step progress
@@ -366,9 +437,12 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasoActual, hasPasos, pasos.length, nConfirmados]);
 
-  // Ingredients not assigned to any step (show in flat list)
+  // Ingredients not assigned to any step (show in flat list).
+  // Excluye agua si está gestionada por pasos via cantidad_agua.
   const allStepMpIds = new Set(pasos.flatMap(p => p.ingredientes_ids ?? []));
-  const unassignedIngs = ingredientes.filter(i => !allStepMpIds.has(i.materia_prima_id));
+  const unassignedIngs = ingredientes
+    .filter(i => !allStepMpIds.has(i.materia_prima_id))
+    .filter(i => !aguaIngIds.has(i.id));
 
   if (!orden) return null;
 
@@ -405,6 +479,33 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                   Paso {pasoActual + 1}/{pasos.length}
                 </span>
               )}
+              <button
+                onClick={async () => {
+                  if (!orden) return;
+                  try {
+                    const { default: api } = await import('../api/client');
+                    const res = await api.post(
+                      `/produccion/${orden.id}/receta.pdf`,
+                      { ajustes: cantidadesAjustadas ?? {} },
+                      { responseType: 'blob' }
+                    );
+                    const blob = new Blob([res.data], { type: 'application/pdf' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `receta-${orden.numero_orden ?? orden.id}.pdf`;
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1500);
+                  } catch {
+                    /* manejado por notify global o silent */
+                  }
+                }}
+                className="inline-flex items-center gap-1 rounded-lg p-2 text-gray-500 hover:bg-gray-100 hover:text-loga-red transition-colors"
+                title="Descargar receta completa en PDF"
+              >
+                <Download size={16} />
+                <span className="text-xs font-semibold hidden sm:inline">Descargar receta</span>
+              </button>
               {fase !== 'fabricando' && (
                 <button onClick={onClose} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 transition-colors">
                   <X size={18} />
@@ -413,10 +514,53 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
             </div>
           </div>
 
-          <div className="flex flex-col md:flex-row overflow-y-auto max-h-[80vh]">
+          <div className="flex flex-col lg:flex-row overflow-y-auto max-h-[80vh]">
+
+            {/* ── Far-left (lg+): Receta original (sólo lectura) ── */}
+            {receta && orden && (fase === 'preparando' || fase === 'confirmando' || fase === 'cargando') && (
+              <div className="hidden lg:flex flex-col w-56 shrink-0 border-r border-gray-100 bg-gradient-to-b from-gray-50/60 to-white px-4 py-4 lg:overflow-y-auto lg:max-h-[70vh]">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Receta original</p>
+                <p className="mt-1 text-sm font-semibold text-gray-800 leading-tight">{receta.nombre}</p>
+                <p className="mt-0.5 text-[11px] text-gray-500">
+                  Rendimiento: <b className="text-gray-700">{parseFloat(receta.rendimiento).toFixed(2)} {receta.unidad_medida}</b>
+                </p>
+                <p className="text-[11px] text-gray-500">
+                  Esta orden: <b className="text-gray-700">{parseFloat(orden.cantidad_planificada).toFixed(2)} {receta.unidad_medida}</b>
+                </p>
+                <div className="my-3 h-px bg-gray-100" />
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">Ingredientes (teóricos)</p>
+                <div className="space-y-1.5">
+                  {ingredientes.map((ing) => {
+                    const ratioR = parseFloat(orden.cantidad_planificada) / parseFloat(receta.rendimiento);
+                    const tt = parseFloat(ing.cantidad) * ratioR * (1 + parseFloat(ing.porcentaje_merma) / 100);
+                    return (
+                      <div key={`origR-${ing.id || ing.materia_prima_id}`} className="text-[11px] flex justify-between gap-2 leading-tight">
+                        <span className="text-gray-700 truncate" title={ing.nombre_mp}>{ing.nombre_mp}</span>
+                        <span className="font-mono font-bold text-gray-600 shrink-0">{tt.toFixed(2)} {ing.unidad_medida}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {pasos.length > 0 && (
+                  <>
+                    <div className="my-3 h-px bg-gray-100" />
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">Pasos</p>
+                    <ol className="space-y-1 list-decimal list-inside">
+                      {pasos.map((p, i) => (
+                        <li key={`origP-${i}`} className="text-[11px] text-gray-600 leading-tight">
+                          <b className="text-gray-800">{p.titulo ?? p.fase ?? `Paso ${i + 1}`}</b>
+                          {p.temperatura && <span className="text-gray-400"> · {p.temperatura}°C</span>}
+                          {p.duracion_min && <span className="text-gray-400"> · {p.duracion_min} min</span>}
+                        </li>
+                      ))}
+                    </ol>
+                  </>
+                )}
+              </div>
+            )}
 
             {/* ── Left: Steps / Ingredients ── */}
-            <div className="flex-1 px-5 py-4 md:overflow-y-auto md:max-h-[70vh] border-b md:border-b-0 md:border-r border-gray-100">
+            <div className="flex-1 px-5 py-4 lg:overflow-y-auto lg:max-h-[70vh] border-b lg:border-b-0 lg:border-r border-gray-100">
               {fase === 'cargando' ? (
                 <div className="flex justify-center py-10">
                   <span className="h-6 w-6 border-2 border-loga-red border-t-transparent rounded-full animate-spin" />
@@ -475,6 +619,35 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                           </tbody>
                         </table>
                       </div>
+                    );
+                  })()}
+
+                  {/* Echar agua INICIAL (opcional, antes de los pasos). Útil cuando
+                      el operario quiere pre-cargar agua al reactor antes de empezar.
+                      Solo aparece si la receta tiene agua. */}
+                  {orden && (() => {
+                    const aguaIng = ingredientes.find(i => esAgua(i.nombre_mp));
+                    if (!aguaIng) return null;
+                    const ratioR = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
+                    const totalNecesario = parseFloat(aguaIng.cantidad) * ratioR * (1 + parseFloat(aguaIng.porcentaje_merma) / 100);
+                    const echadoTotal = dosificadoPorMP[aguaIng.id] ?? 0;
+                    const echadoInicial = (echadoPorPaso[aguaIng.id] ?? {})[-1] ?? 0;
+                    return (
+                      <EcharAguaInicial
+                        ordenId={orden.id}
+                        ingredienteId={aguaIng.id}
+                        productoId={aguaIng.materia_prima_id}
+                        unidad={aguaIng.unidad_medida ?? 'kg'}
+                        totalNecesario={totalNecesario}
+                        echadoTotal={echadoTotal}
+                        echadoInicial={echadoInicial}
+                        onChange={() => {
+                          recargarDosificaciones();
+                          lotesApi.listar({ producto_id: aguaIng.materia_prima_id, estado: 'aprobado' })
+                            .then(res => setLotesMP(prev => ({ ...prev, [aguaIng.materia_prima_id]: (res.data as any[]).filter((l: any) => parseFloat(l.cantidad_actual) > 0) })))
+                            .catch(() => {});
+                        }}
+                      />
                     );
                   })()}
 
@@ -557,6 +730,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                             const real = cantidadesAjustadas[ing.id] ?? teorico;
                             totalTeorico += teorico;
                             if (confirmados.has(ing.id)) acumulado += real;
+                            else if (esAgua(ing.nombre_mp)) acumulado += Math.min(real, dosificadoPorMP[ing.id] ?? 0);
                           }
                           const pct = totalTeorico > 0 ? (acumulado / totalTeorico) * 100 : 0;
                           return (
@@ -576,6 +750,66 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                 />
                               </div>
                             </div>
+                          );
+                        })()}
+
+                        {/* Echada de agua específica de este paso (cantidad_agua).
+                            Suma el sobrante NO echado de pasos anteriores. */}
+                        {pasos[pasoActual]?.cantidad_agua != null && orden && (() => {
+                          const cantPaso = Number(pasos[pasoActual].cantidad_agua);
+                          if (!Number.isFinite(cantPaso) || cantPaso <= 0) return null;
+                          const aguaIng = ingredientes.find(i => esAgua(i.nombre_mp));
+                          if (!aguaIng) return null;
+                          const ratioR = parseFloat(orden.cantidad_planificada) / parseFloat(receta!.rendimiento);
+                          const totalNecesario = parseFloat(aguaIng.cantidad) * ratioR * (1 + parseFloat(aguaIng.porcentaje_merma) / 100);
+                          const echadoTotal = dosificadoPorMP[aguaIng.id] ?? 0;
+                          const pteTotal = Math.max(0, totalNecesario - echadoTotal);
+                          // Sobrante NO echado de pasos anteriores (con cantidad_agua definida).
+                          // Permite valores negativos (over-pour) para que la sugerencia se
+                          // reduzca correctamente si el operario echó de más antes.
+                          // Incluye paso_index=-1 (echadas iniciales) — restan al próximo.
+                          const echadoPorPasoIng = echadoPorPaso[aguaIng.id] ?? {};
+                          let sobranteAnterior = 0;
+                          // Echadas iniciales (paso_index=-1): se cuentan como sobrante negativo
+                          // (cero planificado, X echado → sobrante -X). Solo afecta al paso 0.
+                          if (pasoActual === 0) {
+                            sobranteAnterior -= (echadoPorPasoIng[-1] ?? 0);
+                          }
+                          for (let pi = 0; pi < pasoActual; pi++) {
+                            const planAnt = Number(pasos[pi]?.cantidad_agua);
+                            if (Number.isFinite(planAnt) && planAnt > 0) {
+                              const planAntEsc = planAnt * ratioR;
+                              const echadoAnt = echadoPorPasoIng[pi] ?? 0;
+                              sobranteAnterior += (planAntEsc - echadoAnt);
+                            }
+                          }
+                          const baseEscalada = cantPaso * ratioR;
+                          // Sugerencia = lo de este paso + sobrante de anteriores.
+                          // No se topea contra pteTotal: el operario PUEDE echar más
+                          // del total planificado (over-pour). Stock se descuenta de verdad.
+                          const sugerida = Math.max(0, baseEscalada + sobranteAnterior);
+                          return (
+                            <DosificarAguaPaso
+                              ordenId={orden.id}
+                              ingredienteId={aguaIng.id}
+                              productoId={aguaIng.materia_prima_id}
+                              cantidadSugerida={sugerida}
+                              cantidadPlanPaso={baseEscalada}
+                              sobranteAnterior={sobranteAnterior}
+                              unidad={aguaIng.unidad_medida ?? 'kg'}
+                              echadoTotal={echadoTotal}
+                              echadoEstePaso={echadoPorPasoIng[pasoActual] ?? 0}
+                              totalNecesario={totalNecesario}
+                              pteTotal={pteTotal}
+                              pasoNum={pasoActual + 1}
+                              pasoIndex={pasoActual}
+                              onChange={() => {
+                                recargarDosificaciones();
+                                lotesApi.listar({ producto_id: aguaIng.materia_prima_id, estado: 'aprobado' })
+                                  .then(res => setLotesMP(prev => ({ ...prev, [aguaIng.materia_prima_id]: (res.data as any[]).filter((l: any) => parseFloat(l.cantidad_actual) > 0) })))
+                                  .catch(() => {});
+                              }}
+                            />
                           );
                         })()}
 
@@ -698,6 +932,22 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                         </div>
                                       );
                                     })()}
+                                    {esAgua(ing.nombre_mp) && orden && !conf && (
+                                      <DosificarAguaInline
+                                        ordenId={orden.id}
+                                        ingredienteId={ing.id}
+                                        productoId={ing.materia_prima_id}
+                                        unidad={ing.unidad_medida ?? 'kg'}
+                                        necesario={necesario}
+                                        echado={dosificadoPorMP[ing.id] ?? 0}
+                                        onChange={() => {
+                                          recargarDosificaciones();
+                                          lotesApi.listar({ producto_id: ing.materia_prima_id, estado: 'aprobado' })
+                                            .then(res => setLotesMP(prev => ({ ...prev, [ing.materia_prima_id]: (res.data as any[]).filter((l: any) => parseFloat(l.cantidad_actual) > 0) })))
+                                            .catch(() => {});
+                                        }}
+                                      />
+                                    )}
                                   </div>
                                   {!conf ? (
                                     <div className="flex items-center gap-1 shrink-0">
@@ -774,14 +1024,32 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                         const conf = confirmados.has(ing.id);
                         return (
                           <div key={ing.id || ing.materia_prima_id || `un-${idx}`} className={clsx(
-                            'flex items-center gap-2 rounded-lg px-3 py-1.5 border text-xs',
+                            'rounded-lg px-3 py-1.5 border text-xs',
                             conf ? 'border-emerald-200 bg-emerald-50' : 'border-gray-100'
                           )}>
-                            {conf ? <Check size={10} className="text-emerald-500" /> : <span className="w-2.5 h-2.5 rounded-full bg-gray-200" />}
-                            <span className={clsx('flex-1', conf && 'line-through text-emerald-700')}>{ing.nombre_mp}</span>
-                            <span className="font-mono text-gray-400">{necesario.toFixed(1)} {ing.unidad_medida}</span>
-                            {!conf && (
-                              <button onClick={() => confirmarIngrediente(ing.id)} className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold text-gray-600 hover:bg-gray-200">OK</button>
+                            <div className="flex items-center gap-2">
+                              {conf ? <Check size={10} className="text-emerald-500" /> : <span className="w-2.5 h-2.5 rounded-full bg-gray-200" />}
+                              <span className={clsx('flex-1', conf && 'line-through text-emerald-700')}>{ing.nombre_mp}</span>
+                              <span className="font-mono text-gray-400">{necesario.toFixed(1)} {ing.unidad_medida}</span>
+                              {!conf && (
+                                <button onClick={() => confirmarIngrediente(ing.id)} className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold text-gray-600 hover:bg-gray-200">OK</button>
+                              )}
+                            </div>
+                            {esAgua(ing.nombre_mp) && !conf && (
+                              <DosificarAguaInline
+                                ordenId={orden.id}
+                                ingredienteId={ing.id}
+                                productoId={ing.materia_prima_id}
+                                unidad={ing.unidad_medida ?? 'kg'}
+                                necesario={necesario}
+                                echado={dosificadoPorMP[ing.id] ?? 0}
+                                onChange={() => {
+                                  recargarDosificaciones();
+                                  lotesApi.listar({ producto_id: ing.materia_prima_id, estado: 'aprobado' })
+                                    .then(res => setLotesMP(prev => ({ ...prev, [ing.materia_prima_id]: (res.data as any[]).filter((l: any) => parseFloat(l.cantidad_actual) > 0) })))
+                                    .catch(() => {});
+                                }}
+                              />
                             )}
                           </div>
                         );
@@ -887,6 +1155,11 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                       const stock = parseFloat(ing.stock_disponible ?? ing.stock_actual ?? "0");
                       const suficiente = stock >= necesario;
                       const conf = confirmados.has(ing.id);
+                      const ingEsAgua = esAgua(ing.nombre_mp);
+                      const echadoIng = dosificadoPorMP[ing.id] ?? 0;
+                      // En agua mostramos el pendiente (necesario − echado). Los +/− e
+                      // input editan el pendiente; el ajuste real = pendiente + echado.
+                      const displayed = ingEsAgua ? Math.max(0, necesario - echadoIng) : necesario;
                       const setAjuste = (val: number | null) => {
                         setCantidadesAjustadas(prev => {
                           const next = { ...prev };
@@ -896,7 +1169,28 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                           return next;
                         });
                       };
+                      const setDisplayed = (v: number | null) => {
+                        if (v == null) { setAjuste(null); return; }
+                        setAjuste(ingEsAgua ? v + echadoIng : v);
+                      };
                       const step = teorico >= 100 ? 1 : teorico >= 10 ? 0.5 : teorico >= 1 ? 0.1 : 0.01;
+                      // OK en agua: si queda pendiente, lo echa automáticamente antes de marcar confirmado.
+                      const handleOk = async () => {
+                        if (ingEsAgua && displayed > 0.001 && orden) {
+                          try {
+                            await produccionApi.dosificar(orden.id, {
+                              producto_id: ing.materia_prima_id,
+                              cantidad: displayed,
+                              ingrediente_receta_id: ing.id,
+                            });
+                            await recargarDosificaciones();
+                          } catch (e: any) {
+                            notify.error(e?.response?.data?.error ?? 'Error al echar lo restante');
+                            return;
+                          }
+                        }
+                        confirmarIngrediente(ing.id);
+                      };
                       return (
                         <motion.div
                           key={ing.id || ing.materia_prima_id || `ing2-${i}`}
@@ -919,6 +1213,11 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                               <p className={clsx('text-xs font-semibold truncate', conf ? 'text-emerald-700 line-through' : 'text-gray-800')}>
                                 {ing.nombre_mp}
                               </p>
+                              {(ing as any).paso_index != null && (
+                                <span className="shrink-0 text-[9px] font-bold rounded px-1 py-0.5 bg-blue-50 text-blue-700 border border-blue-100">
+                                  Paso {Number((ing as any).paso_index) + 1}
+                                </span>
+                              )}
                               {ing.sds_url && (
                                 <a href={withAuthToken(ing.sds_url)}
                                   target="_blank" rel="noopener noreferrer"
@@ -934,7 +1233,7 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                             ) : (
                               <div className="flex items-center gap-1.5 mt-0.5">
                                 <button
-                                  onClick={() => setAjuste(Math.max(0, necesario - step))}
+                                  onClick={() => setDisplayed(Math.max(0, displayed - step))}
                                   className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
                                   title={`-${step}`}
                                 >−</button>
@@ -942,19 +1241,24 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                   type="number"
                                   step={step}
                                   min={0}
-                                  value={necesario.toFixed(2)}
+                                  value={displayed.toFixed(2)}
                                   onChange={(e) => {
                                     const v = parseFloat(e.target.value);
-                                    if (!isNaN(v) && v >= 0) setAjuste(v);
+                                    if (!isNaN(v) && v >= 0) setDisplayed(v);
                                   }}
                                   className="w-20 text-center font-mono font-bold text-sm bg-white border border-gray-200 rounded-md px-1.5 py-0.5 focus:border-loga-red focus:outline-none"
                                 />
                                 <button
-                                  onClick={() => setAjuste(necesario + step)}
+                                  onClick={() => setDisplayed(displayed + step)}
                                   className="rounded-md w-6 h-6 flex items-center justify-center bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 active:bg-gray-100 text-base leading-none"
                                   title={`+${step}`}
                                 >+</button>
                                 <span className="text-xs font-semibold text-gray-500">{ing.unidad_medida}</span>
+                                {ingEsAgua && echadoIng > 0 && (
+                                  <span className="text-[10px] font-mono text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">
+                                    pendiente (ya {echadoIng.toFixed(2)} echados)
+                                  </span>
+                                )}
                                 {ajustado != null && (
                                   <button
                                     onClick={() => setAjuste(null)}
@@ -989,6 +1293,22 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                 </div>
                               );
                             })()}
+                            {esAgua(ing.nombre_mp) && orden && !conf && (
+                              <DosificarAguaInline
+                                ordenId={orden.id}
+                                ingredienteId={ing.id}
+                                productoId={ing.materia_prima_id}
+                                unidad={ing.unidad_medida ?? 'kg'}
+                                necesario={necesario}
+                                echado={dosificadoPorMP[ing.id] ?? 0}
+                                onChange={() => {
+                                  recargarDosificaciones();
+                                  lotesApi.listar({ producto_id: ing.materia_prima_id, estado: 'aprobado' })
+                                    .then(res => setLotesMP(prev => ({ ...prev, [ing.materia_prima_id]: (res.data as any[]).filter((l: any) => parseFloat(l.cantidad_actual) > 0) })))
+                                    .catch(() => {});
+                                }}
+                              />
+                            )}
                           </div>
                           {fase !== 'fabricando' && fase !== 'completado' && (
                             conf ? (
@@ -999,11 +1319,12 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                                   <ScanLine size={12} />
                                 </button>
                                 <button
-                                  onClick={() => confirmarIngrediente(ing.id)}
+                                  onClick={handleOk}
                                   className={clsx(
                                     'flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition-colors',
                                     suficiente ? 'bg-gray-900 text-white hover:bg-gray-700' : 'bg-loga-red/10 text-loga-red hover:bg-loga-red/20'
                                   )}
+                                  title={ingEsAgua && displayed > 0.001 ? `Echar ${displayed.toFixed(2)} ${ing.unidad_medida} y confirmar` : 'Marcar como echado'}
                                 >
                                   OK <ChevronRight size={10} />
                                 </button>
@@ -1043,6 +1364,26 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                   />
                 </div>
               </div>
+
+
+              {/* Observaciones de la orden */}
+              {(fase === 'preparando' || fase === 'confirmando') && (
+                <div className="w-full rounded-lg border border-amber-100 bg-amber-50/40 px-2.5 py-2">
+                  <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wider mb-1">Observaciones</p>
+                  {orden.notas ? (
+                    <p className="text-[11px] text-gray-700 leading-tight whitespace-pre-wrap break-words">
+                      {orden.notas}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-gray-400 italic">Sin observaciones</p>
+                  )}
+                  {orden.cliente && (
+                    <p className="mt-1.5 pt-1.5 border-t border-amber-100 text-[10px] text-gray-500">
+                      Cliente: <b className="text-gray-700">{orden.cliente}</b>
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Phase buttons */}
               <AnimatePresence mode="wait">
@@ -1293,6 +1634,407 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
         onScan={(_code) => { setScanning(false); if (scanIngId) confirmarIngrediente(scanIngId); }}
         onClose={() => setScanning(false)}
       />
+
+      {/* Checklist de confirmaciones MP antes de fabricar */}
+      {checklistConfirm && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setChecklistConfirm(null)} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 w-full max-w-md rounded-2xl bg-white shadow-2xl flex flex-col max-h-[85vh]"
+          >
+            <div className="px-5 py-3 bg-gradient-to-r from-amber-50 to-white border-b border-amber-100 shrink-0">
+              <p className="text-sm font-bold text-amber-900">Confirmaciones antes de finalizar</p>
+              <p className="text-[11px] text-gray-500">Marca cada punto para poder fabricar.</p>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {checklistConfirm.map((c, i) => (
+                <label key={c.mpId + i} className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5 cursor-pointer hover:bg-amber-50">
+                  <input
+                    type="checkbox"
+                    checked={c.ok}
+                    onChange={(e) => setChecklistConfirm(prev => prev?.map((x, j) => j === i ? { ...x, ok: e.target.checked } : x) ?? prev)}
+                    className="mt-1 h-4 w-4 accent-loga-red cursor-pointer shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide">{c.nombre}</p>
+                    <p className="text-sm text-gray-800 leading-tight whitespace-pre-wrap">{c.mensaje}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50/50 shrink-0">
+              <button onClick={() => setChecklistConfirm(null)} className="text-sm text-gray-500 hover:text-gray-900">Cancelar</button>
+              <button
+                onClick={handleFabricar}
+                disabled={checklistConfirm.some(x => !x.ok)}
+                className="flex items-center gap-2 rounded-xl bg-loga-red px-5 py-2 text-sm font-bold text-white hover:bg-loga-red-dark disabled:bg-gray-300"
+              >
+                <Check size={15} /> Todo confirmado, fabricar
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
     </AnimatePresence>
+  );
+}
+
+// ── DosificarAguaInline ────────────────────────────────────────────────────
+// Botón inline al lado de cada ingrediente que sea AGUA. Permite registrar
+// echadas parciales sucesivas durante la fabricación (cada click POST a
+// /produccion/:id/dosificar — descuenta stock al instante). Muestra acumulado
+// y pendiente para que el operario sepa cuánto le queda por echar.
+function DosificarAguaInline({
+  ordenId, ingredienteId, productoId, unidad, necesario, echado, onChange,
+}: {
+  ordenId: string;
+  ingredienteId?: string;
+  productoId: string;
+  unidad: string;
+  necesario: number;
+  echado: number;
+  onChange?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [cant, setCant] = useState('');
+  const [posting, setPosting] = useState(false);
+
+  const pendiente = Math.max(0, necesario - echado);
+
+  const guardar = async () => {
+    const c = parseFloat(cant);
+    if (!Number.isFinite(c) || c <= 0) { notify.error('Cantidad inválida'); return; }
+    setPosting(true);
+    try {
+      await produccionApi.dosificar(ordenId, {
+        producto_id: productoId,
+        cantidad: c,
+        ingrediente_receta_id: ingredienteId,
+      });
+      notify.success(`+${c.toFixed(2)} ${unidad} echados`);
+      setCant('');
+      setOpen(false);
+      onChange?.();
+    } catch (e: any) {
+      notify.error(e?.response?.data?.error ?? 'Error al echar');
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const completo = pendiente <= 0.01;
+  // Label dinámico: si hay restante conocido, sugerirlo en el botón
+  const labelBoton = completo
+    ? 'Completo'
+    : echado > 0
+      ? `Echar ${pendiente.toFixed(2)} ${unidad} restantes`
+      : 'Echar parcial';
+
+  return (
+    <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+      {(echado > 0 || open) && (
+        <span className="text-[10px] font-mono text-amber-800 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">
+          Echado: <b>{echado.toFixed(2)}</b> / {necesario.toFixed(2)} {unidad}
+          {pendiente > 0.01 && <> · pte <b className="text-loga-red">{pendiente.toFixed(2)}</b></>}
+        </span>
+      )}
+      {open ? (
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            step="0.001"
+            min="0"
+            autoFocus
+            value={cant}
+            onChange={(e) => setCant(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') guardar(); if (e.key === 'Escape') { setOpen(false); setCant(''); } }}
+            placeholder={pendiente.toFixed(2)}
+            className="w-24 rounded border border-amber-300 px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400"
+          />
+          <span className="text-[10px] text-gray-500">{unidad}</span>
+          <button
+            onClick={guardar}
+            disabled={posting}
+            className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+          >
+            {posting ? '…' : 'Echar'}
+          </button>
+          <button
+            onClick={() => { setOpen(false); setCant(''); }}
+            className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+            title="Cancelar"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => { setOpen(true); setCant(pendiente > 0 ? pendiente.toFixed(2) : ''); }}
+          disabled={completo}
+          className={clsx(
+            'inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold transition-colors',
+            completo
+              ? 'bg-emerald-100 text-emerald-700 cursor-default'
+              : 'bg-amber-500 text-white hover:bg-amber-600 shadow-sm'
+          )}
+        >
+          <Droplets size={10} /> {labelBoton}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const esAgua = (nombre?: string | null) => /\bagua\b/i.test(nombre ?? '');
+
+// ── EcharAguaInicial ───────────────────────────────────────────────────────
+// Botón "Echar agua inicial" colapsado por defecto. Permite al operario echar
+// una parte del agua ANTES de empezar los pasos (uso opcional, no habitual).
+// Registra la echada con paso_index=-1.
+function EcharAguaInicial({
+  ordenId, ingredienteId, productoId, unidad, totalNecesario, echadoTotal, echadoInicial, onChange,
+}: {
+  ordenId: string;
+  ingredienteId: string;
+  productoId: string;
+  unidad: string;
+  totalNecesario: number;
+  echadoTotal: number;
+  echadoInicial: number;
+  onChange?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [cant, setCant] = useState<string>('');
+  const [posting, setPosting] = useState(false);
+
+  const guardar = async () => {
+    const c = parseFloat(cant);
+    if (!Number.isFinite(c) || c <= 0) { notify.error('Cantidad inválida'); return; }
+    setPosting(true);
+    try {
+      await produccionApi.dosificar(ordenId, {
+        producto_id: productoId,
+        cantidad: c,
+        ingrediente_receta_id: ingredienteId,
+        paso_index: -1,
+        notas: 'Echada inicial',
+      });
+      notify.success(`+${c.toFixed(2)} ${unidad} echados (inicial)`);
+      setCant('');
+      setOpen(false);
+      onChange?.();
+    } catch (e: any) {
+      notify.error(e?.response?.data?.error ?? 'Error al echar');
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  if (!open) {
+    // Si ya hubo una echada inicial, mostrar chip discreto con el total + lupa
+    // para añadir más. Si nunca se ha echado, solo un mini-botón gris.
+    if (echadoInicial > 0) {
+      return (
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+            <Droplets size={10} /> Agua inicial: {echadoInicial.toFixed(2)} {unidad}
+          </span>
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="text-[10px] text-gray-400 hover:text-cyan-700 underline"
+          >
+            + añadir más
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="inline-flex items-center gap-1 rounded-md border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 transition-colors"
+        >
+          <Droplets size={10} /> Echar agua inicial
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-2 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-bold text-cyan-900">Echar agua ANTES de los pasos</p>
+        <span className="text-[10px] text-cyan-700">
+          Total receta {totalNecesario.toFixed(2)} {unidad} · ya {echadoTotal.toFixed(2)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type="number"
+          step="0.01"
+          min="0.001"
+          autoFocus
+          value={cant}
+          onChange={(e) => setCant(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') guardar(); if (e.key === 'Escape') setOpen(false); }}
+          placeholder={`Ej: 10 ${unidad}`}
+          className="w-28 rounded-md border border-cyan-300 px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-cyan-400"
+        />
+        <span className="text-xs text-gray-600">{unidad}</span>
+        <button
+          type="button"
+          onClick={guardar}
+          disabled={posting}
+          className="rounded-md bg-cyan-600 px-3 py-1 text-xs font-bold text-white hover:bg-cyan-700 disabled:opacity-50"
+        >
+          {posting ? '…' : 'Confirmar echada inicial'}
+        </button>
+        <button
+          type="button"
+          onClick={() => { setOpen(false); setCant(''); }}
+          className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+          title="Cancelar"
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── DosificarAguaPaso ──────────────────────────────────────────────────────
+// Botón destacado dentro del bloque de un paso que tiene definida una
+// `cantidad_agua` en la receta. El operario lo pulsa cuando llega a ese paso
+// para registrar la echada de esa cantidad (con opción de ajustarla antes).
+function DosificarAguaPaso({
+  ordenId, ingredienteId, productoId, cantidadSugerida, cantidadPlanPaso, sobranteAnterior, unidad,
+  echadoTotal, echadoEstePaso, totalNecesario, pteTotal, pasoNum, pasoIndex, onChange,
+}: {
+  ordenId: string;
+  ingredienteId: string;
+  productoId: string;
+  cantidadSugerida: number;
+  cantidadPlanPaso: number;
+  sobranteAnterior: number;
+  unidad: string;
+  echadoTotal: number;
+  echadoEstePaso: number;
+  totalNecesario: number;
+  pteTotal: number;
+  pasoNum: number;
+  pasoIndex: number;
+  onChange?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [cant, setCant] = useState<string>(cantidadSugerida.toFixed(2));
+  const [posting, setPosting] = useState(false);
+
+  useEffect(() => { setCant(cantidadSugerida.toFixed(2)); }, [cantidadSugerida]);
+
+  const guardar = async () => {
+    const c = parseFloat(cant);
+    if (!Number.isFinite(c) || c <= 0) { notify.error('Cantidad inválida'); return; }
+    setPosting(true);
+    try {
+      await produccionApi.dosificar(ordenId, {
+        producto_id: productoId,
+        cantidad: c,
+        ingrediente_receta_id: ingredienteId,
+        paso_index: pasoIndex,
+        notas: `Paso ${pasoNum}`,
+      });
+      notify.success(`+${c.toFixed(2)} ${unidad} echados (paso ${pasoNum})`);
+      setOpen(false);
+      onChange?.();
+    } catch (e: any) {
+      notify.error(e?.response?.data?.error ?? 'Error al echar');
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const completo = pteTotal <= 0.01;
+  const overPour = echadoTotal > totalNecesario + 0.01;
+  return (
+    <div className={clsx(
+      'rounded-xl border-2 px-4 py-3',
+      overPour
+        ? 'border-amber-300 bg-gradient-to-br from-amber-50 to-orange-50/40'
+        : completo
+          ? 'border-emerald-300 bg-gradient-to-br from-emerald-50 to-blue-50/40'
+          : 'border-blue-200 bg-gradient-to-br from-blue-50 to-cyan-50/40'
+    )}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className={clsx(
+            'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white',
+            overPour ? 'bg-amber-500' : completo ? 'bg-emerald-500' : 'bg-blue-500'
+          )}>
+            {completo ? <Check size={14} /> : <Droplets size={14} />}
+          </div>
+          <div className="min-w-0">
+            <p className={clsx('text-xs font-bold', overPour ? 'text-amber-900' : completo ? 'text-emerald-900' : 'text-blue-900')}>
+              Agua de este paso
+              {echadoEstePaso > 0 && <span className="ml-1 text-emerald-600">· {echadoEstePaso.toFixed(2)} {unidad} ya echados</span>}
+              {completo && !overPour && <span className="ml-1 text-emerald-700">· total alcanzado</span>}
+              {overPour && <span className="ml-1 text-amber-700">· +{(echadoTotal - totalNecesario).toFixed(2)} extra</span>}
+            </p>
+            <p className={clsx('text-[10px]', overPour ? 'text-amber-700' : 'text-blue-700')}>
+              Plan paso: <b>{cantidadPlanPaso.toFixed(2)}</b>
+              {sobranteAnterior > 0.01 && (
+                <> · sobrante anterior <b className="text-amber-700">+{sobranteAnterior.toFixed(2)}</b></>
+              )}
+              <span className="mx-1.5 text-blue-300">|</span>
+              Total receta <b>{totalNecesario.toFixed(2)}</b> · ya <b>{echadoTotal.toFixed(2)}</b>
+            </p>
+          </div>
+        </div>
+        {!open && (
+          <button
+            onClick={() => { setCant(cantidadSugerida.toFixed(2)); setOpen(true); }}
+            className={clsx(
+              'shrink-0 rounded-lg px-3 py-1.5 text-xs font-bold text-white transition-colors shadow-sm',
+              overPour ? 'bg-amber-500 hover:bg-amber-600' : completo ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'
+            )}
+          >
+            {completo ? `Echar más (${cantidadSugerida.toFixed(2)} ${unidad})` : `Echar ${cantidadSugerida.toFixed(2)} ${unidad}`}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <input
+            type="number"
+            step="0.01"
+            min="0.001"
+            autoFocus
+            value={cant}
+            onChange={(e) => setCant(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') guardar(); if (e.key === 'Escape') setOpen(false); }}
+            className="w-28 rounded-md border border-blue-300 px-2 py-1 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+          <span className="text-xs text-gray-600">{unidad}</span>
+          <button
+            onClick={guardar}
+            disabled={posting}
+            className="rounded-md bg-blue-600 px-3 py-1 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {posting ? '…' : 'Confirmar echada'}
+          </button>
+          <button
+            onClick={() => setOpen(false)}
+            className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+            title="Cancelar"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

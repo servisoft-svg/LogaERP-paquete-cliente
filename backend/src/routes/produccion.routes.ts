@@ -52,6 +52,8 @@ router.put ('/:id',             produccionController.editar);
 router.post('/:id/confirmar',   uploadImages.array('fotos', 10), produccionController.confirmar);
 router.post('/:id/adjuntar',    uploadFiles.array('archivos', 10), produccionController.adjuntar);
 router.get ('/:id/trazabilidad.pdf', produccionController.trazabilidadPdf);
+router.get ('/:id/receta.pdf',       produccionController.recetaPdf);
+router.post('/:id/receta.pdf',       produccionController.recetaPdf);
 router.get ('/:id/detalle',     produccionController.detalle);
 router.post('/:id/enviar-trazabilidad', produccionController.enviarTrazabilidad);
 router.delete('/:id',           produccionController.eliminar);
@@ -870,6 +872,271 @@ router.get('/lote/:loteId/origen', async (req, res) => {
     return res.json({ orden_id: move.orden_id, consumos });
   } catch (err: unknown) {
     return res.status(500).json({ error: 'Error al obtener trazabilidad del lote.' });
+  }
+});
+
+// ── DOSIFICACIÓN PARCIAL (echadas durante fabricación) ─────────────────────
+// Permite registrar echadas parciales de materias primas mientras la orden
+// está en curso. Cada echada descuenta stock del lote elegido al instante
+// (stock_moves tipo 'produccion_consumo'). El "pendiente" se calcula
+// comparando con la cantidad planificada de la receta (ajustada al ratio
+// cantidad_planificada / rendimiento).
+
+// GET /api/produccion/:id/dosificaciones — estado por MP (plan/echado/pte) + historial
+router.get('/:id/dosificaciones', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows: [orden] } = await pool.query(
+      `SELECT op.id, op.numero_orden, op.receta_id, op.estado,
+              op.cantidad_planificada, r.rendimiento
+       FROM ordenes_produccion op
+       JOIN recetas r ON r.id = op.receta_id
+       WHERE op.id = $1`, [id]
+    );
+    if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    const ratio = parseFloat(orden.cantidad_planificada) / parseFloat(orden.rendimiento);
+    const { rows: ingredientes } = await pool.query(
+      `SELECT ir.id AS ingrediente_id, ir.materia_prima_id AS producto_id,
+              ir.cantidad AS cantidad_unitaria, ir.porcentaje_merma, ir.unidad_medida,
+              p.nombre, p.codigo, p.stock_actual, p.unidad_medida AS producto_unidad,
+              p.subcategoria_mp, p.es_aditivo
+       FROM ingredientes_receta ir
+       JOIN productos p ON p.id = ir.materia_prima_id
+       WHERE ir.receta_id = $1
+       ORDER BY p.nombre ASC`,
+      [orden.receta_id]
+    );
+
+    const { rows: dosificaciones } = await pool.query(
+      `SELECT d.id, d.producto_id, d.ingrediente_receta_id, d.paso_index, d.lote_id, d.cantidad, d.unidad_medida,
+              d.notas, d.created_at, l.lote_interno, u.nombre AS operario_nombre
+       FROM dosificaciones_orden d
+       LEFT JOIN lotes l ON l.id = d.lote_id
+       LEFT JOIN usuarios u ON u.id = d.operario_id
+       WHERE d.orden_id = $1
+       ORDER BY d.created_at ASC`,
+      [id]
+    );
+
+    // Agregado por (ingrediente, paso) — el frontend usa esto para
+    // redistribuir el sobrante de un paso al siguiente.
+    const echadoPorPaso: Record<string, Record<number, number>> = {};
+    for (const d of dosificaciones) {
+      if (d.ingrediente_receta_id == null || d.paso_index == null) continue;
+      const k = d.ingrediente_receta_id;
+      if (!echadoPorPaso[k]) echadoPorPaso[k] = {};
+      echadoPorPaso[k][d.paso_index] = (echadoPorPaso[k][d.paso_index] ?? 0) + parseFloat(d.cantidad);
+    }
+
+    // Echado por fila de receta (clave preferida si está disponible) y por
+    // producto como fallback retro-compat.
+    const echadoPorIngrediente: Record<string, number> = {};
+    const echadoPorProducto: Record<string, number> = {};
+    for (const d of dosificaciones) {
+      if (d.ingrediente_receta_id) {
+        echadoPorIngrediente[d.ingrediente_receta_id] = (echadoPorIngrediente[d.ingrediente_receta_id] ?? 0) + parseFloat(d.cantidad);
+      } else {
+        echadoPorProducto[d.producto_id] = (echadoPorProducto[d.producto_id] ?? 0) + parseFloat(d.cantidad);
+      }
+    }
+
+    // Cuántas filas hay del mismo producto (para no doblar el echado huérfano)
+    const conteoPorProducto: Record<string, number> = {};
+    for (const ing of ingredientes) {
+      conteoPorProducto[ing.producto_id] = (conteoPorProducto[ing.producto_id] ?? 0) + 1;
+    }
+    const items = ingredientes.map((ing: any) => {
+      const planificado = parseFloat(ing.cantidad_unitaria) * ratio * (1 + parseFloat(ing.porcentaje_merma) / 100);
+      // Echado de esta fila: el directo (clave preferida) o fallback por
+      // producto solo si hay UNA única fila del producto (compat antiguo).
+      const echadoIng = echadoPorIngrediente[ing.ingrediente_id];
+      const huerfanoProd = (conteoPorProducto[ing.producto_id] ?? 0) === 1 ? echadoPorProducto[ing.producto_id] : undefined;
+      const echado = echadoIng ?? huerfanoProd ?? 0;
+      return {
+        ingrediente_id: ing.ingrediente_id,
+        producto_id: ing.producto_id,
+        nombre: ing.nombre,
+        codigo: ing.codigo,
+        subcategoria_mp: ing.subcategoria_mp,
+        es_aditivo: ing.es_aditivo,
+        unidad_medida: ing.unidad_medida ?? ing.producto_unidad,
+        planificado: +planificado.toFixed(6),
+        echado: +echado.toFixed(6),
+        pendiente: +Math.max(0, planificado - echado).toFixed(6),
+        stock_actual: parseFloat(ing.stock_actual ?? '0'),
+      };
+    });
+
+    return res.json({
+      orden: { id: orden.id, numero_orden: orden.numero_orden, estado: orden.estado },
+      items,
+      dosificaciones,
+      echadoPorPaso,
+    });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error al cargar dosificaciones.' });
+  }
+});
+
+// POST /api/produccion/:id/dosificar — registra una echada parcial + descuenta stock
+router.post('/:id/dosificar', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id: ordenId } = req.params;
+    const { producto_id, lote_id, cantidad, notas, ingrediente_receta_id, paso_index } = req.body ?? {};
+    const userId = (req as any).user?.id ?? null;
+
+    const cant = Number(cantidad);
+    if (!producto_id || !Number.isFinite(cant) || cant <= 0) {
+      return res.status(400).json({ error: 'producto_id y cantidad (>0) son obligatorios' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: [orden] } = await client.query(
+      `SELECT id, numero_orden, estado FROM ordenes_produccion WHERE id = $1 FOR UPDATE`,
+      [ordenId]
+    );
+    if (!orden) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+    if (!['borrador', 'confirmada', 'en_proceso'].includes(orden.estado)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: `No se puede dosificar una orden en estado "${orden.estado}".` });
+    }
+
+    const { rows: [prod] } = await client.query(
+      `SELECT id, nombre, unidad_medida FROM productos WHERE id = $1`,
+      [producto_id]
+    );
+    if (!prod) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    // Si se indica lote, descontar de ese lote. Si no, FIFO.
+    let loteUsado: string | null = null;
+    let antes = 0, despues = 0;
+    if (lote_id) {
+      const { rows: [lote] } = await client.query(
+        `SELECT id, cantidad_actual FROM lotes
+         WHERE id = $1 AND producto_id = $2 AND estado = 'aprobado'
+         FOR UPDATE`,
+        [lote_id, producto_id]
+      );
+      if (!lote) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Lote no encontrado o no aprobado para este producto.' });
+      }
+      antes = parseFloat(lote.cantidad_actual);
+      if (antes < cant - 1e-6) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `Stock insuficiente en lote: disponible ${antes.toFixed(3)} ${prod.unidad_medida}, pedido ${cant.toFixed(3)}.` });
+      }
+      despues = antes - cant;
+      await client.query(`UPDATE lotes SET cantidad_actual = $1 WHERE id = $2`, [despues.toFixed(6), lote.id]);
+      loteUsado = lote.id;
+      await client.query(
+        `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
+         VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
+        [producto_id, lote.id, (-cant).toFixed(6), antes.toFixed(6), despues.toFixed(6), ordenId, userId, `Dosificación parcial ${orden.numero_orden}`]
+      );
+    } else {
+      // FIFO
+      const { rows: lotes } = await client.query(
+        `SELECT id, cantidad_actual FROM lotes
+         WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
+         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
+        [producto_id]
+      );
+      let resta = cant;
+      for (const l of lotes) {
+        if (resta <= 0) break;
+        const disp = parseFloat(l.cantidad_actual);
+        const usar = Math.min(disp, resta);
+        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1 WHERE id = $2`, [usar.toFixed(6), l.id]);
+        await client.query(
+          `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
+           VALUES ($1, $2, 'produccion_consumo', $3, $4, $5, $6, $7, $8)`,
+          [producto_id, l.id, (-usar).toFixed(6), disp.toFixed(6), (disp - usar).toFixed(6), ordenId, userId, `Dosificación parcial ${orden.numero_orden}`]
+        );
+        loteUsado = l.id; // último lote tocado (para mostrar en historial; FIFO puede tocar varios)
+        resta -= usar;
+      }
+      if (resta > 1e-6) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: `Stock insuficiente: faltan ${resta.toFixed(3)} ${prod.unidad_medida}.` });
+      }
+    }
+
+    const pasoIdx = paso_index != null && !isNaN(Number(paso_index)) ? Number(paso_index) : null;
+    const { rows: [dosif] } = await client.query(
+      `INSERT INTO dosificaciones_orden
+         (orden_id, producto_id, lote_id, cantidad, unidad_medida, operario_id, notas, ingrediente_receta_id, paso_index)
+       VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, $7, $8, $9::INT)
+       RETURNING *`,
+      [ordenId, producto_id, loteUsado, cant.toFixed(6), prod.unidad_medida ?? 'kg', userId, notas?.trim() || null, ingrediente_receta_id ?? null, pasoIdx]
+    );
+
+    // Al primera dosificación, marcar orden como en_proceso si estaba confirmada/borrador
+    if (orden.estado !== 'en_proceso') {
+      await client.query(
+        `UPDATE ordenes_produccion SET estado = 'en_proceso', fecha_inicio = COALESCE(fecha_inicio, NOW()) WHERE id = $1`,
+        [ordenId]
+      );
+    }
+
+    await client.query('COMMIT');
+    invalidarCacheFinanzas();
+    return res.status(201).json({ ok: true, dosificacion: dosif });
+  } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error al dosificar.' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/produccion/:id/dosificar/:dosifId — revertir una echada (devuelve stock al lote)
+router.delete('/:id/dosificar/:dosifId', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id: ordenId, dosifId } = req.params;
+    await client.query('BEGIN');
+    const { rows: [d] } = await client.query(
+      `SELECT id, producto_id, lote_id, cantidad FROM dosificaciones_orden
+       WHERE id = $1 AND orden_id = $2 FOR UPDATE`,
+      [dosifId, ordenId]
+    );
+    if (!d) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Dosificación no encontrada' });
+    }
+    const cant = parseFloat(d.cantidad);
+    if (d.lote_id) {
+      const { rows: [lote] } = await client.query(
+        `SELECT cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`, [d.lote_id]
+      );
+      const antes = parseFloat(lote?.cantidad_actual ?? '0');
+      const despues = antes + cant;
+      await client.query(`UPDATE lotes SET cantidad_actual = $1 WHERE id = $2`, [despues.toFixed(6), d.lote_id]);
+      await client.query(
+        `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
+         VALUES ($1, $2, 'ajuste', $3, $4, $5, $6, $7, $8)`,
+        [d.producto_id, d.lote_id, cant.toFixed(6), antes.toFixed(6), despues.toFixed(6), ordenId, (req as any).user?.id ?? null, 'Revertir dosificación parcial']
+      );
+    }
+    await client.query(`DELETE FROM dosificaciones_orden WHERE id = $1`, [dosifId]);
+    await client.query('COMMIT');
+    invalidarCacheFinanzas();
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => {});
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error al revertir.' });
+  } finally {
+    client.release();
   }
 });
 

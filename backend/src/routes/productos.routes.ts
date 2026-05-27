@@ -88,8 +88,23 @@ router.post('/importar', adminOnly, async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { tipo, busqueda, activo } = req.query;
+    // Detecta columnas/tablas opcionales (de migraciones 040+041) — fallback graceful
+    // si aún no se han aplicado en el entorno.
+    const { rows: meta } = await pool.query(
+      `SELECT
+        EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='proveedores' AND column_name='emails_adicionales') AS prov_emails,
+        EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name='producto_specs') AS has_specs`
+    );
+    const hasProvEmails = !!meta[0]?.prov_emails;
+    const hasSpecs      = !!meta[0]?.has_specs;
+
+    const provEmailsCols = hasProvEmails
+      ? `pv.emails_adicionales AS proveedor_emails_adicionales,
+         pv.ultimos_destinatarios AS proveedor_ultimos_destinatarios,`
+      : '';
     let sql = `
       SELECT p.*, pv.nombre AS proveedor_nombre, pv.email AS proveedor_email,
+        ${provEmailsCols}
         pg.nombre AS granel_nombre, pg.stock_actual AS granel_stock, pg.unidad_medida AS granel_unidad,
         p.stock_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.producto_id = p.id AND r.estado = 'activa'), 0) AS stock_disponible,
         CASE WHEN p.stock_minimo > 0 AND p.stock_actual <= p.stock_minimo THEN TRUE ELSE FALSE END AS alerta_activa,
@@ -97,7 +112,19 @@ router.get('/', async (req, res) => {
           WHEN p.stock_minimo > 0 AND p.stock_actual <= p.stock_minimo THEN 'rojo'
           WHEN p.stock_minimo > 0 AND p.stock_actual <= p.stock_minimo * (1 + COALESCE((SELECT porcentaje_alerta FROM configuracion_global LIMIT 1), 20) / 100.0) THEN 'naranja'
           ELSE 'verde'
-        END AS nivel_stock
+        END AS nivel_stock,
+        ${hasSpecs ? `COALESCE(
+          (SELECT json_agg(json_build_object(
+              'spec_id', ps.spec_id, 'nombre', sc.nombre, 'unidad', sc.unidad,
+              'decimales', sc.decimales, 'min_valor', ps.min_valor,
+              'max_valor', ps.max_valor, 'orden', ps.orden,
+              'parametros', ps.parametros
+            ) ORDER BY ps.orden, sc.nombre)
+            FROM producto_specs ps JOIN spec_catalogo sc ON sc.id = ps.spec_id
+            WHERE ps.producto_id = p.id
+          ),
+          '[]'::json
+        ) AS specs` : `'[]'::json AS specs`}
       FROM productos p
       LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
       LEFT JOIN productos pg ON pg.id = p.granel_id
@@ -163,22 +190,30 @@ router.post('/', adminOnly, async (req, res) => {
       nombre, descripcion, tipo, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
       peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses,
-      numero_cas,
+      numero_cas, subcategoria_mp, es_aditivo, confirmacion_msg,
     } = req.body;
 
-    // Auto-generar codigo si no viene
+    // subcategoria_mp y es_aditivo solo aplican a materia_prima
+    const subcatNorm = (tipo === 'materia_prima' && subcategoria_mp != null && String(subcategoria_mp).trim() !== '')
+      ? String(subcategoria_mp).trim().slice(0, 50) : null;
+    const aditivoNorm = tipo === 'materia_prima' ? (es_aditivo === true || es_aditivo === 'true') : false;
+
+    // Auto-generar codigo si no viene. Rellena huecos: si el MP-007 quedó libre
+    // (porque su producto fue eliminado y su código liberado), el nuevo lo reusa.
     if (!codigo) {
       const prefijo = tipo === 'materia_prima' ? 'MP' : tipo === 'material_embalaje' ? 'ME' : tipo === 'producto_envasado' ? 'PE' : 'PF';
-      const { rows: [maxRow] } = await pool.query(
-        `SELECT codigo FROM productos WHERE codigo LIKE $1 || '-%' ORDER BY codigo DESC LIMIT 1`,
+      const { rows } = await pool.query(
+        `SELECT codigo FROM productos WHERE codigo ~ ('^' || $1 || '-\\d+$')`,
         [prefijo]
       );
-      let nextNum = 1;
-      if (maxRow) {
-        const match = maxRow.codigo.match(new RegExp(`^${prefijo}-(\\d+)`));
-        if (match) nextNum = parseInt(match[1], 10) + 1;
+      const usados = new Set<number>();
+      for (const r of rows) {
+        const m = (r.codigo as string).match(new RegExp(`^${prefijo}-(\\d+)$`));
+        if (m) usados.add(parseInt(m[1], 10));
       }
-      codigo = `${prefijo}-${String(nextNum).padStart(3, '0')}`;
+      let n = 1;
+      while (usados.has(n)) n++;
+      codigo = `${prefijo}-${String(n).padStart(3, '0')}`;
     }
 
     // Bug previo: el POST omitía peso_unitario_kg, unidades_por_envase, peso_plastico_kg
@@ -187,9 +222,11 @@ router.post('/', adminOnly, async (req, res) => {
       `INSERT INTO productos
          (codigo, nombre, descripcion, tipo, unidad_medida,
           stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
-          peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses, numero_cas)
+          peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses, numero_cas,
+          subcategoria_mp, es_aditivo, confirmacion_msg)
        VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10,
-               $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER,$15)
+               $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER,$15,
+               $16,$17,$18)
        RETURNING *`,
       [
         codigo.trim().toUpperCase(),
@@ -211,6 +248,9 @@ router.post('/', adminOnly, async (req, res) => {
         caducidad_meses != null && caducidad_meses !== '' && Number(caducidad_meses) > 0
           ? Math.floor(Number(caducidad_meses)) : null,
         numero_cas != null && String(numero_cas).trim() !== '' ? String(numero_cas).trim() : null,
+        subcatNorm,
+        aditivoNorm,
+        confirmacion_msg != null && String(confirmacion_msg).trim() !== '' ? String(confirmacion_msg).trim() : null,
       ]
     );
     invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
@@ -234,6 +274,12 @@ router.put('/:id', adminOnly, async (req, res) => {
       solidos_min, solidos_max, ph_min, ph_max, viscosidad_min, viscosidad_max,
       // Identificador químico
       numero_cas,
+      // Subcategoría MP + aditivo (solo materia prima)
+      subcategoria_mp, es_aditivo,
+      // Mensaje opcional de confirmación en fabricación
+      confirmacion_msg,
+      // Granel asociado al producto envasado (cola que lleva dentro)
+      granel_id,
       reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
@@ -317,7 +363,11 @@ router.put('/:id', adminOnly, async (req, res) => {
          ph_max         = $20::NUMERIC,
          viscosidad_min = $21::NUMERIC,
          viscosidad_max = $22::NUMERIC,
-         numero_cas     = $23
+         numero_cas     = $23,
+         subcategoria_mp = COALESCE($24, subcategoria_mp),
+         es_aditivo     = COALESCE($25, es_aditivo),
+         confirmacion_msg = CASE WHEN $26::BOOLEAN THEN $27::TEXT ELSE confirmacion_msg END,
+         granel_id      = CASE WHEN $28::BOOLEAN THEN $29::UUID ELSE granel_id END
        WHERE id = $11
        RETURNING *`,
       [
@@ -346,6 +396,16 @@ router.put('/:id', adminOnly, async (req, res) => {
         viscosidad_min != null && viscosidad_min !== '' ? Number(viscosidad_min) : null,
         viscosidad_max != null && viscosidad_max !== '' ? Number(viscosidad_max) : null,
         numero_cas != null && String(numero_cas).trim() !== '' ? String(numero_cas).trim() : null,
+        subcategoria_mp !== undefined
+          ? (subcategoria_mp != null && String(subcategoria_mp).trim() !== ''
+              ? String(subcategoria_mp).trim().slice(0, 50)
+              : null)
+          : null,
+        es_aditivo !== undefined ? (es_aditivo === true || es_aditivo === 'true') : null,
+        confirmacion_msg !== undefined,
+        confirmacion_msg != null && String(confirmacion_msg).trim() !== '' ? String(confirmacion_msg).trim() : null,
+        granel_id !== undefined,
+        granel_id != null && String(granel_id).trim() !== '' ? String(granel_id).trim() : null,
       ]
     );
 
@@ -430,7 +490,15 @@ router.get('/:id/trazabilidad.csv', async (req, res) => {
 // DELETE /api/productos/:id  (soft delete)
 router.delete('/:id', adminOnly, async (req, res) => {
   try {
-    await pool.query(`UPDATE productos SET activo = FALSE WHERE id = $1`, [req.params.id]);
+    // Soft delete + libera el codigo renombrándolo, para que el siguiente
+    // alta pueda reutilizar ese hueco (ej. MP-007 → MP-007.del-1234567890).
+    await pool.query(
+      `UPDATE productos
+         SET activo = FALSE,
+             codigo = codigo || '.del-' || EXTRACT(EPOCH FROM NOW())::BIGINT
+       WHERE id = $1`,
+      [req.params.id]
+    );
     // [H1.1 audit v3] Auditoría fail-soft: nunca bloquea la respuesta. Si el
     // INSERT falla (BD intermitente, FK rara), la operación principal ya está
     // hecha y se loguea como warn. Sin await: la promesa se resuelve aparte.

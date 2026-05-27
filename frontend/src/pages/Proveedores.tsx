@@ -15,7 +15,7 @@ export default function Proveedores() {
   const [busqueda, setBusqueda]       = useState('');
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Proveedor | null>(null);
-  const [form, setForm]               = useState({ nombre: '', email: '', telefono: '', direccion: '' });
+  const [form, setForm]               = useState({ nombre: '', email: '', emails_adicionales: '', telefono: '', direccion: '' });
   const [saving, setSaving]           = useState(false);
   const [error, setError]             = useState('');
 
@@ -31,7 +31,7 @@ export default function Proveedores() {
 
   const abrirNuevo = () => {
     setEditando(null);
-    setForm({ nombre: '', email: '', telefono: '', direccion: '' });
+    setForm({ nombre: '', email: '', emails_adicionales: '', telefono: '', direccion: '' });
     setError('');
     setModalOpen(true);
   };
@@ -41,6 +41,7 @@ export default function Proveedores() {
     setForm({
       nombre:    p.nombre,
       email:     p.email,
+      emails_adicionales: (p.emails_adicionales ?? []).join(', '),
       telefono:  p.telefono ?? '',
       direccion: p.direccion ?? '',
     });
@@ -233,6 +234,15 @@ export default function Proveedores() {
               value={form.email}
               onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
               placeholder="pedidos@proveedor.com"
+            />
+          </FormField>
+
+          <FormField label="Emails adicionales" hint="Separados por coma. Podrás elegir cuáles incluir al enviar el pedido.">
+            <Textarea
+              rows={2}
+              value={form.emails_adicionales}
+              onChange={(e) => setForm((f) => ({ ...f, emails_adicionales: e.target.value }))}
+              placeholder="ventas@proveedor.com, atencion@proveedor.com"
             />
           </FormField>
 

@@ -14,7 +14,8 @@ router.get('/', async (_req, res) => {
       `SELECT id, porcentaje_alerta, plantilla_email, email_remitente,
               smtp_host, smtp_port, smtp_user,
               CASE WHEN smtp_pass_enc <> '' THEN '••••••••' ELSE '' END AS smtp_pass_set,
-              empresa_nombre, empresa_cif, empresa_direccion, empresa_telefono, empresa_web
+              empresa_nombre, empresa_cif, empresa_direccion, empresa_telefono, empresa_web,
+              datos_bancarios
        FROM configuracion_global WHERE id = 1`
     );
     return res.json(cfg);
@@ -153,6 +154,132 @@ router.post('/enviar-email', async (req, res) => {
   }
 });
 
+// ───────── GOOGLE DRIVE OAUTH ─────────
+
+// GET /api/configuracion/gdrive — estado actual de credenciales
+router.get('/gdrive', async (_req, res) => {
+  try {
+    const { loadConfig } = await import('../lib/gdrive');
+    const cfg = await loadConfig();
+    res.json({
+      client_id_configurado: !!cfg?.client_id,
+      autorizado: !!cfg?.refresh_token,
+      email: cfg?.email ?? null,
+      folder_id: cfg?.folder_id ?? null,
+    });
+  } catch (e) {
+    res.json({ client_id_configurado: false, autorizado: false, email: null, folder_id: null });
+  }
+});
+
+// PUT /api/configuracion/gdrive — guardar Client ID + Client Secret (sin refresh_token aún)
+router.put('/gdrive', async (req, res) => {
+  try {
+    const { client_id, client_secret, folder_id } = req.body ?? {};
+    if (!client_id || !client_secret) {
+      return res.status(400).json({ error: 'client_id y client_secret obligatorios' });
+    }
+    const { saveCredentials } = await import('../lib/gdrive');
+    await saveCredentials({
+      client_id: String(client_id).trim(),
+      client_secret: String(client_secret).trim(),
+      folder_id: folder_id ? String(folder_id).trim() : null,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// GET /api/configuracion/gdrive/authorize?redirect_uri=... — genera URL para que el user autorice
+router.get('/gdrive/authorize', async (req, res) => {
+  try {
+    const { loadConfig, buildOAuthClient, buildAuthUrl } = await import('../lib/gdrive');
+    const cfg = await loadConfig();
+    if (!cfg) return res.status(400).json({ error: 'Configura primero Client ID y Client Secret' });
+    const redirectUri = String(req.query.redirect_uri ?? '');
+    if (!redirectUri) return res.status(400).json({ error: 'redirect_uri obligatorio' });
+    const client = buildOAuthClient(cfg, redirectUri);
+    res.json({ url: buildAuthUrl(client), redirect_uri: redirectUri });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// POST /api/configuracion/gdrive/callback — intercambia el code por refresh_token
+router.post('/gdrive/callback', async (req, res) => {
+  try {
+    const { code, redirect_uri } = req.body ?? {};
+    if (!code || !redirect_uri) return res.status(400).json({ error: 'code y redirect_uri obligatorios' });
+    const { loadConfig, buildOAuthClient, saveCredentials } = await import('../lib/gdrive');
+    const cfg = await loadConfig();
+    if (!cfg) return res.status(400).json({ error: 'Falta Client ID / Secret en BD' });
+    const oauth = buildOAuthClient(cfg, String(redirect_uri));
+    const { tokens } = await oauth.getToken(String(code));
+    if (!tokens.refresh_token) {
+      return res.status(400).json({ error: 'Google no devolvió refresh_token. Revoca el acceso de la app y vuelve a autorizar.' });
+    }
+    // Identificar email del usuario que autorizó
+    let email: string | null = null;
+    try {
+      oauth.setCredentials(tokens);
+      const { google } = await import('googleapis');
+      const oauth2 = google.oauth2({ version: 'v2', auth: oauth });
+      const info = await oauth2.userinfo.get();
+      email = info.data.email ?? null;
+    } catch { /* opcional */ }
+    await saveCredentials({ refresh_token: tokens.refresh_token, email });
+    res.json({ ok: true, email });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// POST /api/configuracion/gdrive/disconnect — borrar refresh_token
+router.post('/gdrive/disconnect', async (_req, res) => {
+  try {
+    await pool.query(
+      `UPDATE configuracion_global SET gdrive_refresh_token = NULL, gdrive_email = NULL WHERE id = 1`
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// GET /api/configuracion/backup-password — indica si está configurada (no devuelve la clave)
+router.get('/backup-password', async (_req, res) => {
+  try {
+    const { rows: [c] } = await pool.query(`SELECT backup_password FROM configuracion_global WHERE id = 1`);
+    const fromDb = c?.backup_password as string | null;
+    const fromEnv = process.env.BACKUP_PASSWORD;
+    res.json({
+      configurada: !!(fromDb && fromDb.length >= 12) || !!(fromEnv && fromEnv.length >= 12),
+      origen: fromDb && fromDb.length >= 12 ? 'bd' : (fromEnv && fromEnv.length >= 12 ? 'env' : 'ninguno'),
+      longitud: fromDb ? fromDb.length : (fromEnv ? fromEnv.length : 0),
+    });
+  } catch {
+    res.json({ configurada: !!(process.env.BACKUP_PASSWORD && process.env.BACKUP_PASSWORD.length >= 12), origen: 'env', longitud: process.env.BACKUP_PASSWORD?.length ?? 0 });
+  }
+});
+
+// PUT /api/configuracion/backup-password — actualizar la contraseña
+router.put('/backup-password', async (req, res) => {
+  try {
+    const { password } = req.body ?? {};
+    if (!password || String(password).length < 12) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 12 caracteres' });
+    }
+    await pool.query(
+      `UPDATE configuracion_global SET backup_password = $1 WHERE id = 1`,
+      [String(password)]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
 // Estado del ultimo backup (para dashboard)
 let ultimoBackup: { fecha: string; ok: boolean; filename?: string; size?: string; local?: boolean; icloud?: boolean; drive?: boolean; error?: string } | null = null;
 
@@ -176,6 +303,8 @@ router.post('/backup', async (req, res) => {
     res.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error en backup';
+    const stack = err instanceof Error ? err.stack : undefined;
+    logger.error(`[configuracion POST /backup] FALLÓ: ${msg}`, { stack });
     ultimoBackup = { fecha: new Date().toISOString(), ok: false, error: msg };
     res.status(500).json({ error: msg });
   }
@@ -239,7 +368,7 @@ router.put('/', async (req, res) => {
   try {
     const { porcentaje_alerta, plantilla_email, email_remitente, smtp_user, smtp_pass_enc,
             empresa_nombre, empresa_cif, empresa_direccion, empresa_telefono, empresa_web,
-            nivel_bronce, nivel_plata, nivel_oro } = req.body;
+            nivel_bronce, nivel_plata, nivel_oro, datos_bancarios } = req.body;
     const { rows: [cfg] } = await pool.query(
       `UPDATE configuracion_global SET
          porcentaje_alerta = COALESCE($1::NUMERIC, porcentaje_alerta),
@@ -254,7 +383,8 @@ router.put('/', async (req, res) => {
          empresa_web       = COALESCE($10, empresa_web),
          nivel_bronce      = COALESCE($11::NUMERIC, nivel_bronce),
          nivel_plata       = COALESCE($12::NUMERIC, nivel_plata),
-         nivel_oro         = COALESCE($13::NUMERIC, nivel_oro)
+         nivel_oro         = COALESCE($13::NUMERIC, nivel_oro),
+         datos_bancarios   = CASE WHEN $14::BOOLEAN THEN $15::TEXT ELSE datos_bancarios END
        WHERE id = 1
        RETURNING *`,
       [
@@ -271,6 +401,8 @@ router.put('/', async (req, res) => {
         nivel_bronce != null ? Number(nivel_bronce) : null,
         nivel_plata != null ? Number(nivel_plata) : null,
         nivel_oro != null ? Number(nivel_oro) : null,
+        datos_bancarios !== undefined,
+        datos_bancarios != null ? String(datos_bancarios) : null,
       ]
     );
 
@@ -305,6 +437,89 @@ router.get('/auditoria', async (_req, res) => {
     res.json(rows);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// ── SUBCATEGORÍAS MP (catálogo editable: resina, agua, pigmento…) ──────────
+router.get('/subcategorias-mp', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nombre, orden, activo FROM subcategorias_mp
+       WHERE activo = TRUE ORDER BY orden ASC, nombre ASC`
+    );
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+router.post('/subcategorias-mp', async (req, res) => {
+  try {
+    const nombre = String(req.body?.nombre ?? '').trim().slice(0, 50);
+    const orden = Number.isFinite(Number(req.body?.orden)) ? Number(req.body?.orden) : 0;
+    if (!nombre) return res.status(400).json({ error: 'Nombre obligatorio' });
+    const { rows: [row] } = await pool.query(
+      `INSERT INTO subcategorias_mp (nombre, orden) VALUES ($1, $2) RETURNING id, nombre, orden, activo`,
+      [nombre, orden]
+    );
+    return res.status(201).json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe una sub-categoría con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.put('/subcategorias-mp/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, orden, activo } = req.body ?? {};
+    const nombreNorm = nombre != null ? String(nombre).trim().slice(0, 50) : null;
+    if (nombreNorm !== null && !nombreNorm) return res.status(400).json({ error: 'Nombre no puede estar vacío' });
+    // Si se renombra, propagar el cambio a productos.subcategoria_mp para
+    // mantener consistencia (sub-categoría se almacena como texto).
+    if (nombreNorm) {
+      const { rows: [actual] } = await pool.query(`SELECT nombre FROM subcategorias_mp WHERE id = $1`, [id]);
+      if (actual && actual.nombre !== nombreNorm) {
+        await pool.query(
+          `UPDATE productos SET subcategoria_mp = $1 WHERE subcategoria_mp = $2`,
+          [nombreNorm, actual.nombre]
+        );
+      }
+    }
+    const { rows: [row] } = await pool.query(
+      `UPDATE subcategorias_mp SET
+         nombre = COALESCE($1, nombre),
+         orden  = COALESCE($2::INT, orden),
+         activo = COALESCE($3, activo)
+       WHERE id = $4 RETURNING id, nombre, orden, activo`,
+      [nombreNorm, orden != null ? Number(orden) : null, activo ?? null, id]
+    );
+    if (!row) return res.status(404).json({ error: 'Sub-categoría no encontrada' });
+    return res.json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe una sub-categoría con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.delete('/subcategorias-mp/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Soft delete (mantener integridad de productos con esta sub-categoría asignada)
+    const { rows: [row] } = await pool.query(
+      `UPDATE subcategorias_mp SET activo = FALSE WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Sub-categoría no encontrada' });
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
 

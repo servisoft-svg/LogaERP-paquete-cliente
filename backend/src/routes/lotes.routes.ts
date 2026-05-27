@@ -10,7 +10,17 @@ router.get('/', async (req, res) => {
     const { producto_id, estado, busqueda } = req.query;
     let sql = `
       SELECT l.*, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
-             p.unidad_medida
+             p.unidad_medida,
+             COALESCE(
+               (SELECT json_agg(json_build_object(
+                  'spec_id', ls.spec_id, 'valor', ls.valor,
+                  'nombre', sc.nombre, 'unidad', sc.unidad, 'decimales', sc.decimales
+                ) ORDER BY sc.nombre)
+                FROM lote_specs ls JOIN spec_catalogo sc ON sc.id = ls.spec_id
+                WHERE ls.lote_id = l.id
+               ),
+               '[]'::json
+             ) AS specs_valores
       FROM lotes l
       JOIN productos p ON p.id = l.producto_id
       WHERE 1=1
@@ -60,6 +70,10 @@ router.post('/', async (req, res) => {
       solidos, ph, viscosidad,
       // Coste de porte/transporte
       porte,
+      // Unidad en la que se introdujo el precio (kg, L, ud…). NULL = unidad del producto.
+      unidad_precio,
+      // Specs dinámicas: array [{spec_id, valor}]
+      specs_valores,
     } = req.body;
 
     const qty = cantidad ?? cantidad_inicial;
@@ -98,9 +112,9 @@ router.post('/', async (req, res) => {
         `INSERT INTO lotes
            (producto_id, lote_interno, lote_proveedor, cantidad_inicial, cantidad_actual,
             fecha_fabricacion, fecha_caducidad, ubicacion, observaciones, estado, precio_compra,
-            solidos, ph, viscosidad, porte)
+            solidos, ph, viscosidad, porte, unidad_precio)
          VALUES ($1,$2,$3,$4::NUMERIC,$5::NUMERIC,$6,$7,$8,$9,COALESCE($10::estado_lote,'cuarentena'),$11::NUMERIC,
-                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC,$15::NUMERIC)
+                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC,$15::NUMERIC,$16)
          RETURNING *`,
         [
           producto_id,
@@ -118,9 +132,109 @@ router.post('/', async (req, res) => {
           ph         != null && ph         !== '' ? Number(ph)         : null,
           viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
           porte      != null && porte      !== '' ? Number(porte)      : 0,
+          unidad_precio != null && String(unidad_precio).trim() !== '' ? String(unidad_precio).trim() : null,
         ]
       );
       lote = result.rows[0];
+
+      // Inserta valores de specs dinámicas si vinieron + crea control de calidad
+      // analítico firmado automáticamente con esos mismos valores (un único registro
+      // de QC por lote que el responsable puede ver/ampliar luego en Calidad).
+      if (Array.isArray(specs_valores) && specs_valores.length > 0) {
+        const valoresFiltrados = specs_valores.filter((sv: { spec_id?: number; valor?: string | number }) =>
+          sv?.spec_id != null && sv.valor != null && sv.valor !== ''
+        );
+
+        for (const sv of valoresFiltrados) {
+          await client.query(
+            `INSERT INTO lote_specs (lote_id, spec_id, valor)
+             VALUES ($1, $2, $3::NUMERIC)
+             ON CONFLICT (lote_id, spec_id) DO UPDATE SET valor = EXCLUDED.valor`,
+            [lote.id, sv.spec_id, Number(sv.valor)]
+          );
+        }
+
+        // ── Auto-crear control de calidad analítico ──────────────────────
+        // Solo si hay al menos un valor introducido. Evalúa APTO/NO APTO comparando
+        // con los rangos del producto. Firmado por el usuario actual.
+        if (valoresFiltrados.length > 0) {
+          try {
+            const userId = (req as any).user?.id ?? null;
+            let firmadoPorNombre: string | null = null;
+            if (userId) {
+              const { rows: [u] } = await client.query(`SELECT nombre FROM usuarios WHERE id = $1`, [userId]);
+              firmadoPorNombre = u?.nombre ?? null;
+            }
+            // Carga specs del producto para evaluar rango → resultado
+            const { rows: rangos } = await client.query(
+              `SELECT ps.spec_id, sc.nombre, sc.unidad, ps.min_valor, ps.max_valor
+               FROM producto_specs ps JOIN spec_catalogo sc ON sc.id = ps.spec_id
+               WHERE ps.producto_id = $1`,
+              [producto_id]
+            );
+            const rangosMap = new Map<number, { nombre: string; unidad: string | null; min: number | null; max: number | null }>();
+            for (const r of rangos) rangosMap.set(r.spec_id, {
+              nombre: r.nombre, unidad: r.unidad,
+              min: r.min_valor != null ? parseFloat(r.min_valor) : null,
+              max: r.max_valor != null ? parseFloat(r.max_valor) : null,
+            });
+            let resultado: 'apto' | 'no_apto' = 'apto';
+            for (const sv of valoresFiltrados) {
+              const r = rangosMap.get(sv.spec_id);
+              if (!r) continue;
+              const v = Number(sv.valor);
+              if ((r.min != null && v < r.min) || (r.max != null && v > r.max)) {
+                resultado = 'no_apto'; break;
+              }
+            }
+
+            // Detecta columna estado (migración 045)
+            const { rows: [meta] } = await client.query(
+              `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='controles_calidad' AND column_name='estado') AS has_estado`
+            );
+            const hasEstado = !!meta?.has_estado;
+
+            // Mapea a campos legacy
+            let phVal: number | null = null, solVal: number | null = null, viscVal: number | null = null;
+            const valoresFull: { spec_id: number; nombre: string; valor: number; unidad: string | null }[] = [];
+            for (const sv of valoresFiltrados) {
+              const r = rangosMap.get(sv.spec_id);
+              const nombre = r?.nombre ?? '';
+              const v = Number(sv.valor);
+              valoresFull.push({ spec_id: sv.spec_id, nombre, valor: v, unidad: r?.unidad ?? null });
+              if (nombre === 'pH') phVal = v;
+              if (nombre === 'Sólidos') solVal = v;
+              if (nombre === 'Viscosidad') viscVal = v;
+            }
+
+            const ccCols = `tipo, fecha, lote_codigo, producto_id, producto_nombre,
+                            ph_valor, solidos_valor, viscosidad_valor,
+                            resultado, firmado_por_id, firmado_por_nombre, firmado_at, created_by_id`;
+            const ccVals = `'analitico', CURRENT_DATE, $1, $2, (SELECT nombre FROM productos WHERE id = $2),
+                            $3::NUMERIC, $4::NUMERIC, $5::NUMERIC,
+                            $6, $7, $8, NOW(), $7`;
+            const ccParams: unknown[] = [lote.lote_interno, producto_id, phVal, solVal, viscVal, resultado, userId, firmadoPorNombre];
+            const sqlCC = hasEstado
+              ? `INSERT INTO controles_calidad (${ccCols}, estado) VALUES (${ccVals}, 'completado') RETURNING id`
+              : `INSERT INTO controles_calidad (${ccCols}) VALUES (${ccVals}) RETURNING id`;
+            const { rows: [cc] } = await client.query(sqlCC, ccParams);
+
+            // Guarda valores en tabla nueva (si existe)
+            try {
+              for (const v of valoresFull) {
+                await client.query(
+                  `INSERT INTO controles_calidad_valores (control_id, spec_id, nombre, valor, unidad)
+                   VALUES ($1, $2, $3, $4::NUMERIC, $5)`,
+                  [cc.id, v.spec_id, v.nombre, v.valor, v.unidad]
+                );
+              }
+            } catch { /* migración 047 puede no estar */ }
+          } catch (e) {
+            console.warn('[POST /lotes] Auto-crear control de calidad falló:', (e as Error).message);
+          }
+        }
+      }
+
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK');
@@ -210,7 +324,7 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad, porte } = req.body;
+    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad, porte, lote_interno } = req.body;
 
     if (cantidad_actual != null && Number(cantidad_actual) < 0) {
       return res.status(400).json({ error: 'La cantidad no puede ser negativa' });
@@ -229,7 +343,8 @@ router.put('/:id', async (req, res) => {
         solidos    = COALESCE($6::NUMERIC, solidos),
         ph         = COALESCE($7::NUMERIC, ph),
         viscosidad = COALESCE($8::NUMERIC, viscosidad),
-        porte      = COALESCE($9::NUMERIC, porte)
+        porte      = COALESCE($9::NUMERIC, porte),
+        lote_interno = COALESCE($10, lote_interno)
        WHERE id = $5 RETURNING *`,
       [
         cantidad_actual ?? null, ubicacion ?? null, observaciones ?? null, precio_compra ?? null, req.params.id,
@@ -237,6 +352,7 @@ router.put('/:id', async (req, res) => {
         ph         != null && ph         !== '' ? Number(ph)         : null,
         viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
         porte      != null && porte      !== '' ? Number(porte)      : null,
+        lote_interno != null && String(lote_interno).trim() !== '' ? String(lote_interno).trim().toUpperCase() : null,
       ]
     );
     if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });

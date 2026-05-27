@@ -5,6 +5,7 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import compression from 'compression';
 import dotenv  from 'dotenv';
 import path    from 'path';
+import fs      from 'fs';
 import http    from 'http';
 
 import produccionRoutes      from './routes/produccion.routes';
@@ -17,6 +18,12 @@ import clientesRoutes         from './routes/clientes.routes';
 import pedidosRoutes, { webhookHandler } from './routes/pedidos.routes';
 import configuracionRoutes    from './routes/configuracion.routes';
 import controlesCalidadRoutes from './routes/controles-calidad.routes';
+import specsRoutes             from './routes/specs.routes';
+import recordatoriosRoutes     from './routes/recordatorios.routes';
+import pedidosProgramadosRoutes from './routes/pedidos-programados.routes';
+import cambioRoutes              from './routes/cambio.routes';
+import facturasRoutes            from './routes/facturas.routes';
+import { emailService } from './services/email.service';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
 import { authMiddleware, adminOnly, verifyToken } from './middleware/auth';
@@ -46,24 +53,24 @@ const app  = express();
 const PORT = process.env.PORT ?? 3001;
 
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      frameAncestors: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"],
-    },
-  },
+  // CSP desactivado: la app corre en LAN local (sin internet expuesto), donde la
+  // protección contra XSS via CSP aporta poco y rompe Google Fonts + el inline
+  // bootstrap de Vite. Si algún día se expone público con HTTPS, reactivar.
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
-  hsts: { maxAge: 31536000, includeSubDomains: true },
+  // HSTS solo cuando hay HTTPS real. En HTTP fuerza upgrade que rompe el cliente.
+  hsts: process.env.HSTS === 'true' ? { maxAge: 31536000, includeSubDomains: true } : false,
 }));
 app.use(compression());
+
+// ── Servir frontend compilado ANTES de cualquier middleware que pueda fallar
+// (auditoría, rate limiter, traceId, etc). Los assets son archivos puros, no
+// necesitan auditarse ni autenticarse. Esto evita 500 espurios cuando
+// middlewares posteriores tienen errores.
+const FRONTEND_DIST_EARLY = path.resolve(process.cwd(), '..', 'frontend', 'dist');
+if (fs.existsSync(path.join(FRONTEND_DIST_EARLY, 'index.html'))) {
+  app.use(express.static(FRONTEND_DIST_EARLY, { maxAge: '1h', index: false }));
+}
 
 // Trace ID: UUID por request → propagado a logs, headers, SQL
 app.use(traceIdMiddleware);
@@ -78,8 +85,9 @@ const globalLimiter = rateLimit({
 app.use('/api/', globalLimiter);
 
 // Request logging con trace ID
+// Log todos los métodos excepto OPTIONS (CORS preflight, ruidoso).
 app.use((req, _res, next) => {
-  if (req.method !== 'GET') {
+  if (req.method !== 'OPTIONS') {
     logger.info(`${req.method} ${req.path}`, { traceId: req.traceId, user: (req as any).user?.id ?? 'anon' });
   }
   next();
@@ -100,10 +108,27 @@ if (corsOrigin) {
     }
   }
 }
+// CORS — acepta lista del env + patrones ngrok/dominios túnel automáticamente
+const allowList = corsOrigin
+  ? corsOrigin.split(',').map(s => s.trim()).filter(Boolean)
+  : ['http://localhost:5173', 'http://localhost:4173'];
+const tunnelPatterns = [/\.ngrok-free\.app$/i, /\.ngrok\.io$/i, /\.ngrok\.app$/i, /\.loca\.lt$/i, /\.trycloudflare\.com$/i];
 app.use(cors({
-  origin: corsOrigin
-    ? corsOrigin.split(',').map(s => s.trim()).filter(Boolean)
-    : 'http://localhost:5173',
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // herramientas/curl
+    if (allowList.includes(origin)) return cb(null, true);
+    try {
+      const u = new URL(origin);
+      // Cualquier localhost / 127.0.0.1 / 192.168.x / 10.x / 172.x (LAN) y túneles → permitir.
+      // En producción el ERP corre tras el mismo origen así que esto cubre todos los casos.
+      if (
+        u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1' ||
+        /^192\.168\./.test(u.hostname) || /^10\./.test(u.hostname) || /^172\.(1[6-9]|2[0-9]|3[01])\./.test(u.hostname) ||
+        tunnelPatterns.some(p => p.test(u.hostname))
+      ) return cb(null, true);
+    } catch { /* ignore */ }
+    return cb(new Error(`CORS bloqueado: ${origin}`));
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '1mb' }));
@@ -289,6 +314,25 @@ app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
 app.use('/api/automatizaciones', authMiddleware, adminOnly, automatizacionesRoutes);
 app.use('/api/controles-calidad', authMiddleware, controlesCalidadRoutes);
+app.use('/api/specs',         authMiddleware, specsRoutes);
+app.use('/api/recordatorios', authMiddleware, recordatoriosRoutes);
+app.use('/api/pedidos-programados', authMiddleware, pedidosProgramadosRoutes);
+app.use('/api/cambio',        authMiddleware, cambioRoutes);
+// /api/facturas — auth per-handler: /parse usa Bearer normal,
+// /file usa token via query param (iframe no envía Authorization).
+app.use('/api/facturas',      facturasRoutes);
+
+// ── PRODUCCIÓN: servir frontend compilado desde el mismo backend ───────────
+// Si existe ../frontend/dist (build) sirvemos esos archivos. SPA fallback con
+// index.html para que el router de React maneje cualquier ruta no-/api.
+const FRONTEND_DIST = path.resolve(process.cwd(), '..', 'frontend', 'dist');
+if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
+  logger.info(`[startup] Sirviendo frontend desde ${FRONTEND_DIST}`);
+  app.use(express.static(FRONTEND_DIST, { maxAge: '1h' }));
+  app.get(/^\/(?!api|uploads).*/, (_req, res) => {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  });
+}
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });
@@ -351,7 +395,9 @@ async function startup() {
     logger.info('[startup] bootstrap DESACTIVADO por BOOTSTRAP_DB=false');
   }
 
-  server.listen(PORT, () => {
+  // Escucha explícita en 0.0.0.0 (todas las IPv4). Evita problemas en macOS
+  // donde el default IPv6 (::) provoca ECONNREFUSED desde clients IPv4 (vite proxy).
+  server.listen(Number(PORT), '0.0.0.0', () => {
     logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
   });
 }
@@ -409,6 +455,45 @@ const stockSweepTimer = setInterval(() => {
     });
 }, STOCK_SWEEP_INTERVAL_MS);
 stockSweepTimer.unref();
+
+// Cron emails programados: cada 60s envía los pedidos_programados vencidos.
+const PEDIDOS_PROG_INTERVAL_MS = 60 * 1000;
+const pedidosProgTimer = setInterval(async () => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT pp.id, pp.producto_id, pp.destinatarios, pp.cantidad, pp.notas, pp.cuerpo_personalizado
+       FROM pedidos_programados pp
+       WHERE pp.enviado = FALSE AND pp.programado_para <= NOW()
+       LIMIT 10`
+    );
+    for (const pp of rows) {
+      try {
+        await emailService.enviarPedidoStock({
+          producto_id: pp.producto_id,
+          destinatario: (pp.destinatarios as string[]).join(', '),
+          cantidad_sugerida: Number(pp.cantidad),
+          notas_adicionales: pp.notas ?? undefined,
+          cuerpo_personalizado: pp.cuerpo_personalizado ?? undefined,
+        });
+        await pool.query(
+          `UPDATE pedidos_programados SET enviado = TRUE, enviado_at = NOW(), intento_at = NOW() WHERE id = $1`,
+          [pp.id]
+        );
+      } catch (e) {
+        await pool.query(
+          `UPDATE pedidos_programados SET intento_at = NOW(), error_msg = $1 WHERE id = $2`,
+          [(e as Error).message, pp.id]
+        );
+      }
+    }
+    await cronHeartbeat.tick('pedidos_programados', 'ok');
+  } catch (err) {
+    logger.error('[pedidos-programados] error', { err });
+    await cronHeartbeat.tick('pedidos_programados', 'error', err as Error);
+  }
+}, PEDIDOS_PROG_INTERVAL_MS);
+pedidosProgTimer.unref();
+
 // Disparar una primera vez al arrancar (10s después para que la app esté lista)
 setTimeout(() => {
   automatizacionesService.sweepStockReglas()

@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { pool } from '../db/pool';
+import { crearSolicitudYRenderPDF } from '../lib/pdfSolicitudCompra';
 
 interface EmailPedidoPayload {
   destinatario:  string;
@@ -8,6 +9,9 @@ interface EmailPedidoPayload {
   notas_adicionales?: string;
   cuerpo_personalizado?: string;
   usuario_id?:   string;
+  adjuntar_pdf?: boolean;
+  precio_unitario?: number | null;
+  porte_a?: 'proveedor' | 'cliente';
 }
 
 interface ConfigEmail {
@@ -72,14 +76,68 @@ class EmailService {
     const destinatario = payload.destinatario || prod.proveedor_email;
     if (!destinatario) throw new Error('SIN_EMAIL_DESTINATARIO');
 
+    // Split CSV → array para que nodemailer maneje cada destinatario por separado
+    // (algunos SMTP rechazan el formato CSV en cabecera `to`).
+    const toArray = destinatario
+      .split(/[,;]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     const transporter = this.buildTransport(cfg);
+
+    // Si se pide PDF adjunto, generamos solicitud + PDF y registramos en pedidos_proveedor.
+    // Cuando adjuntar_pdf=true devolveremos también el número de solicitud al caller via auditoría.
+    let pdfBuffer: Buffer | null = null;
+    let numeroSolicitud: string | null = null;
+    if (payload.adjuntar_pdf) {
+      try {
+        const result = await crearSolicitudYRenderPDF({
+          producto_id: payload.producto_id,
+          destinatario,
+          cantidad: payload.cantidad_sugerida,
+          precio_unitario: payload.precio_unitario ?? null,
+          notas: payload.notas_adicionales ?? null,
+          usuario_id: payload.usuario_id ?? null,
+          porte_a: payload.porte_a ?? 'proveedor',
+        });
+        pdfBuffer = result.pdf;
+        numeroSolicitud = result.numero;
+      } catch (e) {
+        console.warn('[email] PDF adjunto falló (continuamos sin adjunto):', (e as Error).message);
+      }
+    }
 
     await transporter.sendMail({
       from:    cfg.email_remitente || process.env.EMAIL_FROM || 'ERP Loga <erp@loga.es>',
-      to:      destinatario,
-      subject: `Pedido ${prod.nombre} — Fábrica Loga`,
+      to:      toArray.length === 1 ? toArray[0] : toArray,
+      subject: numeroSolicitud
+        ? `Solicitud de compra ${numeroSolicitud} — ${prod.nombre}`
+        : `Pedido ${prod.nombre} — Fábrica Loga`,
       text:    cuerpo,
+      attachments: pdfBuffer ? [{
+        filename: `${numeroSolicitud ?? 'solicitud'}.pdf`,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+      }] : undefined,
     });
+
+    // Recordar destinatarios para pre-marcar próxima vez (split CSV → TEXT[])
+    // Side-effect: si la migración 041 aún no corrió, ignora el error en silencio.
+    const listaDestinatarios = destinatario
+      .split(/[,;]/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (listaDestinatarios.length > 0) {
+      try {
+        await pool.query(
+          `UPDATE proveedores SET ultimos_destinatarios = $1::TEXT[]
+           WHERE id = (SELECT proveedor_id FROM productos WHERE id = $2)`,
+          [listaDestinatarios, payload.producto_id]
+        );
+      } catch (e) {
+        console.warn('[email] No se pudo guardar ultimos_destinatarios (¿migración 041?):', (e as Error).message);
+      }
+    }
 
     // Marcar notificación como email_enviado
     await pool.query(

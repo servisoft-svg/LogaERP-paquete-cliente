@@ -130,6 +130,55 @@ router.get('/pedidos-proveedor', async (req, res) => {
   }
 });
 
+// GET /api/stock/pedidos-proveedor/:id/pdf — descargar PDF de solicitud existente
+router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
+  try {
+    const { rows: [pp] } = await pool.query(
+      `SELECT pp.*, p.codigo AS producto_codigo, p.nombre AS producto_nombre, p.unidad_medida,
+              pv.nombre    AS proveedor_nombre,
+              pv.direccion AS proveedor_direccion,
+              pv.telefono  AS proveedor_telefono,
+              u.nombre AS solicitante_nombre
+       FROM pedidos_proveedor pp
+       JOIN productos p ON p.id = pp.producto_id
+       LEFT JOIN proveedores pv ON pv.id = pp.proveedor_id
+       LEFT JOIN usuarios u ON u.id = pp.usuario_solicitud_id
+       WHERE pp.id = $1`,
+      [req.params.id]
+    );
+    if (!pp) return res.status(404).json({ error: 'Pedido no encontrado' });
+
+    const { renderSolicitudCompraPDF, cargarDatosEmpresa } = await import('../lib/pdfSolicitudCompra');
+    const empresa = await cargarDatosEmpresa();
+    const pdf = await renderSolicitudCompraPDF({
+      numero_solicitud: pp.numero_solicitud ?? `SP-${pp.id.slice(0, 8)}`,
+      producto_codigo: pp.producto_codigo,
+      producto_nombre: pp.producto_nombre,
+      unidad_medida: pp.unidad_medida,
+      cantidad: Number(pp.cantidad_solicitada),
+      precio_unitario: pp.precio_unitario != null ? Number(pp.precio_unitario) : null,
+      importe_total: pp.importe_total != null ? Number(pp.importe_total) : null,
+      proveedor_nombre: pp.proveedor_nombre ?? 'Proveedor',
+      proveedor_direccion: pp.proveedor_direccion ?? null,
+      proveedor_telefono: pp.proveedor_telefono ?? null,
+      destinatario: pp.destinatario_email,
+      notas: pp.notas,
+      fecha: new Date(pp.fecha_solicitud),
+      empresa_nombre: empresa.nombre,
+      empresa_cif: empresa.cif,
+      empresa_direccion: empresa.direccion,
+      empresa_telefono: empresa.telefono,
+      datos_bancarios: empresa.datos_bancarios,
+      solicitante_nombre: pp.solicitante_nombre ?? null,
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${pp.numero_solicitud ?? 'solicitud'}.pdf"`);
+    return res.send(pdf);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 // GET /api/stock/lead-time-proveedores — lead time medio por proveedor
 router.get('/lead-time-proveedores', async (_req, res) => {
   try {

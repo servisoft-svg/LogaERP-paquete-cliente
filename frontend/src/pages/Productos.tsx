@@ -5,8 +5,8 @@ import {
   Plus, Pencil, Trash2, Package, Search, Filter,
   ChevronUp, ChevronDown, AlertTriangle, PackagePlus, RefreshCw, Download, ScanLine, Mail, Factory, Upload, ClipboardList, Sparkles, CalendarClock,
 } from 'lucide-react';
-import { productosApi, proveedoresApi, stockApi, lotesApi } from '../api/client';
-import type { Producto, Proveedor, TipoProducto } from '../types';
+import { productosApi, proveedoresApi, lotesApi, specsApi, cambioApi, facturasApi, configuracionApi } from '../api/client';
+import type { Producto, Proveedor, TipoProducto, SpecCatalogo, ProductoSpec } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
@@ -22,17 +22,19 @@ import clsx from 'clsx';
 const FILTROS_TIPO: { value: TipoProducto | ''; label: string }[] = [
   { value: '',                     label: 'Todos'               },
   { value: 'materia_prima',        label: 'Materia Prima'       },
-  { value: 'producto_fabricado',   label: 'Fabricado (granel)'  },
+  { value: 'producto_fabricado',   label: 'Productos Fabricados'},
   { value: 'producto_envasado',    label: 'Envasado (botes)'    },
   { value: 'material_embalaje',    label: 'Embalaje'            },
 ];
 
 const TIPOS_FORM: { value: TipoProducto; label: string }[] = [
   { value: 'materia_prima',        label: 'Materia Prima'       },
-  { value: 'producto_fabricado',   label: 'Prod. Fabricado'     },
+  { value: 'producto_fabricado',   label: 'Producto Fabricado'  },
   { value: 'producto_envasado',    label: 'Prod. Envasado'      },
   { value: 'material_embalaje',    label: 'Material Embalaje'   },
 ];
+
+interface SubcategoriaMP { id: string; nombre: string; orden: number; activo: boolean }
 
 const UNIDADES = ['kg', 'g', 'L', 'mL', 'ud', 'caja', 'saco', 't'];
 
@@ -59,6 +61,10 @@ interface FormData {
   ph_max: string;
   viscosidad_min: string;
   viscosidad_max: string;
+  // Sub-categoría + aditivo (sólo materia prima)
+  subcategoria_mp: string;
+  // Mensaje de confirmación opcional durante fabricación
+  confirmacion_msg: string;
 }
 
 interface LoteDisponible { id: string; lote_interno: string; lote_proveedor?: string; cantidad_actual: string; cantidad_inicial?: string; fecha_caducidad?: string; }
@@ -68,6 +74,7 @@ const EMPTY: FormData = {
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
   precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
   solidos_min: '', solidos_max: '', ph_min: '', ph_max: '', viscosidad_min: '', viscosidad_max: '',
+  subcategoria_mp: '', confirmacion_msg: '',
 };
 
 const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
@@ -117,6 +124,8 @@ export default function Productos() {
   const [busqueda, setBusqueda]       = useState('');
   const [filtroTipo, setFiltroTipo]   = useState<TipoProducto | ''>('');
   const [filtroBajoStock, setFiltroBajoStock] = useState(false);
+  const [filtroSubcategoria, setFiltroSubcategoria] = useState<string>('');
+  const [subcategoriasMP, setSubcategoriasMP] = useState<SubcategoriaMP[]>([]);
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Producto | null>(null);
   const [form, setForm]               = useState<FormData>(EMPTY);
@@ -125,6 +134,7 @@ export default function Productos() {
   const [sortField, setSortField]     = useState<keyof Producto>('nombre');
   const [expandedId, setExpandedId]   = useState<string | null>(null);
   const [expandedLotes, setExpandedLotes] = useState<{ lote_interno: string; lote_proveedor?: string; cantidad_inicial?: string; cantidad_actual: string; precio_compra?: string; fecha_caducidad?: string; fecha_entrada?: string; created_at?: string }[]>([]);
+  const [expandedSpecs, setExpandedSpecs] = useState<ProductoSpec[]>([]);
   const [lotesProdMatch, setLotesProdMatch] = useState<Set<string>>(new Set());
   const [sortDir, setSortDir]         = useState<'asc' | 'desc'>('asc');
   const [confirmElim, setConfirmElim] = useState<Producto | null>(null);
@@ -142,8 +152,10 @@ export default function Productos() {
   // Lotes disponibles en modal editar
   const [editLotes, setEditLotes]         = useState<LoteDisponible[]>([]);
   const [originalLotes, setOriginalLotes] = useState<LoteDisponible[]>([]);
-  const [editLoteId, setEditLoteId]       = useState('');
-  const [loadingEditLotes, setLoadingEditLotes] = useState(false);
+  // editLoteId/loadingEditLotes — legacy del bloque "ajuste de stock" eliminado.
+  // Mantenemos los setters por compatibilidad de los effects que aún los llaman.
+  const [, setEditLoteId]       = useState('');
+  const [, setLoadingEditLotes] = useState(false);
   // Info de coste calculado desde receta (para mostrar hint en form editar)
   const [costeReceta, setCosteReceta] = useState<{
     calculado: number | null;
@@ -163,12 +175,33 @@ export default function Productos() {
   const [stockCaducidad, setStockCaducidad]         = useState('');
   const [stockUbicacion, setStockUbicacion]         = useState('');
   const [stockPrecio, setStockPrecio]               = useState('');
+  const [stockUnidadPrecio, setStockUnidadPrecio]   = useState('');
+  // Divisa de entrada — guardamos en EUR pero permitimos pagar en otras y convertimos
+  const [stockDivisa, setStockDivisa]               = useState<'EUR' | 'USD' | 'CNY' | 'GBP' | 'JPY' | 'CHF' | 'MXN' | 'BRL' | 'CAD' | 'AUD'>('EUR');
+  const [stockTasaEur, setStockTasaEur]             = useState<number>(1); // 1 unidad divisa = X EUR
+  const [stockTasaAuto, setStockTasaAuto]           = useState(true);      // si user no editó la tasa
+  const [stockPorteDivisa, setStockPorteDivisa]     = useState<'EUR' | 'USD' | 'CNY' | 'GBP' | 'JPY' | 'CHF' | 'MXN' | 'BRL' | 'CAD' | 'AUD'>('EUR');
+  const [stockPorteTasaEur, setStockPorteTasaEur]   = useState<number>(1);
+  // Catálogo de specs + asignación al producto en edición + valores medidos del lote nuevo
+  const [specCatalogo, setSpecCatalogo]             = useState<SpecCatalogo[]>([]);
+  const [formSpecs, setFormSpecs]                   = useState<{ spec_id: number; nombre: string; unidad?: string | null; decimales: number; min_valor: string; max_valor: string; parametros?: Record<string, string> }[]>([]);
+  const [stockProductoSpecs, setStockProductoSpecs] = useState<ProductoSpec[]>([]);
+  const [stockSpecsValores, setStockSpecsValores]   = useState<Record<number, string>>({});
   const [stockPorte, setStockPorte]                 = useState('');
   const [stockSolidos, setStockSolidos]             = useState('');
   const [stockPh, setStockPh]                       = useState('');
   const [stockViscosidad, setStockViscosidad]       = useState('');
   const [savingStock, setSavingStock]       = useState(false);
   const [errorStock, setErrorStock]         = useState('');
+
+  // ─── Subir factura → autorrellenar campos ──────────────────────────────
+  const [facturaUrl, setFacturaUrl]                 = useState<string | null>(null);
+  const [facturaMime, setFacturaMime]               = useState<string>('application/pdf');
+  const [facturaParseando, setFacturaParseando]     = useState(false);
+  const [facturaError, setFacturaError]             = useState('');
+  // Mapa campo → nivel de confianza para badges visuales
+  const [camposConfianza, setCamposConfianza]       = useState<Record<string, 'alta' | 'media' | 'baja' | 'calculada'>>({});
+  const facturaInputRef = useRef<HTMLInputElement | null>(null);
 
   const expandedIdRef = useRef(expandedId);
   expandedIdRef.current = expandedId;
@@ -195,6 +228,35 @@ export default function Productos() {
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // Catálogo de specs (cargar una vez)
+  useEffect(() => {
+    specsApi.catalogo().then(({ data }) => setSpecCatalogo(data as SpecCatalogo[])).catch(() => {});
+  }, []);
+
+  // Sub-categorías MP (editables desde Configuración)
+  useEffect(() => {
+    configuracionApi.listarSubcategoriasMP()
+      .then(({ data }) => setSubcategoriasMP(data as SubcategoriaMP[]))
+      .catch(() => setSubcategoriasMP([]));
+  }, []);
+
+  // Tasa de cambio: cuando user elige divisa distinta de EUR, fetch tasa actual.
+  // Si el user editó la tasa manualmente (stockTasaAuto=false), no la sobreescribimos.
+  useEffect(() => {
+    if (stockDivisa === 'EUR') { setStockTasaEur(1); setStockTasaAuto(true); return; }
+    if (!stockTasaAuto) return;
+    cambioApi.obtener(stockDivisa)
+      .then(({ data }) => setStockTasaEur((data as { rate: number }).rate))
+      .catch(() => {});
+  }, [stockDivisa, stockTasaAuto]);
+
+  useEffect(() => {
+    if (stockPorteDivisa === 'EUR') { setStockPorteTasaEur(1); return; }
+    cambioApi.obtener(stockPorteDivisa)
+      .then(({ data }) => setStockPorteTasaEur((data as { rate: number }).rate))
+      .catch(() => {});
+  }, [stockPorteDivisa]);
 
   // Buscar también por lote_interno / lote_proveedor (albarán). Debounce 250ms.
   useEffect(() => {
@@ -230,6 +292,7 @@ export default function Productos() {
     setError('');
     setCosteReceta(null);
     setResetAuto(false);
+    setFormSpecs([]);
     setModalOpen(true);
   };
 
@@ -258,6 +321,8 @@ export default function Productos() {
       ph_max:         (p as any).ph_max         != null ? String((p as any).ph_max)         : '',
       viscosidad_min: (p as any).viscosidad_min != null ? String((p as any).viscosidad_min) : '',
       viscosidad_max: (p as any).viscosidad_max != null ? String((p as any).viscosidad_max) : '',
+      subcategoria_mp: (p as any).subcategoria_mp ?? '',
+      confirmacion_msg: (p as any).confirmacion_msg ?? '',
     });
     setEditLotes([]);
     setEditLoteId('');
@@ -265,6 +330,20 @@ export default function Productos() {
     setResetAuto(false);
     setCosteReceta(null);
     setModalOpen(true);
+
+    // Cargar specs asignadas al producto desde la nueva tabla producto_specs
+    try {
+      const { data } = await specsApi.productoSpecs(p.id);
+      setFormSpecs(((data ?? []) as ProductoSpec[]).map((s) => ({
+        spec_id: s.spec_id,
+        nombre: s.nombre,
+        unidad: s.unidad,
+        decimales: s.decimales,
+        min_valor: s.min_valor != null ? String(s.min_valor) : '',
+        max_valor: s.max_valor != null ? String(s.max_valor) : '',
+        parametros: s.parametros ? Object.fromEntries(Object.entries(s.parametros).map(([k, v]) => [k, v != null ? String(v) : ''])) : {},
+      })));
+    } catch { setFormSpecs([]); }
 
     // Cargar info de coste desde receta en background
     productosApi.obtener(p.id).then(({ data }: { data: any }) => {
@@ -290,6 +369,21 @@ export default function Productos() {
       setError('Nombre y tipo son obligatorios');
       return;
     }
+    // Detectar renombres de lote y pedir confirmación explícita
+    if (editando) {
+      const renombrados = editLotes
+        .map((l) => ({ l, original: originalLotes.find(ol => ol.id === l.id) }))
+        .filter(({ l, original }) =>
+          original && (original.lote_interno ?? '').trim().toUpperCase() !== (l.lote_interno ?? '').trim().toUpperCase()
+        );
+      if (renombrados.length > 0) {
+        const detalle = renombrados.map(({ l, original }) => `· ${original!.lote_interno}  →  ${l.lote_interno}`).join('\n');
+        const ok = window.confirm(
+          `Vas a renombrar ${renombrados.length} lote(s):\n\n${detalle}\n\nEste cambio modifica trazabilidad y aparece en todos los registros que referencian el código antiguo. ¿Confirmas?`
+        );
+        if (!ok) return;
+      }
+    }
     setSaving(true);
     setError('');
     const payload: any = {
@@ -305,34 +399,48 @@ export default function Productos() {
       ph_max:         form.ph_max         !== '' ? Number(form.ph_max)         : null,
       viscosidad_min: form.viscosidad_min !== '' ? Number(form.viscosidad_min) : null,
       viscosidad_max: form.viscosidad_max !== '' ? Number(form.viscosidad_max) : null,
+      subcategoria_mp: form.tipo === 'materia_prima' && form.subcategoria_mp ? form.subcategoria_mp : null,
+      confirmacion_msg: form.tipo === 'materia_prima' ? (form.confirmacion_msg.trim() || null) : null,
     };
     // Si user pulsó "Restaurar auto", indicar al backend que vuelva a modo automático
     if (resetAuto) payload.reset_coste_auto = true;
     const ejecutarGuardar = async () => {
+      let productoIdGuardado: string | null = null;
       if (editando) {
         await productosApi.editar(editando.id, payload);
-        // Si el stock cambió, registrar el ajuste
-        const stockOriginal = parseFloat(editando.stock_actual);
-        const stockNuevo    = parseFloat(form.stock_actual);
-        if (!isNaN(stockNuevo) && Math.abs(stockNuevo - stockOriginal) > 0.000001) {
-          const delta = stockNuevo - stockOriginal;
-          await stockApi.ajustarStock({
-            producto_id: editando.id,
-            cantidad:    delta,
-            motivo:      `Ajuste manual desde ficha de producto (${delta > 0 ? '+' : ''}${delta.toFixed(2)} ${form.unidad_medida})`,
-            ...(editLoteId ? { lote_id: editLoteId } : {}),
-          });
-        }
+        productoIdGuardado = editando.id;
+        // Actualizar lotes (cantidad y/o nombre). Renombre requiere confirmación previa
+        // (verificada antes de llamar a ejecutarGuardar — ver handleGuardar wrapper).
         for (const l of editLotes) {
           const original = originalLotes.find(ol => ol.id === l.id);
-          if (original && original.cantidad_actual !== l.cantidad_actual) {
-            await lotesApi.actualizar(l.id, { cantidad_actual: parseFloat(l.cantidad_actual) });
+          if (!original) continue;
+          const cambioCantidad = original.cantidad_actual !== l.cantidad_actual;
+          const cambioNombre   = (original.lote_interno ?? '').trim().toUpperCase() !== (l.lote_interno ?? '').trim().toUpperCase();
+          if (cambioCantidad || cambioNombre) {
+            await lotesApi.actualizar(l.id, {
+              ...(cambioCantidad ? { cantidad_actual: parseFloat(l.cantidad_actual) } : {}),
+              ...(cambioNombre   ? { lote_interno: l.lote_interno } : {}),
+            });
           }
+        }
+        if (productoIdGuardado) {
+          await specsApi.guardarProducto(productoIdGuardado, formSpecs.map((s, i) => ({
+            spec_id: s.spec_id, min_valor: s.min_valor, max_valor: s.max_valor, orden: i,
+            parametros: s.parametros && Object.values(s.parametros).some((v) => v !== '' && v != null) ? s.parametros : null,
+          })));
         }
         return { nombre: form.nombre, codigo: editando.codigo, tipo: form.tipo, unidad: form.unidad_medida, precio_compra: form.precio_unitario, precio_venta: form.precio_venta, stock_minimo: form.stock_minimo };
       } else {
         const res = await productosApi.crear(payload);
-        const data = res.data as { nombre?: string; codigo?: string };
+        const data = res.data as { id?: string; nombre?: string; codigo?: string };
+        productoIdGuardado = data?.id ?? null;
+        // Persistir specs custom para producto nuevo
+        if (productoIdGuardado) {
+          await specsApi.guardarProducto(productoIdGuardado, formSpecs.map((s, i) => ({
+            spec_id: s.spec_id, min_valor: s.min_valor, max_valor: s.max_valor, orden: i,
+            parametros: s.parametros && Object.values(s.parametros).some((v) => v !== '' && v != null) ? s.parametros : null,
+          })));
+        }
         return { nombre: data?.nombre ?? form.nombre, codigo: data?.codigo ?? '', tipo: form.tipo, unidad: form.unidad_medida, precio_compra: form.precio_unitario, precio_venta: form.precio_venta, stock_minimo: form.stock_minimo };
       }
     };
@@ -378,8 +486,13 @@ export default function Productos() {
     return `${prefijo}-${yy}${mm}${dd}-${sufijo}`;
   };
 
-  const abrirStock = (p: Producto) => {
+  const abrirStock = async (p: Producto) => {
     setStockProducto(p);
+    setStockProductoSpecs([]);
+    setStockSpecsValores({});
+    specsApi.productoSpecs(p.id)
+      .then(({ data }) => setStockProductoSpecs((data ?? []) as ProductoSpec[]))
+      .catch(() => setStockProductoSpecs([]));
     setStockCantidad('');
     setStockMotivo('Entrada manual');
     setStockLoteInterno(generarCodigoLote(p));
@@ -391,12 +504,96 @@ export default function Productos() {
     setStockCaducidad(cadDefault.toISOString().slice(0, 10));
     setStockUbicacion('');
     setStockPrecio(p.precio_unitario ?? '');
+    setStockUnidadPrecio(p.unidad_medida ?? 'kg');
+    setStockDivisa('EUR'); setStockTasaEur(1); setStockTasaAuto(true);
+    setStockPorteDivisa('EUR'); setStockPorteTasaEur(1);
     setStockPorte('');
     setStockSolidos('');
     setStockPh('');
     setStockViscosidad('');
     setErrorStock('');
+    // Reset factura
+    setFacturaUrl(null); setFacturaMime('application/pdf');
+    setFacturaError(''); setCamposConfianza({}); setFacturaParseando(false);
     setModalStock(true);
+  };
+
+  // Subir factura → llama API, autorrellena campos del modal
+  const handleSubirFactura = async (file: File) => {
+    setFacturaError('');
+    setFacturaParseando(true);
+    try {
+      const { data } = await facturasApi.parse(file);
+      type Campo<T> = { valor: T | null; confianza: 'alta' | 'media' | 'baja' | 'calculada' };
+      const datos = (data as {
+        datos: {
+          factura_num: Campo<string>;
+          albaran_ref: Campo<string>;
+          fecha: Campo<string>;
+          proveedor_nombre: Campo<string>;
+          proveedor_cif: Campo<string>;
+          cantidad: Campo<number>;
+          unidad: Campo<string>;
+          precio_unitario: Campo<number>;
+          divisa: Campo<string>;
+          unidad_precio: Campo<string>;
+          total_sin_iva: Campo<number>;
+          iva_pct: Campo<number>;
+          total_con_iva: Campo<number>;
+          porte: Campo<number>;
+        };
+        archivo_url: string;
+        proveedor_match: { id: string; nombre: string } | null;
+      }).datos;
+      const archivo_url = (data as { archivo_url: string }).archivo_url;
+      const proveedor_match = (data as { proveedor_match: { id: string; nombre: string } | null }).proveedor_match;
+
+      const conf: Record<string, 'alta' | 'media' | 'baja' | 'calculada'> = {};
+
+      if (datos.albaran_ref.valor) {
+        setStockLoteProveedor(datos.albaran_ref.valor);
+        conf['lote_proveedor'] = datos.albaran_ref.confianza;
+      }
+      if (datos.cantidad.valor != null) {
+        setStockCantidad(String(datos.cantidad.valor));
+        conf['cantidad'] = datos.cantidad.confianza;
+      }
+      if (datos.precio_unitario.valor != null) {
+        setStockPrecio(datos.precio_unitario.valor.toFixed(4));
+        conf['precio'] = datos.precio_unitario.confianza;
+      }
+      if (datos.porte.valor != null && datos.porte.valor > 0) {
+        setStockPorte(datos.porte.valor.toFixed(2));
+        conf['porte'] = datos.porte.confianza;
+      }
+      if (datos.divisa.valor) {
+        const d = datos.divisa.valor as typeof stockDivisa;
+        setStockDivisa(d);
+        setStockPorteDivisa(d);
+        conf['divisa'] = datos.divisa.confianza;
+      }
+      if (datos.unidad_precio.valor) {
+        setStockUnidadPrecio(datos.unidad_precio.valor);
+        conf['unidad_precio'] = datos.unidad_precio.confianza;
+      }
+      if (proveedor_match) {
+        setStockProveedorId(proveedor_match.id);
+        conf['proveedor'] = 'alta';
+      } else if (datos.proveedor_nombre.valor) {
+        conf['proveedor'] = 'baja';
+      }
+      // Caducidad: no la trae factura → default 1 año del producto (ya seteado)
+
+      setCamposConfianza(conf);
+      setFacturaUrl(archivo_url);
+      setFacturaMime(file.type);
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? 'No se pudo procesar la factura.';
+      setFacturaError(msg);
+    } finally {
+      setFacturaParseando(false);
+    }
   };
 
   const handleAnadirStock = async () => {
@@ -422,11 +619,18 @@ export default function Productos() {
         fecha_caducidad:   stockCaducidad || null,
         estado:            'aprobado',
         ubicacion:         stockUbicacion.trim() || null,
-        precio_compra:     stockPrecio ? Number(stockPrecio) : undefined,
-        porte:             stockPorte ? Number(stockPorte) : 0,
+        // Precio siempre persistido en EUR (canónico para contabilidad)
+        precio_compra:     stockPrecio ? Number(stockPrecio) * stockTasaEur : undefined,
+        unidad_precio:     stockPrecio && stockUnidadPrecio ? stockUnidadPrecio : undefined,
+        // Porte también convertido a EUR
+        porte:             stockPorte ? Number(stockPorte) * stockPorteTasaEur : 0,
         solidos:    stockSolidos    !== '' ? Number(stockSolidos)    : null,
         ph:         stockPh         !== '' ? Number(stockPh)         : null,
         viscosidad: stockViscosidad !== '' ? Number(stockViscosidad) : null,
+        // Valores de specs dinámicas para el lote
+        specs_valores: Object.entries(stockSpecsValores)
+          .filter(([, v]) => v !== '' && v != null)
+          .map(([spec_id, valor]) => ({ spec_id: Number(spec_id), valor: Number(valor) })),
       });
       // Update precio del producto — secundario, no debe romper el flujo si falla
       if (stockPrecio && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001) {
@@ -502,10 +706,15 @@ export default function Productos() {
   const toggleLotes = async (pId: string) => {
     if (expandedId === pId) { setExpandedId(null); return; }
     setExpandedId(pId);
+    setExpandedSpecs([]);
     try {
-      const res = await lotesApi.listar({ producto_id: pId, estado: 'aprobado' });
-      setExpandedLotes(res.data as any[]);
-    } catch { setExpandedLotes([]); }
+      const [resLotes, resSpecs] = await Promise.all([
+        lotesApi.listar({ producto_id: pId, estado: 'aprobado' }),
+        specsApi.productoSpecs(pId).catch(() => ({ data: [] })),
+      ]);
+      setExpandedLotes(resLotes.data as any[]);
+      setExpandedSpecs((resSpecs.data ?? []) as ProductoSpec[]);
+    } catch { setExpandedLotes([]); setExpandedSpecs([]); }
   };
 
   const toggleSort = (field: keyof Producto) => {
@@ -517,6 +726,7 @@ export default function Productos() {
 
   const productosFiltrados = productos
     .filter((p) => !filtroTipo || p.tipo === filtroTipo)
+    .filter((p) => !filtroSubcategoria || ((p as any).subcategoria_mp === filtroSubcategoria))
     .filter((p) => !filtroBajoStock || p.nivel_stock === 'rojo' || p.nivel_stock === 'naranja')
     .filter((p) =>
       !busqueda ||
@@ -641,6 +851,24 @@ export default function Productos() {
               {label}
             </button>
           ))}
+          {(filtroTipo === '' || filtroTipo === 'materia_prima') && (
+            <select
+              value={filtroSubcategoria}
+              onChange={(e) => setFiltroSubcategoria(e.target.value)}
+              className={clsx(
+                'ml-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+                filtroSubcategoria
+                  ? 'bg-loga-red text-white border border-loga-red'
+                  : 'border border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+              )}
+              title="Filtrar materias primas por sub-categoría"
+            >
+              <option value="">Sub-cat: todas</option>
+              {subcategoriasMP.map((s) => (
+                <option key={s.id} value={s.nombre}>{s.nombre}</option>
+              ))}
+            </select>
+          )}
           {cantidadBajoStock > 0 && (
             <button
               onClick={() => setFiltroBajoStock(v => !v)}
@@ -727,8 +955,19 @@ export default function Productos() {
           <table className="min-w-full divide-y divide-gray-100 text-sm">
             <thead className="bg-gray-50">
               <tr>
+                <th
+                  onClick={() => toggleSort('codigo')}
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide cursor-pointer hover:bg-gray-100 select-none"
+                >
+                  <span className="flex items-center gap-1">
+                    Código
+                    {sortField === 'codigo' ? (sortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />) : null}
+                  </span>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide select-none">
+                  Nº CAS
+                </th>
                 {([
-                  { field: 'codigo',  label: 'Código' },
                   { field: 'nombre',  label: 'Nombre' },
                   { field: 'tipo',    label: 'Tipo' },
                   { field: 'stock_actual', label: 'Stock Actual' },
@@ -769,6 +1008,9 @@ export default function Productos() {
                       <ChevronDown size={12} className={clsx('transition-transform text-gray-400', expandedId === p.id && 'rotate-180')} />
                       {p.codigo}
                     </div>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-500">
+                    {p.tipo === 'materia_prima' && (p as any).numero_cas ? (p as any).numero_cas : <span className="text-gray-300">—</span>}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -857,15 +1099,13 @@ export default function Productos() {
                 </motion.tr>
                 {expandedId === p.id && (
                   <tr>
-                    <td colSpan={7} className="px-4 py-2 bg-gray-50/80">
+                    <td colSpan={8} className="px-4 py-2 bg-gray-50/80">
                       {expandedLotes.length === 0 ? (
                         <p className="text-xs text-gray-400 py-2">Sin lotes con stock</p>
                       ) : (() => {
-                        // Specs del producto — para mostrar columnas físico-químicas solo si hay specs
+                        // Specs dinámicas: prioriza fetch reciente (expandedSpecs), fallback a p.specs del listing
                         const pp = p as any;
-                        const showSolidos = pp.solidos_min != null || pp.solidos_max != null;
-                        const showPh      = pp.ph_min != null || pp.ph_max != null;
-                        const showVisc    = pp.viscosidad_min != null || pp.viscosidad_max != null;
+                        const productoSpecs: ProductoSpec[] = expandedSpecs.length > 0 ? expandedSpecs : ((pp.specs as ProductoSpec[]) ?? []);
                         // Helper: clase de color según si valor está dentro del rango
                         const cls = (v: any, min: any, max: any): string => {
                           if (v == null || v === '') return 'text-gray-400';
@@ -876,6 +1116,8 @@ export default function Productos() {
                           return 'text-emerald-700 font-semibold';
                         };
                         const fmt = (v: any) => v != null && v !== '' ? parseFloat(String(v)).toString() : '—';
+                        // Etiqueta corta para header
+                        const shortLabel = (nombre: string) => nombre.length > 8 ? nombre.slice(0, 7) + '…' : nombre;
                         return (
                         <table className="w-full text-xs">
                           <thead>
@@ -886,9 +1128,11 @@ export default function Productos() {
                               <th className="text-right py-1 font-medium">Restante</th>
                               {isAdmin && <th className="text-right py-1 font-medium">Precio</th>}
                               {isAdmin && <th className="text-right py-1 font-medium">Valor actual</th>}
-                              {showSolidos && <th className="text-right py-1 font-medium">% Sól.</th>}
-                              {showPh      && <th className="text-right py-1 font-medium">pH</th>}
-                              {showVisc    && <th className="text-right py-1 font-medium">Visc.</th>}
+                              {productoSpecs.map((ps) => (
+                                <th key={ps.spec_id} className="text-right py-1 font-medium" title={ps.nombre + (ps.unidad ? ` (${ps.unidad})` : '')}>
+                                  {shortLabel(ps.nombre)}
+                                </th>
+                              ))}
                               <th className="text-right py-1 font-medium">Fecha entrada</th>
                               <th className="text-right py-1 font-medium">Caducidad</th>
                             </tr>
@@ -911,11 +1155,41 @@ export default function Productos() {
                                       {actual.toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}
                                     </span>
                                   </td>
-                                  {isAdmin && <td className="py-1.5 text-right tabular-nums text-gray-500">{precio > 0 ? `${precio.toFixed(2)} EUR` : '—'}</td>}
-                                  {isAdmin && <td className="py-1.5 text-right tabular-nums font-semibold text-gray-800">{precio > 0 && actual > 0 ? `${(actual * precio).toFixed(2)} EUR` : agotado ? '0.00 EUR' : '—'}</td>}
-                                  {showSolidos && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.solidos, pp.solidos_min, pp.solidos_max))}>{fmt(ll.solidos)}</td>}
-                                  {showPh      && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.ph,      pp.ph_min,      pp.ph_max))}>{fmt(ll.ph)}</td>}
-                                  {showVisc    && <td className={clsx('py-1.5 text-right tabular-nums', cls(ll.viscosidad, pp.viscosidad_min, pp.viscosidad_max))}>{fmt(ll.viscosidad)}</td>}
+                                  {isAdmin && (() => {
+                                    const porteTotal = parseFloat(ll.porte ?? '0');
+                                    const precioTotalUnit = parseFloat(ll.precio_unitario_total ?? '0') || (precio + (inicial > 0 ? porteTotal / inicial : 0));
+                                    if (precio <= 0 && porteTotal <= 0) {
+                                      return <td className="py-1.5 text-right tabular-nums text-gray-500">—</td>;
+                                    }
+                                    return (
+                                      <td className="py-1.5 text-right tabular-nums text-gray-700" title={`Precio: ${precio.toFixed(4)} EUR\nPortes: ${porteTotal.toFixed(2)} EUR\nUnitario c/portes: ${precioTotalUnit.toFixed(4)} EUR`}>
+                                        <div className="leading-tight">
+                                          <div className="font-semibold">{precioTotalUnit.toFixed(4)} EUR/{ll.unidad_precio ?? p.unidad_medida}</div>
+                                          {porteTotal > 0 && (
+                                            <div className="text-[10px] text-gray-400">
+                                              {precio.toFixed(2)} + porte {(inicial > 0 ? porteTotal / inicial : 0).toFixed(4)}/{p.unidad_medida}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  })()}
+                                  {isAdmin && <td className="py-1.5 text-right tabular-nums font-semibold text-gray-800">{precio > 0 && actual > 0 ? `${(actual * (parseFloat(ll.precio_unitario_total ?? '0') || precio)).toFixed(2)} EUR` : agotado ? '0.00 EUR' : '—'}</td>}
+                                  {productoSpecs.map((ps) => {
+                                    const sv = ((ll.specs_valores ?? []) as { spec_id: number; valor: string | null }[]).find((s) => s.spec_id === ps.spec_id);
+                                    // Fallback legacy: si producto_specs apunta a pH/Sólidos/Viscosidad y el lote aún no tiene lote_specs
+                                    let valor: any = sv?.valor ?? null;
+                                    if (valor == null) {
+                                      if (ps.nombre === 'pH') valor = ll.ph;
+                                      else if (ps.nombre === 'Sólidos') valor = ll.solidos;
+                                      else if (ps.nombre === 'Viscosidad') valor = ll.viscosidad;
+                                    }
+                                    return (
+                                      <td key={ps.spec_id} className={clsx('py-1.5 text-right tabular-nums', cls(valor, ps.min_valor, ps.max_valor))}>
+                                        {fmt(valor)}
+                                      </td>
+                                    );
+                                  })}
                                   <td className="py-1.5 text-right text-gray-500 whitespace-nowrap">{l.created_at ? new Date(l.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</td>
                                   <td className="py-1.5 text-right text-gray-500">{l.fecha_caducidad ? new Date(l.fecha_caducidad).toLocaleDateString('es-ES') : '—'}</td>
                                 </tr>
@@ -927,10 +1201,11 @@ export default function Productos() {
                               <td></td>
                               <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual), 0).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}</td>
                               {isAdmin && <td></td>}
-                              {isAdmin && <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual) * parseFloat(l.precio_compra ?? '0'), 0).toFixed(2)} EUR</td>}
-                              {showSolidos && <td></td>}
-                              {showPh      && <td></td>}
-                              {showVisc    && <td></td>}
+                              {isAdmin && <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => {
+                                const pu = parseFloat((l as any).precio_unitario_total ?? '0') || parseFloat(l.precio_compra ?? '0');
+                                return s + parseFloat(l.cantidad_actual) * pu;
+                              }, 0).toFixed(2)} EUR</td>}
+                              {productoSpecs.map((ps) => <td key={ps.spec_id}></td>)}
                               <td></td>
                               <td></td>
                             </tr>
@@ -945,7 +1220,7 @@ export default function Productos() {
               ))}
               {productosFiltrados.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center">
+                  <td colSpan={8} className="px-4 py-12 text-center">
                     <Package size={32} className="mx-auto mb-2 text-gray-200" />
                     <p className="text-sm text-gray-400">
                       {busqueda || filtroTipo ? 'Sin resultados para ese filtro' : 'No hay productos. Crea el primero.'}
@@ -964,9 +1239,63 @@ export default function Productos() {
         onClose={() => setModalStock(false)}
         title="Añadir Stock"
         subtitle={stockProducto ? `${stockProducto.codigo} — ${stockProducto.nombre}` : ''}
+        maxWidth={facturaUrl ? 'max-w-6xl' : 'max-w-lg'}
       >
         {stockProducto && (
-          <div className="space-y-4">
+          <div className={clsx('gap-5', facturaUrl ? 'grid grid-cols-1 lg:grid-cols-[1.1fr_1fr]' : '')}>
+
+            {/* ── Panel PDF/imagen lado a lado (solo si hay factura) ── */}
+            {facturaUrl && (
+              <div className="order-2 lg:order-1 lg:sticky lg:top-0 lg:self-start">
+                <div className="rounded-xl border border-gray-200 bg-gray-50 overflow-hidden">
+                  <div className="flex items-center justify-between bg-gray-100 px-3 py-2 border-b border-gray-200">
+                    <span className="text-[11px] font-semibold text-gray-700 uppercase tracking-wide">Factura original</span>
+                    <button
+                      type="button"
+                      onClick={() => { setFacturaUrl(null); setCamposConfianza({}); }}
+                      className="text-[11px] text-gray-500 hover:text-loga-red font-medium"
+                    >Quitar</button>
+                  </div>
+                  {facturaMime.startsWith('image/') ? (
+                    <img src={facturasApi.fileUrl(facturaUrl)} alt="factura" className="w-full h-[70vh] object-contain bg-white" />
+                  ) : (
+                    <iframe src={facturasApi.fileUrl(facturaUrl)} title="factura" className="w-full h-[70vh] bg-white" />
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className={clsx('space-y-4', facturaUrl ? 'order-1 lg:order-2' : '')}>
+
+            {/* ── Botón subir factura ── */}
+            {isAdmin && !facturaUrl && (
+              <div>
+                <input
+                  ref={facturaInputRef}
+                  type="file"
+                  accept="application/pdf,image/*"
+                  className="hidden"
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) handleSubirFactura(f); e.target.value = ''; }}
+                />
+                <button
+                  type="button"
+                  onClick={() => facturaInputRef.current?.click()}
+                  disabled={facturaParseando}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-loga-red/40 bg-loga-red/5 hover:bg-loga-red/10 py-3 text-sm font-semibold text-loga-red transition-colors disabled:opacity-50"
+                >
+                  {facturaParseando ? <><SpinnerColaBlanca size="sm" /> Procesando factura...</> : <><Upload size={16} /> Subir factura (PDF o imagen)</>}
+                </button>
+                {facturaError && (
+                  <p className="mt-1.5 text-[11px] text-loga-red">{facturaError}</p>
+                )}
+              </div>
+            )}
+            {facturaUrl && Object.keys(camposConfianza).length > 0 && (
+              <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-[11px] text-amber-800">
+                <b>Datos extraídos automáticamente.</b> Verifica cada campo con la factura.
+                Los señalados con <span className="inline-block w-2 h-2 rounded-full bg-amber-500 align-middle mx-1" /> son aproximados o calculados.
+              </div>
+            )}
 
             {/* Fila stock actual → nuevo */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
@@ -1090,7 +1419,7 @@ export default function Productos() {
 
             {/* Precio de compra — solo admin. Operario añade stock sin tocar precio. */}
             {isAdmin && (
-              <FormField label="Precio de compra (EUR)" hint={stockProducto && parseFloat(stockProducto.precio_unitario) > 0 ? `Anterior: ${parseFloat(stockProducto.precio_unitario).toFixed(4)} EUR/${stockProducto.unidad_medida}` : undefined}>
+              <FormField label={`Precio de compra (${stockDivisa})`} hint={stockProducto && parseFloat(stockProducto.precio_unitario) > 0 ? `Anterior: ${parseFloat(stockProducto.precio_unitario).toFixed(4)} EUR/${stockProducto.unidad_medida}` : undefined}>
                 <div className="flex items-center gap-2">
                   <Input
                     type="number" min="0" step="0.0001"
@@ -1099,13 +1428,66 @@ export default function Productos() {
                     placeholder="0.0000"
                     className="flex-1 font-mono"
                   />
-                  <span className="text-xs text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">
-                    EUR/{stockProducto?.unidad_medida ?? 'kg'}
-                  </span>
+                  <div className="flex items-center bg-gray-100 rounded-lg px-2 py-1.5 text-xs text-gray-600 gap-1">
+                    <select
+                      value={stockDivisa}
+                      onChange={(e) => { setStockDivisa(e.target.value as typeof stockDivisa); setStockTasaAuto(true); }}
+                      className="bg-transparent outline-none cursor-pointer font-bold"
+                      title="Divisa de pago"
+                    >
+                      <option value="EUR">EUR</option>
+                      <option value="USD">USD</option>
+                      <option value="CNY">CNY</option>
+                      <option value="GBP">GBP</option>
+                      <option value="JPY">JPY</option>
+                      <option value="CHF">CHF</option>
+                      <option value="MXN">MXN</option>
+                      <option value="BRL">BRL</option>
+                      <option value="CAD">CAD</option>
+                      <option value="AUD">AUD</option>
+                    </select>
+                    <span>/</span>
+                    <select
+                      value={stockUnidadPrecio}
+                      onChange={(e) => setStockUnidadPrecio(e.target.value)}
+                      className="bg-transparent outline-none cursor-pointer font-medium"
+                    >
+                      <option value="kg">kg</option>
+                      <option value="L">L</option>
+                      <option value="ud">ud</option>
+                      <option value="g">g</option>
+                      <option value="m">m</option>
+                      <option value="m2">m²</option>
+                    </select>
+                  </div>
                 </div>
-                {stockPrecio && stockProducto && parseFloat(stockProducto.precio_unitario) > 0 && Math.abs(Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) > 0.0001 && (
-                  <p className={clsx('text-[11px] font-medium mt-1', Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'text-loga-red' : 'text-emerald-600')}>
-                    {Number(stockPrecio) > parseFloat(stockProducto.precio_unitario) ? 'Subida' : 'Bajada'}: {((Number(stockPrecio) - parseFloat(stockProducto.precio_unitario)) / parseFloat(stockProducto.precio_unitario) * 100).toFixed(1)}%
+
+                {stockDivisa !== 'EUR' && (
+                  <div className="mt-2 flex items-center gap-2 text-[11px] rounded-lg bg-amber-50/60 border border-amber-100 px-2 py-1.5">
+                    <span className="text-amber-700 font-semibold">Tasa:</span>
+                    <span className="text-gray-600">1 {stockDivisa} =</span>
+                    <input
+                      type="number" step="0.0001" min="0"
+                      value={stockTasaEur}
+                      onChange={(e) => { setStockTasaEur(Number(e.target.value)); setStockTasaAuto(false); }}
+                      className="w-20 rounded border border-amber-200 px-1.5 py-0.5 text-xs font-mono bg-white"
+                    />
+                    <span className="text-gray-600">EUR</span>
+                    {stockTasaAuto && <span className="text-[9px] uppercase font-bold text-emerald-600 bg-emerald-50 rounded px-1.5">auto</span>}
+                    {!stockTasaAuto && (
+                      <button type="button" onClick={() => setStockTasaAuto(true)} className="text-[9px] uppercase font-bold text-blue-600 hover:underline">restaurar auto</button>
+                    )}
+                    {stockPrecio && (
+                      <span className="ml-auto text-gray-700 font-semibold">
+                        = {(Number(stockPrecio) * stockTasaEur).toFixed(4)} EUR
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {stockPrecio && stockProducto && parseFloat(stockProducto.precio_unitario) > 0 && Math.abs(Number(stockPrecio) * stockTasaEur - parseFloat(stockProducto.precio_unitario)) > 0.0001 && (
+                  <p className={clsx('text-[11px] font-medium mt-1', Number(stockPrecio) * stockTasaEur > parseFloat(stockProducto.precio_unitario) ? 'text-loga-red' : 'text-emerald-600')}>
+                    {Number(stockPrecio) * stockTasaEur > parseFloat(stockProducto.precio_unitario) ? 'Subida' : 'Bajada'} vs último: {((Number(stockPrecio) * stockTasaEur - parseFloat(stockProducto.precio_unitario)) / parseFloat(stockProducto.precio_unitario) * 100).toFixed(1)}%
                   </p>
                 )}
               </FormField>
@@ -1113,7 +1495,7 @@ export default function Productos() {
 
             {/* Porte + total calculado — solo admin */}
             {isAdmin && (
-              <FormField label="Porte / Transporte (EUR)" hint="Coste adicional del envío. Se suma al precio total del lote.">
+              <FormField label={`Porte / Transporte (${stockPorteDivisa})`} hint="Coste del envío. Se convierte a EUR y se suma al precio total del lote.">
                 <div className="flex items-center gap-2">
                   <Input
                     type="number" min="0" step="0.01"
@@ -1122,29 +1504,56 @@ export default function Productos() {
                     placeholder="0.00"
                     className="flex-1 font-mono"
                   />
-                  <span className="text-xs text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">EUR</span>
+                  <select
+                    value={stockPorteDivisa}
+                    onChange={(e) => setStockPorteDivisa(e.target.value as typeof stockPorteDivisa)}
+                    className="text-xs text-gray-700 bg-gray-100 rounded-lg px-2 py-2.5 outline-none cursor-pointer font-bold"
+                  >
+                    <option value="EUR">EUR</option>
+                    <option value="USD">USD</option>
+                    <option value="CNY">CNY</option>
+                    <option value="GBP">GBP</option>
+                    <option value="JPY">JPY</option>
+                    <option value="CHF">CHF</option>
+                    <option value="MXN">MXN</option>
+                    <option value="BRL">BRL</option>
+                    <option value="CAD">CAD</option>
+                    <option value="AUD">AUD</option>
+                  </select>
                 </div>
-                {/* Resumen de coste total del lote */}
+                {stockPorteDivisa !== 'EUR' && stockPorte && (
+                  <p className="text-[11px] text-gray-500 mt-1">
+                    Tasa 1 {stockPorteDivisa} = <input type="number" step="0.0001" value={stockPorteTasaEur} onChange={e => setStockPorteTasaEur(Number(e.target.value))}
+                      className="w-20 rounded border border-gray-200 px-1 py-0.5 text-xs font-mono mx-1" /> EUR
+                    {' '}→ <b className="text-gray-700">{(Number(stockPorte) * stockPorteTasaEur).toFixed(2)} EUR</b>
+                  </p>
+                )}
+                {/* Resumen de coste total del lote — todo en EUR */}
                 {(() => {
                   const cant = parseFloat(stockCantidad || '0');
-                  const precio = parseFloat(stockPrecio || '0');
-                  const porte = parseFloat(stockPorte || '0');
-                  const subtotal = cant * precio;
-                  const total = subtotal + porte;
-                  if (cant <= 0 || (precio <= 0 && porte <= 0)) return null;
+                  const precioEur = parseFloat(stockPrecio || '0') * stockTasaEur;
+                  const porteEur = parseFloat(stockPorte || '0') * stockPorteTasaEur;
+                  const subtotal = cant * precioEur;
+                  const total = subtotal + porteEur;
+                  const precioUnitTotal = cant > 0 ? precioEur + (porteEur / cant) : precioEur;
+                  if (cant <= 0 || (precioEur <= 0 && porteEur <= 0)) return null;
                   return (
                     <div className="mt-2 rounded-lg bg-emerald-50/50 border border-emerald-100 px-3 py-2 text-xs space-y-0.5 font-mono">
                       <div className="flex justify-between text-gray-600">
-                        <span>Producto ({cant} × {precio.toFixed(2)})</span>
+                        <span>Producto ({cant} × {precioEur.toFixed(4)} EUR)</span>
                         <span>{subtotal.toFixed(2)} EUR</span>
                       </div>
                       <div className="flex justify-between text-gray-600">
                         <span>Porte</span>
-                        <span>{porte.toFixed(2)} EUR</span>
+                        <span>{porteEur.toFixed(2)} EUR</span>
                       </div>
                       <div className="flex justify-between border-t border-emerald-200 pt-0.5 mt-1 font-bold text-emerald-700">
                         <span>COSTE TOTAL DEL LOTE</span>
                         <span>{total.toFixed(2)} EUR</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] pt-1 mt-0.5 border-t border-emerald-200/60 text-emerald-800">
+                        <span>Precio unitario CON porte</span>
+                        <span className="font-bold">{precioUnitTotal.toFixed(4)} EUR/{form.unidad_medida}</span>
                       </div>
                     </div>
                   );
@@ -1152,77 +1561,39 @@ export default function Productos() {
               </FormField>
             )}
 
-            {/* ── Valores físico-químicos medidos del lote — solo si producto tiene specs ── */}
-            {stockProducto && (() => {
-              const p = stockProducto as any;
-              const hasAnySpec =
-                p.solidos_min != null || p.solidos_max != null ||
-                p.ph_min != null || p.ph_max != null ||
-                p.viscosidad_min != null || p.viscosidad_max != null;
-              if (!hasAnySpec) return null;
-
-              const rangeStr = (min: any, max: any, unit = '') => {
-                if (min == null && max == null) return null;
-                const fmt = (v: any) => v != null ? parseFloat(v).toString() : '?';
-                return `Rango: ${fmt(min)}–${fmt(max)}${unit}`;
-              };
-              const checkOk = (val: string, min: any, max: any): boolean | null => {
-                if (val === '') return null;
-                const n = Number(val);
-                if (isNaN(n)) return null;
-                if (min != null && n < parseFloat(min)) return false;
-                if (max != null && n > parseFloat(max)) return false;
-                return true;
-              };
-              const okSolidos = checkOk(stockSolidos, p.solidos_min, p.solidos_max);
-              const okPh      = checkOk(stockPh, p.ph_min, p.ph_max);
-              const okVisc    = checkOk(stockViscosidad, p.viscosidad_min, p.viscosidad_max);
-
-              return (
-                <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
-                  <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Valores medidos de este lote</p>
-
-                  {(p.solidos_min != null || p.solidos_max != null) && (
-                    <FormField label="% Sólidos" hint={rangeStr(p.solidos_min, p.solidos_max, ' %') ?? undefined}>
+            {/* ── Valores físico-químicos medidos del lote — render dinámico desde producto_specs ── */}
+            {stockProductoSpecs.length > 0 && (
+              <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
+                <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Valores medidos de este lote</p>
+                {stockProductoSpecs.map((s) => {
+                  const val = stockSpecsValores[s.spec_id] ?? '';
+                  const min = s.min_valor != null ? parseFloat(String(s.min_valor)) : null;
+                  const max = s.max_valor != null ? parseFloat(String(s.max_valor)) : null;
+                  let ok: boolean | null = null;
+                  if (val !== '') {
+                    const n = Number(val);
+                    if (!isNaN(n)) {
+                      ok = (min != null && n < min) || (max != null && n > max) ? false : true;
+                    }
+                  }
+                  const rangeStr = (min == null && max == null)
+                    ? undefined
+                    : `Rango: ${min ?? '?'}–${max ?? '?'}${s.unidad ? ' ' + s.unidad : ''}`;
+                  return (
+                    <FormField key={s.spec_id} label={`${s.nombre}${s.unidad ? ` (${s.unidad})` : ''}`} hint={rangeStr}>
                       <div className="flex items-center gap-2">
                         <Input type="number" step="0.01"
-                          value={stockSolidos}
-                          onChange={(e) => setStockSolidos(e.target.value)}
-                          placeholder="Ej: 49.50" />
-                        {okSolidos === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
-                        {okSolidos === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
+                          value={val}
+                          onChange={(e) => setStockSpecsValores((m) => ({ ...m, [s.spec_id]: e.target.value }))}
+                          placeholder="—" />
+                        {ok === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
+                        {ok === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
                       </div>
                     </FormField>
-                  )}
-
-                  {(p.ph_min != null || p.ph_max != null) && (
-                    <FormField label="pH" hint={rangeStr(p.ph_min, p.ph_max) ?? undefined}>
-                      <div className="flex items-center gap-2">
-                        <Input type="number" step="0.01"
-                          value={stockPh}
-                          onChange={(e) => setStockPh(e.target.value)}
-                          placeholder="Ej: 6.5" />
-                        {okPh === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
-                        {okPh === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
-                      </div>
-                    </FormField>
-                  )}
-
-                  {(p.viscosidad_min != null || p.viscosidad_max != null) && (
-                    <FormField label="Viscosidad (cP)" hint={rangeStr(p.viscosidad_min, p.viscosidad_max, ' cP') ?? undefined}>
-                      <div className="flex items-center gap-2">
-                        <Input type="number" step="0.01"
-                          value={stockViscosidad}
-                          onChange={(e) => setStockViscosidad(e.target.value)}
-                          placeholder="Ej: 1200" />
-                        {okVisc === false && <span className="text-xs text-loga-red font-semibold whitespace-nowrap">Fuera ⚠</span>}
-                        {okVisc === true  && <span className="text-xs text-emerald-600 font-semibold whitespace-nowrap">OK ✓</span>}
-                      </div>
-                    </FormField>
-                  )}
-                </div>
-              );
-            })()}
+                  );
+                })}
+              </div>
+            )}
 
             {/* Motivo */}
             <FormField label="Motivo / Observaciones">
@@ -1254,6 +1625,8 @@ export default function Productos() {
                 {savingStock ? 'Guardando…' : <><PackagePlus size={14} /> Registrar entrada</>}
               </button>
             </div>
+
+            </div>{/* fin columna formulario */}
           </div>
         )}
       </Modal>
@@ -1287,6 +1660,42 @@ export default function Productos() {
               />
             </FormField>
           </div>
+
+          {/* Sub-categoría — sólo materia prima, justo debajo de Tipo */}
+          {form.tipo === 'materia_prima' && (
+            <FormField label="Sub-categoría" hint="Familia química: resina, agua, pigmento… (editable en Configuración)">
+              <Select
+                value={form.subcategoria_mp}
+                onChange={(e) => setForm((f) => ({ ...f, subcategoria_mp: e.target.value }))}
+              >
+                <option value="">— Sin clasificar —</option>
+                {subcategoriasMP.map((s) => (
+                  <option key={s.id} value={s.nombre}>{s.nombre}</option>
+                ))}
+              </Select>
+            </FormField>
+          )}
+
+          {/* Mensaje de confirmación en fabricación — sólo materia prima */}
+          {form.tipo === 'materia_prima' && (
+            <FormField
+              label="Mensaje de confirmación en fabricación (opcional)"
+              hint="Si pones un texto aquí, al finalizar la fabricación de cualquier receta con esta materia prima se pedirá confirmar este mensaje. Útil para recordatorios de seguridad o verificaciones (ej: 'has verificado la viscosidad', 'has echado todo del tanque 2'). Déjalo vacío para no pedir nada."
+            >
+              <Textarea
+                rows={2}
+                value={form.confirmacion_msg}
+                onChange={(e) => setForm((f) => ({ ...f, confirmacion_msg: e.target.value }))}
+                placeholder="Ej: ¿Has verificado la viscosidad antes de cerrar?"
+                maxLength={500}
+              />
+              {form.confirmacion_msg.trim() && (
+                <p className="mt-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  ⚠ En cada fabricación que use este producto se mostrará este mensaje y habrá que confirmarlo.
+                </p>
+              )}
+            </FormField>
+          )}
 
           <FormField label="Nombre" required>
             <Input
@@ -1438,93 +1847,115 @@ export default function Productos() {
             />
           </FormField>
 
-          {/* ── Especificaciones físico-químicas (rangos aceptables) — solo para materia prima ── */}
+          {/* ── Especificaciones requeridas (dinámicas desde catálogo) — materia prima ── */}
           {form.tipo === 'materia_prima' && (
             <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 space-y-3">
-              <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Especificaciones del producto</p>
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] font-semibold text-blue-700 uppercase tracking-wide">Especificaciones requeridas</p>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const id = Number(e.target.value);
+                    if (!id) return;
+                    const spec = specCatalogo.find((s) => s.id === id);
+                    if (!spec || formSpecs.some((s) => s.spec_id === id)) return;
+                    setFormSpecs((prev) => [...prev, {
+                      spec_id: id, nombre: spec.nombre, unidad: spec.unidad, decimales: spec.decimales,
+                      min_valor: '', max_valor: '',
+                    }]);
+                  }}
+                  className="text-xs rounded-lg border border-blue-200 bg-white px-2 py-1 cursor-pointer hover:border-blue-400"
+                >
+                  <option value="">+ Añadir spec…</option>
+                  {specCatalogo
+                    .filter((s) => !formSpecs.some((fs) => fs.spec_id === s.id))
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>{s.nombre}{s.unidad ? ` (${s.unidad})` : ''}</option>
+                    ))}
+                </select>
+              </div>
               <p className="text-[11px] text-gray-500 -mt-2">Rangos aceptables. Cada lote tendrá su valor medido y se comparará contra esto.</p>
 
-              <FormField label="% Sólidos (rango)">
-                <div className="flex items-center gap-2">
-                  <Input type="number" step="0.01" placeholder="mín"
-                    value={form.solidos_min}
-                    onChange={(e) => setForm((f) => ({ ...f, solidos_min: e.target.value }))} />
-                  <span className="text-gray-400">—</span>
-                  <Input type="number" step="0.01" placeholder="máx"
-                    value={form.solidos_max}
-                    onChange={(e) => setForm((f) => ({ ...f, solidos_max: e.target.value }))} />
-                  <span className="text-sm text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5">%</span>
-                </div>
-              </FormField>
+              {formSpecs.length === 0 && (
+                <p className="text-xs text-gray-400 italic py-2">Sin specs asignadas. Usa el desplegable para añadir (pH, Sólidos, Viscosidad, Densidad…).</p>
+              )}
 
-              <FormField label="pH (rango)">
-                <div className="flex items-center gap-2">
-                  <Input type="number" step="0.01" placeholder="mín"
-                    value={form.ph_min}
-                    onChange={(e) => setForm((f) => ({ ...f, ph_min: e.target.value }))} />
-                  <span className="text-gray-400">—</span>
-                  <Input type="number" step="0.01" placeholder="máx"
-                    value={form.ph_max}
-                    onChange={(e) => setForm((f) => ({ ...f, ph_max: e.target.value }))} />
-                </div>
-              </FormField>
-
-              <FormField label="Viscosidad (rango)">
-                <div className="flex items-center gap-2">
-                  <Input type="number" step="0.01" placeholder="mín"
-                    value={form.viscosidad_min}
-                    onChange={(e) => setForm((f) => ({ ...f, viscosidad_min: e.target.value }))} />
-                  <span className="text-gray-400">—</span>
-                  <Input type="number" step="0.01" placeholder="máx"
-                    value={form.viscosidad_max}
-                    onChange={(e) => setForm((f) => ({ ...f, viscosidad_max: e.target.value }))} />
-                  <span className="text-sm text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5">cP</span>
-                </div>
-              </FormField>
-            </div>
-          )}
-
-          {editando && (
-            <div className="rounded-xl border border-amber-100 bg-amber-50/40 p-3 space-y-3">
-              <p className="text-[11px] font-semibold text-amber-600 uppercase tracking-wide">Ajuste de stock</p>
-              <FormField label="Stock actual" hint="Modificar genera un ajuste de stock auditado">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number" min="0" step="0.001"
-                    value={form.stock_actual}
-                    onChange={(e) => setForm((f) => ({ ...f, stock_actual: e.target.value }))}
-                  />
-                  <span className="text-sm text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">
-                    {form.unidad_medida}
-                  </span>
-                </div>
-              </FormField>
-              <FormField label="Lote afectado" hint={loadingEditLotes ? 'Cargando lotes…' : editLotes.length === 0 ? 'Sin lotes disponibles' : 'Solo lotes aprobados con stock'}>
-                <Select
-                  value={editLoteId}
-                  onChange={(e) => setEditLoteId(e.target.value)}
-                  disabled={loadingEditLotes || editLotes.length === 0}
-                >
-                  <option value="">— Sin lote específico —</option>
-                  {editLotes.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.lote_interno}{l.lote_proveedor ? ` · ${l.lote_proveedor}` : ''} — {parseFloat(l.cantidad_actual).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {form.unidad_medida}{l.fecha_caducidad ? ` (cad. ${l.fecha_caducidad})` : ''}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
+              {formSpecs.map((s, idx) => {
+                const setParam = (k: string, v: string) => setFormSpecs((arr) => arr.map((x, i) => i === idx ? { ...x, parametros: { ...(x.parametros ?? {}), [k]: v } } : x));
+                const isViscosidad = s.nombre === 'Viscosidad';
+                return (
+                  <div key={s.spec_id} className="space-y-1.5">
+                    <div className="flex items-end gap-2">
+                      <div className="flex-1">
+                        <label className="text-[11px] font-medium text-gray-600 block mb-1">
+                          {s.nombre}{s.unidad ? <span className="text-gray-400"> ({s.unidad})</span> : null}
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <Input type="number" step="0.01" placeholder="mín"
+                            value={s.min_valor}
+                            onChange={(e) => setFormSpecs((arr) => arr.map((x, i) => i === idx ? { ...x, min_valor: e.target.value } : x))} />
+                          <span className="text-gray-400">—</span>
+                          <Input type="number" step="0.01" placeholder="máx"
+                            value={s.max_valor}
+                            onChange={(e) => setFormSpecs((arr) => arr.map((x, i) => i === idx ? { ...x, max_valor: e.target.value } : x))} />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFormSpecs((arr) => arr.filter((_, i) => i !== idx))}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-loga-red transition-colors"
+                        title="Quitar"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    {isViscosidad && (
+                      <div className="ml-1 pl-3 border-l-2 border-blue-200 grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wide text-gray-400 block mb-0.5">Temperatura (°C)</label>
+                          <Input type="number" step="0.1" placeholder="0"
+                            value={s.parametros?.temperatura ?? ''}
+                            onChange={(e) => setParam('temperatura', e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wide text-gray-400 block mb-0.5">Husillo</label>
+                          <Input type="text" placeholder="Sp0"
+                            value={s.parametros?.husillo ?? ''}
+                            onChange={(e) => setParam('husillo', e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wide text-gray-400 block mb-0.5">RPM</label>
+                          <Input type="number" step="1" placeholder="0"
+                            value={s.parametros?.rpm ?? ''}
+                            onChange={(e) => setParam('rpm', e.target.value)} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
           {editando && editLotes.length > 0 && (
             <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 space-y-2">
-              <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Lotes</p>
+              <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Lotes — stock + nombre editable</p>
               {editLotes.map((l, i) => {
                 const qty = parseFloat(l.cantidad_actual);
                 const agotado = qty <= 0;
                 return (
                   <div key={i} className={clsx('flex items-center gap-2 text-xs rounded-lg px-2 py-1.5', agotado ? 'opacity-30' : 'bg-white border border-gray-100')}>
-                    <span className="font-mono text-gray-600 flex-1 truncate">{l.lote_interno}</span>
+                    <input
+                      type="text"
+                      value={l.lote_interno}
+                      onChange={e => {
+                        const newLotes = [...editLotes];
+                        newLotes[i] = { ...newLotes[i], lote_interno: e.target.value.toUpperCase() };
+                        setEditLotes(newLotes);
+                      }}
+                      className="flex-1 min-w-0 font-mono text-xs rounded border border-gray-200 px-2 py-1 focus:border-blue-400 outline-none"
+                      title="Código del lote — al guardar pedirá confirmación si cambia"
+                    />
                     <input
                       type="number" min="0" step="0.01"
                       value={l.cantidad_actual}
@@ -1535,7 +1966,7 @@ export default function Productos() {
                       }}
                       className="w-20 rounded border border-gray-200 px-2 py-1 text-xs text-right font-mono focus:border-blue-400 outline-none"
                     />
-                    <span className="text-gray-400 text-[10px]">{form.unidad_medida}</span>
+                    <span className="text-gray-400 text-[10px] shrink-0">{form.unidad_medida}</span>
                   </div>
                 );
               })}
@@ -1676,7 +2107,7 @@ function TipoBadge({ tipo }: { tipo: TipoProducto }) {
   const cfg: Record<string, { label: string; cls: string }> = {
     materia_prima:      { label: 'Materia Prima',    cls: 'bg-blue-100 text-blue-700'    },
     producto_terminado: { label: 'Prod. Terminado',  cls: 'bg-purple-100 text-purple-700'},
-    producto_fabricado: { label: 'Fabricado',         cls: 'bg-loga-red/10 text-loga-red' },
+    producto_fabricado: { label: 'Fabricado',         cls: 'bg-loga-red/10 text-loga-red' }, // etiqueta visible en lista — corta a propósito
     producto_envasado:  { label: 'Envasado',          cls: 'bg-emerald-100 text-emerald-700' },
     material_embalaje:  { label: 'Embalaje',          cls: 'bg-gray-100 text-gray-600'   },
   };

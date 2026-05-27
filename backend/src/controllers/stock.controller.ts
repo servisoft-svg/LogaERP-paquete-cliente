@@ -76,7 +76,8 @@ export const stockController = {
 
   async enviarPedido(req: Request, res: Response) {
     try {
-      const { producto_id, destinatario, cantidad_sugerida, notas_adicionales, cuerpo_personalizado } = req.body;
+      const { producto_id, destinatario, cantidad_sugerida, notas_adicionales, cuerpo_personalizado,
+              adjuntar_pdf, precio_unitario, porte_a } = req.body;
       if (!producto_id || !destinatario) {
         return res.status(400).json({ error: 'producto_id y destinatario son obligatorios' });
       }
@@ -86,20 +87,29 @@ export const stockController = {
         cantidad_sugerida: Number(cantidad_sugerida),
         notas_adicionales,
         cuerpo_personalizado,
+        usuario_id: (req as any).user?.id,
+        adjuntar_pdf: !!adjuntar_pdf,
+        precio_unitario: precio_unitario != null && precio_unitario !== '' ? Number(precio_unitario) : null,
+        porte_a: porte_a === 'cliente' ? 'cliente' : 'proveedor',
       });
 
-      // Register supplier order request for traceability
-      const userId = (req as any).user?.id ?? null;
-      const { rows: [prod] } = await pool.query(`SELECT proveedor_id FROM productos WHERE id = $1`, [producto_id]);
-      const { rows: [registro] } = await pool.query(
-        `INSERT INTO pedidos_proveedor
-           (producto_id, proveedor_id, cantidad_solicitada, destinatario_email, notas, usuario_solicitud_id)
-         VALUES ($1, $2, $3::NUMERIC, $4, $5, $6)
-         RETURNING id`,
-        [producto_id, prod?.proveedor_id ?? null, Number(cantidad_sugerida || 0).toFixed(6), destinatario, notas_adicionales ?? null, userId]
-      );
+      // Si adjuntar_pdf=true, el helper crearSolicitudYRenderPDF ya insertó el registro.
+      // Sólo registramos aquí cuando NO se adjuntó PDF (modo simple).
+      let pedidoId: string | null = null;
+      if (!adjuntar_pdf) {
+        const userId = (req as any).user?.id ?? null;
+        const { rows: [prod] } = await pool.query(`SELECT proveedor_id FROM productos WHERE id = $1`, [producto_id]);
+        const { rows: [registro] } = await pool.query(
+          `INSERT INTO pedidos_proveedor
+             (producto_id, proveedor_id, cantidad_solicitada, destinatario_email, notas, usuario_solicitud_id)
+           VALUES ($1, $2, $3::NUMERIC, $4, $5, $6)
+           RETURNING id`,
+          [producto_id, prod?.proveedor_id ?? null, Number(cantidad_sugerida || 0).toFixed(6), destinatario, notas_adicionales ?? null, userId]
+        );
+        pedidoId = registro.id;
+      }
 
-      return res.json({ ok: true, mensaje: 'Email enviado correctamente', pedido_proveedor_id: registro.id });
+      return res.json({ ok: true, mensaje: 'Email enviado correctamente', pedido_proveedor_id: pedidoId });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Error interno';
       return res.status(500).json({ error: msg });

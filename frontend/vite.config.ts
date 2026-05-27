@@ -21,14 +21,17 @@ export default defineConfig({
   },
   server: (() => {
     // BACKEND_PORT permite apuntar el proxy a otra instancia de backend (default 3001).
-    const backendTarget = `http://localhost:${process.env.BACKEND_PORT ?? '3001'}`;
+    // Usa 127.0.0.1 explícito (no `localhost`) para evitar conflicto IPv4/IPv6
+    // que provoca ECONNREFUSED en macOS cuando backend escucha en una sola familia.
+    const backendTarget = `http://127.0.0.1:${process.env.BACKEND_PORT ?? '3001'}`;
     return {
       host: true,
       port: Number(process.env.PORT ?? 5173),
       allowedHosts: ['.ngrok-free.app', '.ngrok.io', '.railway.app'],
       hmr: { clientPort: 443 },
       proxy: {
-        '/api':     { target: backendTarget, changeOrigin: true },
+        // Timeout largo para endpoints lentos como /backup (pg_dump + cifrado + Drive).
+        '/api':     { target: backendTarget, changeOrigin: true, timeout: 300_000, proxyTimeout: 300_000 },
         '/uploads': { target: backendTarget, changeOrigin: true },
       },
     };

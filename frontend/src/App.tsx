@@ -9,6 +9,8 @@ import { Toaster } from 'sileo';
 import 'sileo/styles.css';
 import { useAutomatizacionesLive } from './hooks/useAutomatizacionesLive';
 import { useCronHealth } from './hooks/useCronHealth';
+import { useAlertas } from './hooks/useAlertas';
+import AlertaModal from './components/AlertaModal';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
@@ -23,6 +25,7 @@ const Finanzas = lazy(() => import('./pages/Finanzas'));
 const Recuento = lazy(() => import('./pages/Recuento'));
 const Automatizaciones = lazy(() => import('./pages/Automatizaciones'));
 const ControlCalidad = lazy(() => import('./pages/ControlCalidad'));
+const PedidosProveedor = lazy(() => import('./pages/PedidosProveedor'));
 
 function AppContent() {
   const { user, loading, isAdmin } = useAuth();
@@ -37,6 +40,8 @@ function AppContent() {
   useAutomatizacionesLive();
   // Watchdog de crons internos: avisa con sileo.error si alguno cae.
   useCronHealth();
+  // Alertas programadas: polling 30s + sonido + Notification API
+  const { cola, marcarVista } = useAlertas(!!user);
 
   if (loading || splash) return <LoadingScreen />;
   if (!user) return <Login />;
@@ -60,9 +65,11 @@ function AppContent() {
             <Route path="/recuento" element={isAdmin ? <Recuento /> : <Navigate to="/" replace />} />
             <Route path="/automatizaciones" element={isAdmin ? <Automatizaciones /> : <Navigate to="/" replace />} />
             <Route path="/control-calidad" element={<ControlCalidad />} />
+            <Route path="/solicitudes-compra" element={isAdmin ? <PedidosProveedor /> : <Navigate to="/" replace />} />
           </Routes>
         </Suspense>
       </main>
+      <AlertaModal alerta={cola[0] ?? null} onCerrar={marcarVista} />
     </div>
   );
 }

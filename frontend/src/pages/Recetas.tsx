@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Pencil, Trash2, ChefHat, Search, FlaskConical,
-  ChevronDown, ChevronRight, X, Check, Play, Copy, Upload, Beaker, GripVertical,
+  ChevronDown, ChevronRight, X, Check, Play, Copy, Upload, Beaker, GripVertical, Clock,
 } from 'lucide-react';
 import { recetasApi, productosApi } from '../api/client';
 import SearchSelect from '../components/SearchSelect';
@@ -37,6 +37,7 @@ interface FormIng {
   cantidad: string;
   porcentaje_merma: string;
   unidad_medida: string;
+  paso_index: string; // '' = sin asignar, o '0', '1', ... índice del paso
 }
 
 const EMPTY_RECETA: FormReceta = {
@@ -58,8 +59,10 @@ const EMPTY_PASO: PasoReceta = {
 const FASES = ['Preparación', 'Reacción', 'Aditivos', 'Enfriamiento', 'Control', 'Limpieza'];
 
 const EMPTY_ING: FormIng = {
-  materia_prima_id: '', cantidad: '', porcentaje_merma: '0', unidad_medida: 'kg',
+  materia_prima_id: '', cantidad: '', porcentaje_merma: '0', unidad_medida: 'kg', paso_index: '',
 };
+
+const esAguaMP = (nombre?: string | null) => /\bagua\b/i.test(nombre ?? '');
 
 const EJEMPLO_IMPORTAR_RECETAS = JSON.stringify({
   recetas: [
@@ -90,6 +93,11 @@ export default function Recetas() {
   // Modal receta
   const [modalReceta, setModalReceta]       = useState(false);
   const [editandoReceta, setEditandoReceta] = useState<Receta | null>(null);
+  // Confirmación de cambios antes de guardar (solo al editar). Si está null,
+  // no hay pendiente; si es array (incluso vacío), se muestra el modal.
+  const [confirmCambios, setConfirmCambios] = useState<{ campo: string; antes: string; despues: string }[] | null>(null);
+  // Histórico de versiones de receta (modal). null = cerrado.
+  const [historialRec, setHistorialRec] = useState<{ recetaId: string; recetaNombre: string; items: any[] | null }>({ recetaId: '', recetaNombre: '', items: null });
   const [formReceta, setFormReceta]         = useState<FormReceta>(EMPTY_RECETA);
   const [savingReceta, setSavingReceta]     = useState(false);
   const [errorReceta, setErrorReceta]       = useState('');
@@ -115,12 +123,12 @@ export default function Recetas() {
   // Envasado recipe modal
   const [modalEnv, setModalEnv] = useState(false);
   const [editandoEnv, setEditandoEnv] = useState<Receta | null>(null);
-  const [envRecForm, setEnvRecForm] = useState({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', materiales: [] as { producto_id: string; cantidad: string }[] });
+  const [envRecForm, setEnvRecForm] = useState({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', envase_nuevo_nombre: '', materiales: [] as { producto_id: string; cantidad: string }[] });
   const [savingEnv, setSavingEnv] = useState(false);
 
   const abrirNuevaEnvasado = () => {
     setEditandoEnv(null);
-    setEnvRecForm({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', materiales: [] });
+    setEnvRecForm({ nombre: '', producto_id: '', producto_nuevo_nombre: '', cola_id: '', envase_id: '', envase_nuevo_nombre: '', materiales: [] });
     setModalEnv(true);
   };
 
@@ -148,6 +156,7 @@ export default function Recetas() {
       producto_nuevo_nombre: '',
       cola_id: colaIng?.materia_prima_id ?? '',
       envase_id: envaseIng?.materia_prima_id ?? '',
+      envase_nuevo_nombre: '',
       materiales: otrosMats.map(m => ({ producto_id: m.materia_prima_id, cantidad: String(m.cantidad ?? '1') })),
     });
     setModalEnv(true);
@@ -155,7 +164,8 @@ export default function Recetas() {
 
   const guardarEnvasadoReceta = async () => {
     const tieneProductoOExiste = envRecForm.producto_id || envRecForm.producto_nuevo_nombre.trim();
-    if (!tieneProductoOExiste || !envRecForm.cola_id || !envRecForm.envase_id) return;
+    const tieneEnvaseOExiste = envRecForm.envase_id || envRecForm.envase_nuevo_nombre.trim();
+    if (!tieneProductoOExiste || !envRecForm.cola_id || !tieneEnvaseOExiste) return;
     setSavingEnv(true);
     const ejecutar = async () => {
       // Si el usuario tipeó un nombre nuevo (sin seleccionar existente), creamos el producto.
@@ -170,13 +180,24 @@ export default function Recetas() {
         productoFinalId = (created.data as { id: string }).id;
       }
 
+      // Igual para el envase: si tipeó un nombre nuevo, crear material_embalaje.
+      let envaseId = envRecForm.envase_id;
+      if (!envaseId && envRecForm.envase_nuevo_nombre.trim()) {
+        const createdEnv = await productosApi.crear({
+          nombre: envRecForm.envase_nuevo_nombre.trim(),
+          tipo: 'material_embalaje',
+          unidad_medida: 'ud',
+        });
+        envaseId = (createdEnv.data as { id: string }).id;
+      }
+
       const prodFinal = productos.find(p => p.id === productoFinalId)
         ?? { nombre: envRecForm.producto_nuevo_nombre.trim() };
       const nombre = envRecForm.nombre || `Envasado ${prodFinal.nombre ?? ''}`;
 
       const ingredientes = [
         { materia_prima_id: envRecForm.cola_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'kg' },
-        { materia_prima_id: envRecForm.envase_id, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'ud' },
+        { materia_prima_id: envaseId, cantidad: 1, porcentaje_merma: 0, unidad_medida: 'ud' },
         ...envRecForm.materiales.filter(m => m.producto_id).map(m => ({
           materia_prima_id: m.producto_id, cantidad: parseFloat(m.cantidad) || 1, porcentaje_merma: 0, unidad_medida: 'ud',
         })),
@@ -255,6 +276,7 @@ export default function Recetas() {
       producto_nuevo_nombre: '',
       cola_id: cola,
       envase_id: envase,
+      envase_nuevo_nombre: '',
       materiales: [],
     });
     setModalEnv(true);
@@ -321,6 +343,46 @@ export default function Recetas() {
       setErrorReceta('El nombre es obligatorio');
       return;
     }
+    // Si se está editando, calculamos un diff y pedimos confirmación antes de guardar.
+    if (editandoReceta) {
+      const o = editandoReceta;
+      const f = formReceta;
+      const fmt = (v: unknown) => (v == null || v === '' ? '—' : String(v));
+      const ds: { campo: string; antes: string; despues: string }[] = [];
+      const cmp = (campo: string, a: unknown, b: unknown) => {
+        const sa = fmt(a); const sb = fmt(b);
+        if (sa !== sb) ds.push({ campo, antes: sa, despues: sb });
+      };
+      cmp('Nombre', o.nombre, f.nombre.trim());
+      cmp('Tipo', o.tipo_receta ?? 'fabricacion', f.tipo_receta);
+      if (f.tipo_receta !== 'envasado') {
+        cmp('Rendimiento', o.rendimiento, f.rendimiento);
+      }
+      cmp('Notas', o.notas ?? '', f.notas);
+      cmp('pH min', o.ph_min ?? '', f.ph_min);
+      cmp('pH max', o.ph_max ?? '', f.ph_max);
+      cmp('Sólidos min', o.solidos_min ?? '', f.solidos_min);
+      cmp('Sólidos max', o.solidos_max ?? '', f.solidos_max);
+      cmp('Viscosidad min', o.viscosidad_min ?? '', f.viscosidad_min);
+      cmp('Viscosidad max', o.viscosidad_max ?? '', f.viscosidad_max);
+      // Pasos: comparación por JSON (cuenta cualquier modificación de orden/contenido)
+      const oPasos = JSON.stringify(o.pasos ?? []);
+      const fPasos = JSON.stringify(f.pasos ?? []);
+      if (oPasos !== fPasos) {
+        ds.push({ campo: 'Pasos', antes: `${(o.pasos ?? []).length} pasos`, despues: `${(f.pasos ?? []).length} pasos (modificados)` });
+      }
+      if (ds.length === 0) {
+        notify.info('Sin cambios');
+        return;
+      }
+      setConfirmCambios(ds);
+      return;
+    }
+    // Crear receta nueva: directo, sin confirmación
+    ejecutarGuardadoReceta();
+  };
+
+  const ejecutarGuardadoReceta = async () => {
     setSavingReceta(true);
     setErrorReceta('');
     const qcFields: Record<string, number> = {};
@@ -479,6 +541,7 @@ export default function Recetas() {
       cantidad: ing.cantidad,
       porcentaje_merma: ing.porcentaje_merma ?? '0',
       unidad_medida: ing.unidad_medida,
+      paso_index: (ing as any).paso_index != null ? String((ing as any).paso_index) : '',
     });
     setErrorIng('');
     setModalIng(true);
@@ -493,12 +556,21 @@ export default function Recetas() {
     setSavingIng(true);
     setErrorIng('');
     const expandidaId = expandida;
-    const payload = {
+    // Detectar si el MP es agua → permitir múltiples filas en la receta
+    const prodSel = productos.find(p => p.id === formIng.materia_prima_id);
+    const aguaSel = esAguaMP(prodSel?.nombre);
+    const pasoIdxNum = formIng.paso_index !== '' ? Number(formIng.paso_index) : null;
+    const payload: any = {
       materia_prima_id: formIng.materia_prima_id,
       cantidad: Number(formIng.cantidad),
       porcentaje_merma: Number(formIng.porcentaje_merma) || 0,
       unidad_medida: formIng.unidad_medida,
+      paso_index: pasoIdxNum,
     };
+    // Si el MP es agua y estamos creando (no editando), permitimos duplicado en BD.
+    if (aguaSel && !editandoIng) {
+      payload.permitir_duplicado = true;
+    }
     const ejecutar = async () => {
       if (editandoIng) {
         await recetasApi.editarIngrediente(expandidaId, editandoIng.id, payload);
@@ -657,14 +729,62 @@ export default function Recetas() {
                 {recEnv.map(r => {
                   const prod = productos.find(p => p.id === r.producto_id);
                   const cola = prod?.granel_id ? productos.find(p => p.id === prod.granel_id) : null;
+                  const stockCola = parseFloat(cola?.stock_actual ?? '0');
+                  // Unidades máximas fabricables — viene del backend, calcula
+                  // floor(MIN(stock_mp / cantidad_por_unidad)) sobre TODOS los
+                  // ingredientes (cola + envase + materiales extra). El cuello
+                  // de botella decide el límite.
+                  const maxFabricable = r.max_producible != null ? parseInt(r.max_producible, 10) : null;
                   return (
                     <div key={r.id} className="rounded-xl border border-gray-100 bg-white shadow-sm p-4 flex items-center gap-4 hover:border-emerald-200 transition-colors">
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold text-gray-900">{r.nombre}</p>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-bold text-gray-900 truncate">{r.nombre}</p>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: null });
+                              try {
+                                const { data } = await recetasApi.historial(r.id);
+                                setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: data as any[] });
+                              } catch {
+                                setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: [] });
+                              }
+                            }}
+                            className="shrink-0 inline-flex items-center gap-0.5 rounded-md bg-emerald-100 border border-emerald-300 text-emerald-700 px-2 py-0.5 text-xs font-bold font-mono hover:bg-emerald-200 cursor-pointer"
+                            title="Ver historial de versiones · pulsa para abrir"
+                          >
+                            v{r.version}
+                          </button>
+                        </div>
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
                           <span className="text-[11px] text-gray-500">Producto: <b className="text-gray-800">{prod?.nombre ?? '—'}</b></span>
-                          <span className="text-[11px] text-gray-500">Cola: <b className="text-loga-red">{cola?.nombre ?? '—'}</b></span>
+                          <span className="text-[11px] text-gray-500">Cola: <b className="text-loga-red">{cola?.nombre ?? '—'}</b> <span className="text-gray-400">({stockCola.toLocaleString('es-ES', { maximumFractionDigits: 1 })} kg)</span></span>
                           {prod && <span className={clsx('text-[11px] font-bold tabular-nums', parseFloat(prod.stock_actual) > 0 ? 'text-emerald-600' : 'text-gray-300')}>{parseFloat(prod.stock_actual).toLocaleString('es-ES')} ud</span>}
+                          {maxFabricable !== null && (
+                            <span
+                              className={clsx(
+                                'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-bold tabular-nums border',
+                                maxFabricable > 0
+                                  ? 'bg-blue-50 border-blue-200 text-blue-700'
+                                  : 'bg-gray-50 border-gray-200 text-gray-400'
+                              )}
+                              title="Cuello de botella considerando cola + envase + materiales extra de la receta"
+                            >
+                              Puedo envasar: {maxFabricable.toLocaleString('es-ES')} ud
+                            </span>
+                          )}
+                          {r.updated_at && (() => {
+                            const ts = new Date(r.updated_at);
+                            const fechaCorta = ts.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit' });
+                            const horaCorta = ts.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+                            const editada = r.created_at && Math.abs(new Date(r.updated_at).getTime() - new Date(r.created_at).getTime()) > 1000;
+                            return (
+                              <span className="flex items-center gap-1 text-[11px] text-gray-400" title={`Última edición: ${ts.toLocaleString('es-ES')}`}>
+                                <Clock size={11} /> {editada ? 'Editada' : 'Creada'} {fechaCorta} {horaCorta}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </div>
                       <button onClick={() => abrirEditarEnvasado(r)} className="rounded-lg p-2 text-gray-400 hover:bg-blue-50 hover:text-blue-600 transition-colors"><Pencil size={14} /></button>
@@ -753,13 +873,31 @@ export default function Recetas() {
 
               <div>
                 <label className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider mb-1.5">Envase</label>
-                <SearchSelect
-                  options={materialesEmbalaje.map(p => ({ id: p.id, label: p.nombre, right: `${parseFloat(p.stock_actual).toLocaleString('es-ES')}` }))}
-                  value={envRecForm.envase_id}
-                  onChange={id => setEnvRecForm(f => ({ ...f, envase_id: id }))}
-                  placeholder="Buscar envase..."
-                  selectedLabel={productos.find(p => p.id === envRecForm.envase_id)?.nombre}
-                />
+                {!envRecForm.envase_id && envRecForm.envase_nuevo_nombre ? (
+                  <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 px-3 py-2.5 flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-bold text-emerald-700 uppercase">Nuevo envase</p>
+                      <p className="text-sm font-semibold text-gray-900 truncate">{envRecForm.envase_nuevo_nombre}</p>
+                      <p className="text-[10px] text-gray-500">Se creará como material de embalaje con código auto ME-XXX al guardar</p>
+                    </div>
+                    <button onClick={() => setEnvRecForm(f => ({ ...f, envase_nuevo_nombre: '' }))}
+                      className="rounded-lg p-1.5 text-gray-400 hover:bg-emerald-100 hover:text-loga-red shrink-0"><X size={14} /></button>
+                  </div>
+                ) : envRecForm.envase_id ? (
+                  <SearchSelect
+                    options={materialesEmbalaje.map(p => ({ id: p.id, label: p.nombre, right: `${parseFloat(p.stock_actual).toLocaleString('es-ES')}` }))}
+                    value={envRecForm.envase_id}
+                    onChange={id => setEnvRecForm(f => ({ ...f, envase_id: id, envase_nuevo_nombre: '' }))}
+                    placeholder="Buscar envase..."
+                    selectedLabel={productos.find(p => p.id === envRecForm.envase_id)?.nombre}
+                  />
+                ) : (
+                  <EnvaseCombo
+                    materiales={materialesEmbalaje}
+                    onSelectExistente={(p) => setEnvRecForm(f => ({ ...f, envase_id: p.id, envase_nuevo_nombre: '' }))}
+                    onCrearNuevo={(nombre) => setEnvRecForm(f => ({ ...f, envase_id: '', envase_nuevo_nombre: nombre }))}
+                  />
+                )}
               </div>
 
               {/* Materiales extra */}
@@ -793,7 +931,7 @@ export default function Recetas() {
 
             <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50/50 shrink-0">
               <button onClick={() => setModalEnv(false)} className="text-sm text-gray-500 hover:text-gray-900">Cancelar</button>
-              <button onClick={guardarEnvasadoReceta} disabled={savingEnv || (!envRecForm.producto_id && !envRecForm.producto_nuevo_nombre.trim()) || !envRecForm.cola_id || !envRecForm.envase_id}
+              <button onClick={guardarEnvasadoReceta} disabled={savingEnv || (!envRecForm.producto_id && !envRecForm.producto_nuevo_nombre.trim()) || !envRecForm.cola_id || (!envRecForm.envase_id && !envRecForm.envase_nuevo_nombre.trim())}
                 className="flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:bg-gray-300 transition-all">
                 <Check size={16} /> {editandoEnv ? 'Guardar' : 'Crear receta'}
               </button>
@@ -829,7 +967,22 @@ export default function Recetas() {
                       <div className="flex items-center gap-2">
                         <ChefHat size={16} className={sinStock === 0 ? 'text-emerald-500 shrink-0' : 'text-loga-red shrink-0'} />
                         <h3 className="font-semibold text-gray-900 truncate">{r.nombre}</h3>
-                        <span className="text-[10px] font-mono text-gray-400 shrink-0">v{r.version}</span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: null });
+                            try {
+                              const { data } = await recetasApi.historial(r.id);
+                              setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: data as any[] });
+                            } catch {
+                              setHistorialRec({ recetaId: r.id, recetaNombre: r.nombre, items: [] });
+                            }
+                          }}
+                          className="shrink-0 inline-flex items-center gap-0.5 rounded-md bg-loga-red/10 border border-loga-red/30 text-loga-red px-2 py-0.5 text-xs font-bold font-mono hover:bg-loga-red/20 cursor-pointer"
+                          title="Ver historial de versiones · pulsa para abrir"
+                        >
+                          v{r.version}
+                        </button>
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs text-gray-500">
                         {r.producto_nombre && (
@@ -846,6 +999,20 @@ export default function Recetas() {
                             <Beaker size={12} /> {(r.pasos ?? []).length} paso{(r.pasos ?? []).length !== 1 ? 's' : ''}
                           </span>
                         )}
+                        {r.updated_at && (() => {
+                          const ts = new Date(r.updated_at);
+                          const fechaCorta = ts.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+                          const horaCorta = ts.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+                          const editada = r.created_at && Math.abs(new Date(r.updated_at).getTime() - new Date(r.created_at).getTime()) > 1000;
+                          return (
+                            <span
+                              className="flex items-center gap-1 text-gray-400"
+                              title={`Última edición: ${ts.toLocaleString('es-ES')}\nCreada: ${r.created_at ? new Date(r.created_at).toLocaleString('es-ES') : '—'}`}
+                            >
+                              <Clock size={11} /> {editada ? 'Editada' : 'Creada'} {fechaCorta} {horaCorta}
+                            </span>
+                          );
+                        })()}
                       </div>
 
                       {/* Badges */}
@@ -972,6 +1139,11 @@ export default function Recetas() {
                                         <td className="px-3 py-2">
                                           <span className="font-medium text-gray-900">{ing.nombre_mp}</span>
                                           <span className="ml-1.5 text-[10px] font-mono text-gray-400">{ing.codigo_mp}</span>
+                                          {(ing as any).paso_index != null && (
+                                            <span className="ml-1.5 text-[10px] font-bold rounded px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-100">
+                                              Paso {Number((ing as any).paso_index) + 1}
+                                            </span>
+                                          )}
                                         </td>
                                         <td className="px-3 py-2 tabular-nums text-gray-700">
                                           {parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida}
@@ -1283,39 +1455,108 @@ export default function Recetas() {
                       Los datos de limpieza (interna/externa) se rellenan en produccion al fabricar.
                     </p>
                   )}
+                  {/* Cantidad de agua a echar en este paso (subdivide el total del agua) */}
+                  {editandoReceta && recetaDetalle && (() => {
+                    const totalAgua = (recetaDetalle.ingredientes ?? [])
+                      .filter(i => esAguaMP(i.nombre_mp))
+                      .reduce((s, i) => s + parseFloat(i.cantidad), 0);
+                    if (totalAgua <= 0) return null;
+                    const sumaPasos = formReceta.pasos.reduce((s, pp) => s + (Number(pp.cantidad_agua) || 0), 0);
+                    return (
+                      <div>
+                        <label className="text-[10px] text-gray-500 font-medium">
+                          Agua en este paso (kg) <span className="text-gray-400">— total receta: {totalAgua.toFixed(2)}</span>
+                        </label>
+                        <Input
+                          type="number" min="0" step="0.01"
+                          value={paso.cantidad_agua ?? ''}
+                          onChange={e => {
+                            const p = [...formReceta.pasos];
+                            p[pi] = { ...p[pi], cantidad_agua: e.target.value === '' ? undefined : e.target.value };
+                            setFormReceta(f => ({ ...f, pasos: p }));
+                          }}
+                          placeholder={`Ej: ${(totalAgua / Math.max(1, formReceta.pasos.length)).toFixed(2)}`}
+                          className="!text-xs"
+                        />
+                        {sumaPasos > 0 && Math.abs(sumaPasos - totalAgua) > 0.01 && (
+                          <p className="text-[10px] text-amber-600 mt-1">
+                            ⚠ Suma de pasos: {sumaPasos.toFixed(2)} kg (debería ser {totalAgua.toFixed(2)})
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                   {/* Ingredient selector for this step */}
                   {editandoReceta && recetaDetalle && (recetaDetalle.ingredientes ?? []).length > 0 && (
                     <div>
-                      <label className="text-[10px] text-gray-500 font-medium">Ingredientes en este paso</label>
-                      <div className="flex flex-wrap gap-1 mt-1">
-                        {(recetaDetalle.ingredientes ?? []).map(ing => {
-                          const selected = (paso.ingredientes_ids ?? []).includes(ing.materia_prima_id);
-                          return (
+                      <label className="text-[10px] text-gray-500 font-medium">Ingredientes en este paso (orden = orden de echado)</label>
+                      {/* Lista ordenada de seleccionados, con flechas para reordenar */}
+                      {(paso.ingredientes_ids ?? []).length > 0 && (
+                        <div className="mt-1 space-y-1 rounded-md border border-indigo-100 bg-indigo-50/40 p-1.5">
+                          {(paso.ingredientes_ids ?? []).map((mpId, idx, arr) => {
+                            const ing = (recetaDetalle.ingredientes ?? []).find(i => i.materia_prima_id === mpId);
+                            if (!ing) return null;
+                            const moverArr = (a: string[], from: number, to: number) => {
+                              const cp = [...a];
+                              const [el] = cp.splice(from, 1);
+                              cp.splice(to, 0, el);
+                              return cp;
+                            };
+                            const updateIds = (next: string[]) => {
+                              const p = [...formReceta.pasos];
+                              p[pi] = { ...p[pi], ingredientes_ids: next };
+                              setFormReceta(f => ({ ...f, pasos: p }));
+                            };
+                            return (
+                              <div key={mpId} className="flex items-center gap-1.5 bg-white rounded px-2 py-1 border border-indigo-100">
+                                <span className="text-[10px] font-bold tabular-nums text-indigo-600 w-4">{idx + 1}.</span>
+                                <span className="flex-1 text-[11px] font-medium text-indigo-900 truncate">
+                                  {ing.nombre_mp} <span className="text-indigo-500 font-mono">({parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida})</span>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => idx > 0 && updateIds(moverArr(arr, idx, idx - 1))}
+                                  disabled={idx === 0}
+                                  className="rounded p-0.5 text-indigo-400 hover:bg-indigo-100 disabled:opacity-20"
+                                  title="Subir"
+                                >▲</button>
+                                <button
+                                  type="button"
+                                  onClick={() => idx < arr.length - 1 && updateIds(moverArr(arr, idx, idx + 1))}
+                                  disabled={idx === arr.length - 1}
+                                  className="rounded p-0.5 text-indigo-400 hover:bg-indigo-100 disabled:opacity-20"
+                                  title="Bajar"
+                                >▼</button>
+                                <button
+                                  type="button"
+                                  onClick={() => updateIds(arr.filter(x => x !== mpId))}
+                                  className="rounded p-0.5 text-loga-red hover:bg-red-50"
+                                  title="Quitar del paso"
+                                >×</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {/* Disponibles para añadir (no seleccionados) */}
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {(recetaDetalle.ingredientes ?? [])
+                          .filter(ing => !(paso.ingredientes_ids ?? []).includes(ing.materia_prima_id))
+                          .map(ing => (
                             <button
                               key={ing.id}
                               type="button"
                               onClick={() => {
                                 const p = [...formReceta.pasos];
                                 const ids = p[pi].ingredientes_ids ?? [];
-                                p[pi] = {
-                                  ...p[pi],
-                                  ingredientes_ids: selected
-                                    ? ids.filter(id => id !== ing.materia_prima_id)
-                                    : [...ids, ing.materia_prima_id],
-                                };
+                                p[pi] = { ...p[pi], ingredientes_ids: [...ids, ing.materia_prima_id] };
                                 setFormReceta(f => ({ ...f, pasos: p }));
                               }}
-                              className={clsx(
-                                'rounded-md px-2 py-0.5 text-[10px] font-medium border transition-colors',
-                                selected
-                                  ? 'border-indigo-300 bg-indigo-100 text-indigo-700'
-                                  : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300'
-                              )}
+                              className="rounded-md px-2 py-0.5 text-[10px] font-medium border border-gray-200 bg-white text-gray-500 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
                             >
-                              {ing.nombre_mp} ({parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida})
+                              + {ing.nombre_mp} <span className="text-gray-400 font-mono">({parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida})</span>
                             </button>
-                          );
-                        })}
+                          ))}
                       </div>
                     </div>
                   )}
@@ -1347,6 +1588,264 @@ export default function Recetas() {
           </div>
         </div>
       </Modal>
+
+      {/* Modal HISTORIAL de versiones de receta */}
+      {historialRec.recetaId && (
+        <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setHistorialRec({ recetaId: '', recetaNombre: '', items: null })} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 w-full max-w-lg rounded-2xl bg-white shadow-2xl flex flex-col max-h-[85vh]"
+          >
+            <div className="px-5 py-3 bg-gradient-to-r from-violet-50 to-white border-b border-violet-100 shrink-0">
+              <p className="text-sm font-bold text-gray-900">Historial de versiones</p>
+              <p className="text-[11px] text-gray-500 truncate">{historialRec.recetaNombre}</p>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {historialRec.items === null && (
+                <p className="text-xs text-gray-400 italic text-center py-6">Cargando…</p>
+              )}
+              {historialRec.items && historialRec.items.length === 0 && (
+                <p className="text-xs text-gray-400 italic text-center py-6">Sin versiones anteriores. Esta receta no se ha editado todavía.</p>
+              )}
+              {(historialRec.items ?? []).map((h: any, idx: number) => {
+                const s = h.snapshot ?? {};
+                const fecha = new Date(h.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+                // Diff con la versión anterior (más reciente → más antigua, así que la "anterior" es la SIGUIENTE en el array).
+                const prev = (historialRec.items ?? [])[idx + 1]?.snapshot;
+                const diffs: { campo: string; antes: string; despues: string }[] = [];
+                if (prev) {
+                  const f = (v: unknown) => (v == null || v === '' ? '—' : String(v));
+                  const cmp = (campo: string, a: unknown, b: unknown) => {
+                    const sa = f(a), sb = f(b);
+                    if (sa !== sb) diffs.push({ campo, antes: sa, despues: sb });
+                  };
+                  cmp('Nombre', prev.nombre, s.nombre);
+                  cmp('Rendimiento', prev.rendimiento, s.rendimiento);
+                  cmp('Notas', prev.notas, s.notas);
+                  cmp('Tipo', prev.tipo_receta, s.tipo_receta);
+                  cmp('pH min', prev.ph_min, s.ph_min);
+                  cmp('pH max', prev.ph_max, s.ph_max);
+                  cmp('Sólidos min', prev.solidos_min, s.solidos_min);
+                  cmp('Sólidos max', prev.solidos_max, s.solidos_max);
+                  cmp('Viscosidad min', prev.viscosidad_min, s.viscosidad_min);
+                  cmp('Viscosidad max', prev.viscosidad_max, s.viscosidad_max);
+                  const prevPasos = JSON.stringify(prev.pasos ?? []);
+                  const sPasos = JSON.stringify(s.pasos ?? []);
+                  if (prevPasos !== sPasos) {
+                    diffs.push({ campo: 'Pasos', antes: `${(prev.pasos ?? []).length} pasos`, despues: `${(s.pasos ?? []).length} pasos (modificados)` });
+                  }
+                  const prevIngs = JSON.stringify(prev.ingredientes ?? []);
+                  const sIngs = JSON.stringify(s.ingredientes ?? []);
+                  if (prevIngs !== sIngs) {
+                    const prevN = (prev.ingredientes ?? []).length;
+                    const sN = (s.ingredientes ?? []).length;
+                    diffs.push({
+                      campo: 'Ingredientes',
+                      antes: `${prevN} ing`,
+                      despues: prevN === sN ? `${sN} ing (cantidades cambiaron)` : `${sN} ing`,
+                    });
+                  }
+                }
+                return (
+                  <div key={h.id} className="rounded-lg border border-violet-100 bg-violet-50/40 px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="shrink-0 inline-flex items-center rounded bg-loga-red/15 border border-loga-red/30 text-loga-red px-2 py-0.5 text-[11px] font-bold font-mono">
+                          v{h.version}
+                        </span>
+                        <span className="text-[11px] text-gray-700 font-medium truncate">{h.motivo ?? 'Edición'}</span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!confirm(`¿Restaurar a la versión v${h.version}?\nLa receta volverá al contenido de ese snapshot. El estado actual se guardará primero como una versión más.`)) return;
+                            try {
+                              await notify.promise(recetasApi.restaurar(historialRec.recetaId, h.id), {
+                                loading: 'Restaurando…',
+                                success: `Restaurada a v${h.version}`,
+                                error: (e) => (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al restaurar',
+                              });
+                              setHistorialRec({ recetaId: '', recetaNombre: '', items: null });
+                              cargar();
+                            } catch { /* notificado */ }
+                          }}
+                          className="rounded bg-violet-600 text-white px-2.5 py-1 text-[10px] font-bold hover:bg-violet-700"
+                        >
+                          Restaurar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!confirm(`¿Borrar la versión v${h.version} del historial?\nEsta acción no se puede deshacer.`)) return;
+                            try {
+                              await notify.promise(recetasApi.eliminarHistorial(historialRec.recetaId, h.id), {
+                                loading: 'Eliminando…',
+                                success: `v${h.version} eliminada`,
+                                error: (e) => (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al eliminar',
+                              });
+                              // Refrescar la lista del modal
+                              const { data } = await recetasApi.historial(historialRec.recetaId);
+                              setHistorialRec(prev => ({ ...prev, items: data as any[] }));
+                            } catch { /* notificado */ }
+                          }}
+                          className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-loga-red"
+                          title="Borrar esta versión"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-gray-500">
+                      {fecha}{h.usuario_nombre ? ` · ${h.usuario_nombre}` : ''}
+                    </p>
+                    <p className="text-[10px] text-gray-600 mt-0.5 font-mono">
+                      <b>{s.nombre ?? '—'}</b>
+                      {s.rendimiento && <> · {parseFloat(s.rendimiento).toLocaleString('es-ES')} kg</>}
+                      {' · '}{(s.ingredientes ?? []).length} ing
+                      {(s.pasos ?? []).length > 0 && <> · {(s.pasos ?? []).length} pasos</>}
+                    </p>
+                    {/* Diff vs versión anterior */}
+                    {diffs.length > 0 && (
+                      <div className="mt-2 rounded border border-amber-200 bg-amber-50/60 px-2 py-1.5">
+                        <p className="text-[9px] font-bold text-amber-700 uppercase tracking-wide mb-1">
+                          {diffs.length} cambio{diffs.length !== 1 ? 's' : ''} respecto a la anterior
+                        </p>
+                        <ul className="space-y-0.5">
+                          {diffs.map((d, di) => (
+                            <li key={di} className="text-[10px] flex items-center gap-1.5">
+                              <span className="font-semibold text-amber-800 shrink-0">{d.campo}:</span>
+                              <span className="line-through text-gray-400 font-mono truncate">{d.antes}</span>
+                              <span className="text-gray-300">→</span>
+                              <span className="text-emerald-700 font-mono font-semibold truncate">{d.despues}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {prev && diffs.length === 0 && (
+                      <p className="text-[10px] text-gray-400 italic mt-1">Sin cambios respecto a la anterior</p>
+                    )}
+                    {/* Desglose: ingredientes y pasos del snapshot */}
+                    {((s.ingredientes ?? []).length > 0 || (s.pasos ?? []).length > 0) && (
+                      <div className="mt-2 space-y-2">
+                        {(s.ingredientes ?? []).length > 0 && (
+                          <div className="rounded border border-violet-100 bg-white/60 px-2 py-1.5">
+                            <p className="text-[9px] font-bold text-violet-700 uppercase tracking-wide mb-0.5">Ingredientes</p>
+                            <ul className="space-y-0.5">
+                              {(s.ingredientes ?? []).map((ing: any, k: number) => {
+                                const prod = productos.find(p => p.id === ing.materia_prima_id);
+                                return (
+                                  <li key={k} className="flex justify-between text-[10px] gap-2">
+                                    <span className="text-gray-700 truncate">
+                                      {prod?.nombre ?? '(MP desconocido)'}
+                                      {ing.paso_index != null && (
+                                        <span className="ml-1 text-blue-700">· paso {Number(ing.paso_index) + 1}</span>
+                                      )}
+                                    </span>
+                                    <span className="font-mono font-semibold text-gray-800 shrink-0">
+                                      {parseFloat(ing.cantidad ?? '0').toLocaleString('es-ES')} {ing.unidad_medida ?? 'kg'}
+                                    </span>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        )}
+                        {(s.pasos ?? []).length > 0 && (
+                          <div className="rounded border border-violet-100 bg-white/60 px-2 py-1.5">
+                            <p className="text-[9px] font-bold text-violet-700 uppercase tracking-wide mb-0.5">Pasos</p>
+                            <ol className="space-y-1 list-none">
+                              {(s.pasos ?? []).map((p: any, k: number) => (
+                                <li key={k} className="text-[10px] leading-tight">
+                                  <div className="flex items-baseline gap-1 flex-wrap">
+                                    <span className="font-bold text-gray-700">{k + 1}.</span>
+                                    {p.fase && <span className="text-loga-red font-bold uppercase">{p.fase}</span>}
+                                    {p.titulo && <span className="text-gray-800">— {p.titulo}</span>}
+                                    {p.temperatura && <span className="text-gray-500">· {p.temperatura}°C</span>}
+                                    {p.duracion_min && <span className="text-gray-500">· {p.duracion_min}min</span>}
+                                    {p.cantidad_agua && <span className="text-blue-700 font-mono">· agua {p.cantidad_agua}</span>}
+                                  </div>
+                                  {p.descripcion && (
+                                    <p className="text-gray-500 italic ml-3">{p.descripcion}</p>
+                                  )}
+                                  {(p.ingredientes_ids ?? []).length > 0 && (
+                                    <p className="text-[9px] text-gray-400 ml-3">
+                                      ingredientes: {(p.ingredientes_ids as string[]).map(mpId => productos.find(pr => pr.id === mpId)?.nombre ?? '?').join(', ')}
+                                    </p>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-end px-5 py-3 border-t border-gray-100 bg-gray-50/50 shrink-0">
+              <button
+                onClick={() => setHistorialRec({ recetaId: '', recetaNombre: '', items: null })}
+                className="text-sm text-gray-500 hover:text-gray-900"
+              >
+                Cerrar
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* Modal CONFIRMAR cambios de receta */}
+      {confirmCambios && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setConfirmCambios(null)} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 w-full max-w-md rounded-2xl bg-white shadow-2xl flex flex-col max-h-[80vh]"
+          >
+            <div className="px-5 py-3 bg-gradient-to-r from-amber-50 to-white border-b border-amber-100 shrink-0">
+              <p className="text-sm font-bold text-gray-900">Confirmar cambios en la receta</p>
+              <p className="text-[11px] text-gray-500">
+                Vas a guardar {confirmCambios.length} cambio{confirmCambios.length !== 1 ? 's' : ''}. La versión subirá de
+                <b className="text-loga-red"> v{editandoReceta?.version}</b> a
+                <b className="text-loga-red"> v{(editandoReceta?.version ?? 0) + 1}</b>.
+              </p>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {confirmCambios.map((c, i) => (
+                <div key={i} className="rounded-lg border border-amber-100 bg-amber-50/40 px-3 py-2">
+                  <p className="text-[10px] font-bold text-amber-700 uppercase tracking-wide mb-1">{c.campo}</p>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="line-through text-gray-400 font-mono truncate flex-1">{c.antes}</span>
+                    <span className="text-gray-300">→</span>
+                    <span className="text-emerald-700 font-semibold font-mono truncate flex-1">{c.despues}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50/50 shrink-0">
+              <button
+                onClick={() => setConfirmCambios(null)}
+                className="text-sm text-gray-500 hover:text-gray-900"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => { setConfirmCambios(null); ejecutarGuardadoReceta(); }}
+                disabled={savingReceta}
+                className="flex items-center gap-2 rounded-xl bg-loga-red px-5 py-2 text-sm font-bold text-white hover:bg-loga-red-dark disabled:bg-gray-300"
+              >
+                <Check size={15} /> Sí, guardar cambios
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {/* Modal Importar Recetas */}
       <Modal
@@ -1485,6 +1984,32 @@ export default function Recetas() {
             />
           </FormField>
 
+          {/* Asignación a paso (especialmente útil para agua repartida en varias echadas) */}
+          {(() => {
+            const prodSel = productos.find(p => p.id === formIng.materia_prima_id);
+            const aguaSel = esAguaMP(prodSel?.nombre);
+            const pasos = recetaDetalle?.pasos ?? [];
+            if (!aguaSel || pasos.length === 0) return null;
+            return (
+              <FormField
+                label="Paso (opcional)"
+                hint="Asigna esta parte del agua a un paso concreto. Puedes añadir la misma agua varias veces, cada parte en su paso."
+              >
+                <Select
+                  value={formIng.paso_index}
+                  onChange={e => setFormIng(f => ({ ...f, paso_index: e.target.value }))}
+                >
+                  <option value="">— Sin asignar —</option>
+                  {pasos.map((p, i) => (
+                    <option key={i} value={i}>
+                      Paso {i + 1}: {p.titulo || p.fase || '—'}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+            );
+          })()}
+
           {errorIng && (
             <p className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 text-xs text-loga-red">
               {errorIng}
@@ -1513,6 +2038,68 @@ export default function Recetas() {
 }
 
 // ───────────────────────────────────────────────────────────────
+// EnvaseCombo: selector híbrido — elige envase existente o crea nuevo
+// material de embalaje. Mismo patrón que ProductoFinalCombo.
+function EnvaseCombo({ materiales, onSelectExistente, onCrearNuevo }: {
+  materiales: Producto[];
+  onSelectExistente: (p: Producto) => void;
+  onCrearNuevo: (nombre: string) => void;
+}) {
+  const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
+  const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const q = norm(text.trim());
+  const matches = q
+    ? materiales.filter(p => norm(p.nombre).includes(q) || norm(p.codigo).includes(q))
+    : materiales;
+  const exact = materiales.find(p => norm(p.nombre) === q);
+
+  return (
+    <div className="relative">
+      <input
+        value={text}
+        onChange={e => { setText(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 200)}
+        placeholder="Buscar envase existente o escribir nombre nuevo..."
+        className="w-full rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none"
+      />
+      {open && (
+        <div className="absolute z-[200] mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-2xl overflow-hidden max-h-72 overflow-y-auto">
+          {matches.length > 0 && (
+            <div>
+              <p className="px-3 pt-2 pb-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Existentes</p>
+              {matches.map(p => (
+                <button key={p.id} type="button" onMouseDown={() => onSelectExistente(p)}
+                  className="w-full text-left px-3 py-2 hover:bg-emerald-50 transition-colors flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-800 truncate">{p.nombre}</p>
+                    <p className="text-[10px] font-mono text-gray-400">{p.codigo}</p>
+                  </div>
+                  <span className="text-[10px] text-gray-400">{parseFloat(p.stock_actual).toLocaleString('es-ES')} ud</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {q && !exact && (
+            <div className="border-t border-gray-100 bg-emerald-50/50">
+              <button type="button" onMouseDown={() => onCrearNuevo(text.trim())}
+                className="w-full text-left px-3 py-3 hover:bg-emerald-100 transition-colors">
+                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">+ Crear nuevo envase</p>
+                <p className="text-sm font-semibold text-gray-900">«{text.trim()}»</p>
+                <p className="text-[10px] text-gray-500">Material de embalaje · código auto ME-XXX</p>
+              </button>
+            </div>
+          )}
+          {!q && matches.length === 0 && (
+            <p className="text-xs text-gray-400 text-center py-4">Empieza a escribir para buscar o crear</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ProductoFinalCombo: selector híbrido — elige existente o crea nuevo
 // ───────────────────────────────────────────────────────────────
 function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo }: {

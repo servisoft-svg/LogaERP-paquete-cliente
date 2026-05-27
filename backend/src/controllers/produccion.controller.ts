@@ -675,6 +675,279 @@ export const produccionController = {
     }
   },
 
+  // GET/POST /api/produccion/:id/receta.pdf — PDF minimalista con receta paso a paso.
+  // POST acepta body { ajustes: { [materia_prima_id]: cantidad_kg } } para reflejar
+  // cantidades modificadas por el operario en el modal de fabricación.
+  async recetaPdf(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const ajustes: Record<string, number> = (req.body?.ajustes && typeof req.body.ajustes === 'object')
+        ? req.body.ajustes : {};
+
+      // Datos orden + receta + producto
+      const { rows: [orden] } = await pool.query(
+        `SELECT op.id, op.numero_orden, op.cantidad_planificada, op.fecha_planificada, op.notas,
+                r.id AS receta_id, r.nombre AS receta_nombre, r.rendimiento,
+                r.ph_min, r.ph_max, r.solidos_min, r.solidos_max,
+                r.viscosidad_min, r.viscosidad_max, r.pasos,
+                p.id AS producto_id, p.codigo AS producto_codigo, p.nombre AS producto_nombre,
+                p.unidad_medida
+         FROM ordenes_produccion op
+         JOIN recetas r  ON r.id = op.receta_id
+         JOIN productos p ON p.id = r.producto_id
+         WHERE op.id = $1`,
+        [id]
+      );
+      if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+      // Ingredientes con cantidad escalada según cantidad_planificada / rendimiento
+      const factor = parseFloat(orden.cantidad_planificada) / parseFloat(orden.rendimiento ?? '1');
+      const { rows: ingredientes } = await pool.query(
+        `SELECT ir.id, ir.materia_prima_id, ir.cantidad, ir.porcentaje_merma, ir.unidad_medida,
+                p.codigo AS mp_codigo, p.nombre AS mp_nombre
+         FROM ingredientes_receta ir
+         JOIN productos p ON p.id = ir.materia_prima_id
+         WHERE ir.receta_id = $1
+         ORDER BY p.nombre`,
+        [orden.receta_id]
+      );
+
+      // Últimos lotes producidos del mismo producto (histórico QC)
+      const { rows: ultimosQC } = await pool.query(
+        `SELECT lote_interno, created_at, solidos, ph, viscosidad
+         FROM lotes
+         WHERE producto_id = $1
+         ORDER BY created_at DESC
+         LIMIT 5`,
+        [orden.producto_id]
+      );
+
+      // Lotes FEFO disponibles por materia prima (aprobados, con stock).
+      // Sirve para sugerir al operario cuáles usar y en qué orden.
+      const ingIds = ingredientes.map((i: { materia_prima_id: string }) => i.materia_prima_id);
+      const lotesFefo = new Map<string, { lote_interno: string; cantidad_actual: string; fecha_caducidad: string | null }[]>();
+      if (ingIds.length > 0) {
+        const { rows: lotes } = await pool.query(
+          `SELECT producto_id, lote_interno, cantidad_actual, fecha_caducidad
+           FROM lotes
+           WHERE producto_id = ANY($1::uuid[])
+             AND estado = 'aprobado' AND cantidad_actual > 0
+           ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC`,
+          [ingIds]
+        );
+        for (const l of lotes) {
+          const arr = lotesFefo.get(l.producto_id) ?? [];
+          arr.push({ lote_interno: l.lote_interno, cantidad_actual: l.cantidad_actual, fecha_caducidad: l.fecha_caducidad });
+          lotesFefo.set(l.producto_id, arr);
+        }
+      }
+
+      // Pasos: array JSONB con {fase, titulo, ingredientes:[materia_prima_id]} | {fase: 'mezcla'/'limpieza'}
+      const pasosRaw: { fase?: string; titulo?: string; descripcion?: string; ingredientes_ids?: string[] }[] =
+        Array.isArray(orden.pasos) ? orden.pasos : [];
+
+      // Mapa maestro ingredientes — usa ajustes si el operario modificó cantidad.
+      // El frontend puede mandar la clave como ingrediente_id (ir.id) o materia_prima_id.
+      type Ing = { mp_id: string; mp_codigo: string; mp_nombre: string; cantidad: number; unidad: string };
+      const ingMap = new Map<string, Ing>();
+      for (const i of ingredientes) {
+        const cantidadAjustada = ajustes[i.id] ?? ajustes[i.materia_prima_id];
+        const cantidad = cantidadAjustada != null && !isNaN(Number(cantidadAjustada))
+          ? Number(cantidadAjustada)
+          : parseFloat(i.cantidad) * factor;
+        ingMap.set(i.materia_prima_id, {
+          mp_id: i.materia_prima_id,
+          mp_codigo: i.mp_codigo, mp_nombre: i.mp_nombre,
+          cantidad, unidad: i.unidad_medida,
+        });
+      }
+
+      // Asignación paso→ingredientes:
+      //  · Si algún paso tiene `ingredientes: []` poblado, respetamos ese mapping.
+      //  · Si NO hay mapping, todos los ingredientes van en el primer paso de
+      //    'mezcla' o, en su defecto, en el primer paso del array.
+      const algunPasoConIng = pasosRaw.some(p => Array.isArray(p.ingredientes_ids) && p.ingredientes_ids!.length > 0);
+      const idsAsignados = new Set<string>();
+      if (algunPasoConIng) {
+        for (const p of pasosRaw) (p.ingredientes_ids ?? []).forEach(x => idsAsignados.add(x));
+      }
+      const ingsHuerfanos = Array.from(ingMap.keys()).filter(id => !idsAsignados.has(id));
+      const pasosFiltrados = pasosRaw.length > 0 ? pasosRaw.slice() : [{ fase: 'mezcla', titulo: 'Fabricación', ingredientes_ids: Array.from(ingMap.keys()) }];
+      if (ingsHuerfanos.length > 0) {
+        const idxMezcla = pasosFiltrados.findIndex(p => (p.fase ?? '').toLowerCase().startsWith('mezcla') || (p.fase ?? '').toLowerCase().startsWith('react'));
+        const target = idxMezcla >= 0 ? idxMezcla : 0;
+        pasosFiltrados[target] = {
+          ...pasosFiltrados[target],
+          ingredientes_ids: [...(pasosFiltrados[target].ingredientes_ids ?? []), ...ingsHuerfanos],
+        };
+      }
+
+      // ── PDF minimalista (B/N + un toque rojo en línea cabecera) ─────────────
+      const doc = new PDFDocument({ margin: 40, size: 'A4' });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="receta-${orden.numero_orden ?? orden.id}.pdf"`);
+      doc.pipe(res);
+
+      const RED  = '#FF0000';
+      const TXT  = '#000000';
+      const GRAY = '#6B7280';
+
+      const fmtNum = (n: number, d = 2) => n.toLocaleString('es-ES', { maximumFractionDigits: d, minimumFractionDigits: 0 });
+
+      // Cabecera: título a la izquierda (ancho limitado para no chocar con la
+      // meta) + meta de la orden alineada a la derecha en la misma línea.
+      let y = 40;
+      const metaTxt = `Orden ${orden.numero_orden ?? '—'}  ·  ${fmtNum(parseFloat(orden.cantidad_planificada))} ${orden.unidad_medida}  ·  ${new Date().toLocaleDateString('es-ES')}${orden.fecha_planificada ? `  ·  planificada ${new Date(orden.fecha_planificada).toLocaleDateString('es-ES')}` : ''}`;
+      // Meta a la derecha primero, alineada al baseline del título
+      doc.font('Helvetica').fontSize(11).fillColor(GRAY)
+        .text(metaTxt, 320, y + 8, { width: 235, align: 'right' });
+      // Título a la izquierda con ancho acotado para no pisar la meta
+      doc.fillColor(TXT).font('Helvetica-Bold').fontSize(20)
+        .text(`Receta · ${orden.producto_codigo} — ${orden.producto_nombre}`, 40, y, { width: 270 });
+      y = Math.max(y + 30, doc.y + 8);
+      doc.moveTo(40, y).lineTo(555, y).strokeColor(RED).lineWidth(1).stroke();
+      y += 14;
+
+      // Rangos QC objetivo en una línea
+      const rangosQc: string[] = [];
+      if (orden.ph_min != null || orden.ph_max != null) rangosQc.push(`pH ${orden.ph_min ?? '?'}–${orden.ph_max ?? '?'}`);
+      if (orden.solidos_min != null || orden.solidos_max != null) rangosQc.push(`Sól ${orden.solidos_min ?? '?'}–${orden.solidos_max ?? '?'}%`);
+      if (orden.viscosidad_min != null || orden.viscosidad_max != null) rangosQc.push(`Visc ${orden.viscosidad_min ?? '?'}–${orden.viscosidad_max ?? '?'} cP`);
+      if (rangosQc.length > 0) {
+        doc.fontSize(12).fillColor(GRAY).text(`Rangos QC: ${rangosQc.join('  ·  ')}`, 40, y);
+        y += 22;
+      }
+
+      // Últimas fabricaciones QC (tabla compacta, sin fondo)
+      if (ultimosQC.length > 0) {
+        if (y > 720) { doc.addPage(); y = 40; }
+        doc.font('Helvetica-Bold').fontSize(12).fillColor(TXT)
+          .text('Últimas fabricaciones', 40, y);
+        y += 16;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(GRAY)
+          .text('Lote',    40, y, { width: 110 })
+          .text('Fecha',   155, y, { width: 75 })
+          .text('pH',      235, y, { width: 55, align: 'right' })
+          .text('Sól. %', 300, y, { width: 60, align: 'right' })
+          .text('Visc.',   365, y, { width: 60, align: 'right' });
+        y += 14;
+        doc.moveTo(40, y - 2).lineTo(430, y - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+        for (const l of ultimosQC) {
+          doc.font('Helvetica').fontSize(10).fillColor(TXT)
+            .text(l.lote_interno ?? '—', 40, y, { width: 110 })
+            .text(l.created_at ? new Date(l.created_at).toLocaleDateString('es-ES') : '—', 155, y, { width: 75 })
+            .text(l.ph != null ? fmtNum(parseFloat(l.ph)) : '—', 235, y, { width: 55, align: 'right' })
+            .text(l.solidos != null ? fmtNum(parseFloat(l.solidos)) : '—', 300, y, { width: 60, align: 'right' })
+            .text(l.viscosidad != null ? fmtNum(parseFloat(l.viscosidad)) : '—', 365, y, { width: 60, align: 'right' });
+          y += 13;
+        }
+        y += 8;
+      }
+
+      // PASOS
+      let acumulado = 0;
+      if (y > 740) { doc.addPage(); y = 40; }
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
+        .text('Pasos', 40, y);
+      y += 22;
+
+      pasosFiltrados.forEach((paso, idx) => {
+        if (y > 740) { doc.addPage(); y = 40; }
+
+        const ingsPaso = (paso.ingredientes_ids ?? []).map(mpId => ingMap.get(mpId)).filter(Boolean) as Ing[];
+
+        // Línea de cabecera del paso: una sola string sin continued (evita wrap bug)
+        const faseLabel = (paso.fase ?? '').toUpperCase();
+        const titulo = paso.titulo ? ` — ${paso.titulo}` : '';
+        doc.font('Helvetica-Bold').fontSize(14).fillColor(TXT)
+          .text(`${idx + 1}. `, 40, y, { width: 515, continued: true })
+          .fillColor(RED).text(faseLabel, { continued: !!paso.titulo })
+          .fillColor(TXT).font('Helvetica-Bold')
+          .text(titulo);
+        y = doc.y + 4;
+
+        if (paso.descripcion) {
+          doc.font('Helvetica').fontSize(12).fillColor(GRAY)
+            .text(paso.descripcion, 58, y, { width: 497 });
+          y = doc.y + 4;
+        }
+
+        // Ingredientes del paso — cada uno con acumulado parcial + lote FEFO sugerido
+        if (ingsPaso.length > 0) {
+          for (const ing of ingsPaso) {
+            if (y > 750) { doc.addPage(); y = 40; }
+            acumulado += ing.cantidad;
+            // Línea ingrediente: código + nombre · cantidad → tanque
+            const izq = `   ${ing.mp_codigo}  ${ing.mp_nombre}`;
+            const der = `${fmtNum(ing.cantidad, 3)} ${ing.unidad}   /   ${fmtNum(acumulado)} ${orden.unidad_medida}`;
+            doc.font('Helvetica').fontSize(13).fillColor(TXT)
+              .text(izq, 58, y, { width: 310 });
+            doc.font('Helvetica-Bold').fontSize(13).fillColor(TXT)
+              .text(der, 368, y, { width: 187, align: 'right' });
+            y += 18;
+            // Lote FEFO sugerido (primer lote no agotado)
+            const lotes = lotesFefo.get(ing.mp_id) ?? [];
+            if (lotes.length > 0) {
+              // Recomendar suficientes lotes para cubrir la cantidad
+              let pend = ing.cantidad;
+              const sug: string[] = [];
+              for (const l of lotes) {
+                if (pend <= 0) break;
+                const usar = Math.min(pend, parseFloat(l.cantidad_actual));
+                sug.push(`${l.lote_interno} (${fmtNum(usar, 2)})`);
+                pend -= usar;
+              }
+              if (sug.length > 0) {
+                doc.font('Helvetica-Oblique').fontSize(11).fillColor(GRAY)
+                  .text(`   lotes: ${sug.join('  +  ')}`, 70, y, { width: 485 });
+                y = doc.y + 4;
+              }
+            }
+          }
+        }
+
+        y += 6;
+      });
+
+      // Total final
+      if (y > 740) { doc.addPage(); y = 40; }
+      doc.moveTo(40, y).lineTo(555, y).strokeColor(TXT).lineWidth(0.8).stroke();
+      y += 8;
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
+        .text(`TOTAL`, 40, y, { width: 380 })
+        .text(`${fmtNum(acumulado)} ${orden.unidad_medida}`, 420, y, { width: 135, align: 'right' });
+      y += 36;
+
+      // ── OBSERVACIONES (notas de la orden) — caja grande al final ──
+      {
+        const obs = (orden.notas ?? '').toString().trim();
+        const obsLineas = obs ? obs : '— (sin observaciones) —';
+        doc.font('Helvetica').fontSize(13);
+        const altoTexto = doc.heightOfString(obsLineas, { width: 495 });
+        const boxH = Math.max(80, altoTexto + 36);
+        if (y + boxH > 780) { doc.addPage(); y = 40; }
+        doc.roundedRect(40, y, 515, boxH, 6).strokeColor('#F59E0B').lineWidth(1.5).stroke();
+        doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(13).text('OBSERVACIONES', 50, y + 8);
+        doc.fillColor(obs ? TXT : GRAY).font(obs ? 'Helvetica' : 'Helvetica-Oblique').fontSize(13)
+          .text(obsLineas, 50, y + 28, { width: 495 });
+        y += boxH + 14;
+      }
+
+      // Firmas
+      if (y > 770) { doc.addPage(); y = 40; }
+      doc.font('Helvetica').fontSize(12).fillColor(GRAY)
+        .text('Operario: _____________________________', 40, y)
+        .text('QC: _____________________________', 320, y);
+      y += 20;
+      doc.text(`Fecha: ____/____/______`, 40, y)
+        .text(`Fecha: ____/____/______`, 320, y);
+
+      doc.end();
+    } catch (err: unknown) {
+      return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+    }
+  },
+
   // POST /api/produccion/:id/adjuntar — añadir fotos/archivos a orden existente
   async adjuntar(req: Request, res: Response) {
     try {

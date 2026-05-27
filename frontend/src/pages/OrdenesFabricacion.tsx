@@ -1207,23 +1207,22 @@ export default function OrdenesFabricacion() {
                 </span>
               </div>
               <div className="flex items-center gap-2 pt-1">
-                {['borrador', 'confirmada'].includes(o.estado) && (
-                  o.tipo_orden === 'envasado' ? (
-                    <button
-                      onClick={() => handleConfirmarEnvasado(o.id)}
-                      disabled={loadingPreview}
-                      className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors"
-                    >
-                      {loadingPreview ? <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Package size={14} />} Envasar
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => intentarFabricar(o)}
-                      className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-loga-red py-2.5 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors"
-                    >
-                      <Factory size={14} /> Fabricar
-                    </button>
-                  )
+                {['borrador', 'confirmada'].includes(o.estado) && o.tipo_orden === 'envasado' && (
+                  <button
+                    onClick={() => handleConfirmarEnvasado(o.id)}
+                    disabled={loadingPreview}
+                    className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors"
+                  >
+                    {loadingPreview ? <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Package size={14} />} Envasar
+                  </button>
+                )}
+                {['borrador', 'confirmada', 'en_proceso'].includes(o.estado) && o.tipo_orden !== 'envasado' && (
+                  <button
+                    onClick={() => intentarFabricar(o)}
+                    className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-loga-red py-2.5 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors"
+                  >
+                    <Factory size={14} /> {o.estado === 'en_proceso' ? 'Continuar' : 'Fabricar'}
+                  </button>
                 )}
                 <button
                   onClick={() => verDetalle(o)}
@@ -1334,23 +1333,22 @@ export default function OrdenesFabricacion() {
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1.5">
-                    {['borrador', 'confirmada'].includes(o.estado) && (
-                      o.tipo_orden === 'envasado' ? (
-                        <button
-                          onClick={() => handleConfirmarEnvasado(o.id)}
-                          disabled={loadingPreview}
-                          className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors"
-                        >
-                          {loadingPreview ? <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Package size={15} />} Envasar
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => intentarFabricar(o)}
-                          className="flex items-center gap-1.5 rounded-lg bg-loga-red px-3.5 py-2 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors"
-                        >
-                          <Factory size={15} /> Fabricar
-                        </button>
-                      )
+                    {['borrador', 'confirmada'].includes(o.estado) && o.tipo_orden === 'envasado' && (
+                      <button
+                        onClick={() => handleConfirmarEnvasado(o.id)}
+                        disabled={loadingPreview}
+                        className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors"
+                      >
+                        {loadingPreview ? <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Package size={15} />} Envasar
+                      </button>
+                    )}
+                    {['borrador', 'confirmada', 'en_proceso'].includes(o.estado) && o.tipo_orden !== 'envasado' && (
+                      <button
+                        onClick={() => intentarFabricar(o)}
+                        className="flex items-center gap-1.5 rounded-lg bg-loga-red px-3.5 py-2 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors"
+                      >
+                        <Factory size={15} /> {o.estado === 'en_proceso' ? 'Continuar' : 'Fabricar'}
+                      </button>
                     )}
                     <button
                       onClick={() => verDetalle(o)}
@@ -1759,6 +1757,7 @@ export default function OrdenesFabricacion() {
         onClose={() => setOrdenFabricando(null)}
         onDone={() => { cargar(); }}
       />
+
 
       <EnvasadoRapido
         open={envasadoRapidoOpen}

@@ -122,10 +122,21 @@ class AutomatizacionesService {
       const eventos: string[] = [];
       if (stockActual <= 0) eventos.push('stock_cero');
       if (stockMinimo > 0 && stockActual <= stockMinimo) eventos.push('stock_bajo_minimo');
-      if (eventos.length === 0) return;
+      // Para reglas con umbral custom (trigger_config.umbral) el evento se evalúa
+      // dentro de ejecutarRegla — aquí incluimos siempre 'stock_bajo_minimo' como
+      // candidato si stock_actual ya está bajo cualquier posible umbral.
+      if (!eventos.includes('stock_bajo_minimo')) eventos.push('stock_bajo_minimo');
 
       const reglas = await this.cargarReglasActivas(eventos, productoId);
       for (const r of reglas) {
+        // Si la regla define umbral propio, comprobar antes de ejecutar
+        const umbral = (r.trigger_config as { umbral?: number | string })?.umbral;
+        if (umbral != null) {
+          const u = typeof umbral === 'string' ? parseFloat(umbral) : umbral;
+          if (!isNaN(u) && stockActual > u) continue; // todavía por encima del umbral custom
+        } else if (r.trigger_tipo === 'stock_bajo_minimo' && stockMinimo > 0 && stockActual > stockMinimo) {
+          continue; // regla con mínimo del producto pero stock no está bajo
+        }
         await this.ejecutarRegla(r, prod);
       }
     } catch (err) {
@@ -179,6 +190,13 @@ class AutomatizacionesService {
   private async ejecutarRegla(regla: ReglaCargada, prod: ProductoCtx, ctx?: { lote_id?: string; qc_ok?: boolean }): Promise<void> {
     const cfg = await this.getConfig();
     try {
+      // Filtro "activar desde fecha": si el trigger_config tiene activar_desde y aún
+      // no llegamos a esa fecha, la regla se omite silenciosamente.
+      const activarDesde = (regla.trigger_config as { activar_desde?: string })?.activar_desde;
+      if (activarDesde) {
+        const hoy = new Date().toISOString().slice(0, 10);
+        if (hoy < activarDesde) return;
+      }
       // Anti-duplicado para acciones que crean órdenes
       if (
         regla.accion_tipo === 'crear_orden_compra' ||
