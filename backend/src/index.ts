@@ -21,6 +21,8 @@ import controlesCalidadRoutes from './routes/controles-calidad.routes';
 import specsRoutes             from './routes/specs.routes';
 import recordatoriosRoutes     from './routes/recordatorios.routes';
 import pedidosProgramadosRoutes from './routes/pedidos-programados.routes';
+import cambioRoutes              from './routes/cambio.routes';
+import facturasRoutes            from './routes/facturas.routes';
 import { emailService } from './services/email.service';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
@@ -315,6 +317,10 @@ app.use('/api/controles-calidad', authMiddleware, controlesCalidadRoutes);
 app.use('/api/specs',         authMiddleware, specsRoutes);
 app.use('/api/recordatorios', authMiddleware, recordatoriosRoutes);
 app.use('/api/pedidos-programados', authMiddleware, pedidosProgramadosRoutes);
+app.use('/api/cambio',        authMiddleware, cambioRoutes);
+// /api/facturas — auth per-handler: /parse usa Bearer normal,
+// /file usa token via query param (iframe no envía Authorization).
+app.use('/api/facturas',      facturasRoutes);
 
 // ── PRODUCCIÓN: servir frontend compilado desde el mismo backend ───────────
 // Si existe ../frontend/dist (build) sirvemos esos archivos. SPA fallback con

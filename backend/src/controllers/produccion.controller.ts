@@ -794,16 +794,19 @@ export const produccionController = {
 
       const fmtNum = (n: number, d = 2) => n.toLocaleString('es-ES', { maximumFractionDigits: d, minimumFractionDigits: 0 });
 
-      // Cabecera: solo texto + línea roja fina
+      // Cabecera: título a la izquierda (ancho limitado para no chocar con la
+      // meta) + meta de la orden alineada a la derecha en la misma línea.
       let y = 40;
-      doc.fillColor(TXT).font('Helvetica-Bold').fontSize(14)
-        .text(`Receta · ${orden.producto_codigo} — ${orden.producto_nombre}`, 40, y);
-      y += 18;
-      doc.font('Helvetica').fontSize(9).fillColor(GRAY)
-        .text(`Orden ${orden.numero_orden ?? '—'}  ·  ${fmtNum(parseFloat(orden.cantidad_planificada))} ${orden.unidad_medida}  ·  ${new Date().toLocaleDateString('es-ES')}${orden.fecha_planificada ? `  ·  planificada ${new Date(orden.fecha_planificada).toLocaleDateString('es-ES')}` : ''}`, 40, y);
-      y += 14;
+      const metaTxt = `Orden ${orden.numero_orden ?? '—'}  ·  ${fmtNum(parseFloat(orden.cantidad_planificada))} ${orden.unidad_medida}  ·  ${new Date().toLocaleDateString('es-ES')}${orden.fecha_planificada ? `  ·  planificada ${new Date(orden.fecha_planificada).toLocaleDateString('es-ES')}` : ''}`;
+      // Meta a la derecha primero, alineada al baseline del título
+      doc.font('Helvetica').fontSize(11).fillColor(GRAY)
+        .text(metaTxt, 320, y + 8, { width: 235, align: 'right' });
+      // Título a la izquierda con ancho acotado para no pisar la meta
+      doc.fillColor(TXT).font('Helvetica-Bold').fontSize(20)
+        .text(`Receta · ${orden.producto_codigo} — ${orden.producto_nombre}`, 40, y, { width: 270 });
+      y = Math.max(y + 30, doc.y + 8);
       doc.moveTo(40, y).lineTo(555, y).strokeColor(RED).lineWidth(1).stroke();
-      y += 10;
+      y += 14;
 
       // Rangos QC objetivo en una línea
       const rangosQc: string[] = [];
@@ -811,40 +814,42 @@ export const produccionController = {
       if (orden.solidos_min != null || orden.solidos_max != null) rangosQc.push(`Sól ${orden.solidos_min ?? '?'}–${orden.solidos_max ?? '?'}%`);
       if (orden.viscosidad_min != null || orden.viscosidad_max != null) rangosQc.push(`Visc ${orden.viscosidad_min ?? '?'}–${orden.viscosidad_max ?? '?'} cP`);
       if (rangosQc.length > 0) {
-        doc.fontSize(9).fillColor(GRAY).text(`Rangos QC: ${rangosQc.join('  ·  ')}`, 40, y);
-        y += 16;
+        doc.fontSize(12).fillColor(GRAY).text(`Rangos QC: ${rangosQc.join('  ·  ')}`, 40, y);
+        y += 22;
       }
 
       // Últimas fabricaciones QC (tabla compacta, sin fondo)
       if (ultimosQC.length > 0) {
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(TXT)
+        if (y > 720) { doc.addPage(); y = 40; }
+        doc.font('Helvetica-Bold').fontSize(12).fillColor(TXT)
           .text('Últimas fabricaciones', 40, y);
-        y += 12;
-        doc.font('Helvetica-Bold').fontSize(8).fillColor(GRAY)
-          .text('Lote',    40, y, { width: 90 })
-          .text('Fecha',   135, y, { width: 65 })
-          .text('pH',      205, y, { width: 50, align: 'right' })
-          .text('Sól. %', 265, y, { width: 55, align: 'right' })
-          .text('Visc.',   325, y, { width: 55, align: 'right' });
-        y += 11;
-        doc.moveTo(40, y - 2).lineTo(380, y - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+        y += 16;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(GRAY)
+          .text('Lote',    40, y, { width: 110 })
+          .text('Fecha',   155, y, { width: 75 })
+          .text('pH',      235, y, { width: 55, align: 'right' })
+          .text('Sól. %', 300, y, { width: 60, align: 'right' })
+          .text('Visc.',   365, y, { width: 60, align: 'right' });
+        y += 14;
+        doc.moveTo(40, y - 2).lineTo(430, y - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
         for (const l of ultimosQC) {
-          doc.font('Helvetica').fontSize(8).fillColor(TXT)
-            .text(l.lote_interno ?? '—', 40, y, { width: 90 })
-            .text(l.created_at ? new Date(l.created_at).toLocaleDateString('es-ES') : '—', 135, y, { width: 65 })
-            .text(l.ph != null ? fmtNum(parseFloat(l.ph)) : '—', 205, y, { width: 50, align: 'right' })
-            .text(l.solidos != null ? fmtNum(parseFloat(l.solidos)) : '—', 265, y, { width: 55, align: 'right' })
-            .text(l.viscosidad != null ? fmtNum(parseFloat(l.viscosidad)) : '—', 325, y, { width: 55, align: 'right' });
-          y += 11;
+          doc.font('Helvetica').fontSize(10).fillColor(TXT)
+            .text(l.lote_interno ?? '—', 40, y, { width: 110 })
+            .text(l.created_at ? new Date(l.created_at).toLocaleDateString('es-ES') : '—', 155, y, { width: 75 })
+            .text(l.ph != null ? fmtNum(parseFloat(l.ph)) : '—', 235, y, { width: 55, align: 'right' })
+            .text(l.solidos != null ? fmtNum(parseFloat(l.solidos)) : '—', 300, y, { width: 60, align: 'right' })
+            .text(l.viscosidad != null ? fmtNum(parseFloat(l.viscosidad)) : '—', 365, y, { width: 60, align: 'right' });
+          y += 13;
         }
-        y += 6;
+        y += 8;
       }
 
-      // PASOS minimalistas
+      // PASOS
       let acumulado = 0;
-      doc.font('Helvetica-Bold').fontSize(10).fillColor(TXT)
+      if (y > 740) { doc.addPage(); y = 40; }
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
         .text('Pasos', 40, y);
-      y += 14;
+      y += 22;
 
       pasosFiltrados.forEach((paso, idx) => {
         if (y > 740) { doc.addPage(); y = 40; }
@@ -854,17 +859,17 @@ export const produccionController = {
         // Línea de cabecera del paso: una sola string sin continued (evita wrap bug)
         const faseLabel = (paso.fase ?? '').toUpperCase();
         const titulo = paso.titulo ? ` — ${paso.titulo}` : '';
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(TXT)
+        doc.font('Helvetica-Bold').fontSize(14).fillColor(TXT)
           .text(`${idx + 1}. `, 40, y, { width: 515, continued: true })
           .fillColor(RED).text(faseLabel, { continued: !!paso.titulo })
           .fillColor(TXT).font('Helvetica-Bold')
           .text(titulo);
-        y = doc.y + 2;
+        y = doc.y + 4;
 
         if (paso.descripcion) {
-          doc.font('Helvetica').fontSize(9).fillColor(GRAY)
+          doc.font('Helvetica').fontSize(12).fillColor(GRAY)
             .text(paso.descripcion, 58, y, { width: 497 });
-          y = doc.y + 2;
+          y = doc.y + 4;
         }
 
         // Ingredientes del paso — cada uno con acumulado parcial + lote FEFO sugerido
@@ -874,12 +879,12 @@ export const produccionController = {
             acumulado += ing.cantidad;
             // Línea ingrediente: código + nombre · cantidad → tanque
             const izq = `   ${ing.mp_codigo}  ${ing.mp_nombre}`;
-            const der = `${fmtNum(ing.cantidad, 3)} ${ing.unidad}   →   ${fmtNum(acumulado)} ${orden.unidad_medida}`;
-            doc.font('Helvetica').fontSize(9).fillColor(TXT)
+            const der = `${fmtNum(ing.cantidad, 3)} ${ing.unidad}   /   ${fmtNum(acumulado)} ${orden.unidad_medida}`;
+            doc.font('Helvetica').fontSize(13).fillColor(TXT)
               .text(izq, 58, y, { width: 310 });
-            doc.font('Helvetica-Bold').fontSize(9).fillColor(TXT)
+            doc.font('Helvetica-Bold').fontSize(13).fillColor(TXT)
               .text(der, 368, y, { width: 187, align: 'right' });
-            y += 12;
+            y += 18;
             // Lote FEFO sugerido (primer lote no agotado)
             const lotes = lotesFefo.get(ing.mp_id) ?? [];
             if (lotes.length > 0) {
@@ -893,32 +898,47 @@ export const produccionController = {
                 pend -= usar;
               }
               if (sug.length > 0) {
-                doc.font('Helvetica-Oblique').fontSize(8).fillColor(GRAY)
+                doc.font('Helvetica-Oblique').fontSize(11).fillColor(GRAY)
                   .text(`   lotes: ${sug.join('  +  ')}`, 70, y, { width: 485 });
-                y = doc.y + 2;
+                y = doc.y + 4;
               }
             }
           }
         }
 
-        y += 4;
+        y += 6;
       });
 
-      // Total final compacto
+      // Total final
       if (y > 740) { doc.addPage(); y = 40; }
       doc.moveTo(40, y).lineTo(555, y).strokeColor(TXT).lineWidth(0.8).stroke();
-      y += 4;
-      doc.font('Helvetica-Bold').fontSize(11).fillColor(TXT)
+      y += 8;
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
         .text(`TOTAL`, 40, y, { width: 380 })
         .text(`${fmtNum(acumulado)} ${orden.unidad_medida}`, 420, y, { width: 135, align: 'right' });
-      y += 26;
+      y += 36;
 
-      // Firmas mini
-      if (y > 760) { doc.addPage(); y = 40; }
-      doc.font('Helvetica').fontSize(8).fillColor(GRAY)
+      // ── OBSERVACIONES (notas de la orden) — caja grande al final ──
+      {
+        const obs = (orden.notas ?? '').toString().trim();
+        const obsLineas = obs ? obs : '— (sin observaciones) —';
+        doc.font('Helvetica').fontSize(13);
+        const altoTexto = doc.heightOfString(obsLineas, { width: 495 });
+        const boxH = Math.max(80, altoTexto + 36);
+        if (y + boxH > 780) { doc.addPage(); y = 40; }
+        doc.roundedRect(40, y, 515, boxH, 6).strokeColor('#F59E0B').lineWidth(1.5).stroke();
+        doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(13).text('OBSERVACIONES', 50, y + 8);
+        doc.fillColor(obs ? TXT : GRAY).font(obs ? 'Helvetica' : 'Helvetica-Oblique').fontSize(13)
+          .text(obsLineas, 50, y + 28, { width: 495 });
+        y += boxH + 14;
+      }
+
+      // Firmas
+      if (y > 770) { doc.addPage(); y = 40; }
+      doc.font('Helvetica').fontSize(12).fillColor(GRAY)
         .text('Operario: _____________________________', 40, y)
         .text('QC: _____________________________', 320, y);
-      y += 12;
+      y += 20;
       doc.text(`Fecha: ____/____/______`, 40, y)
         .text(`Fecha: ____/____/______`, 320, y);
 

@@ -11,6 +11,7 @@ interface EmailPedidoPayload {
   usuario_id?:   string;
   adjuntar_pdf?: boolean;
   precio_unitario?: number | null;
+  porte_a?: 'proveedor' | 'cliente';
 }
 
 interface ConfigEmail {
@@ -97,6 +98,7 @@ class EmailService {
           precio_unitario: payload.precio_unitario ?? null,
           notas: payload.notas_adicionales ?? null,
           usuario_id: payload.usuario_id ?? null,
+          porte_a: payload.porte_a ?? 'proveedor',
         });
         pdfBuffer = result.pdf;
         numeroSolicitud = result.numero;

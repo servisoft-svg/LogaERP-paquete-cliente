@@ -77,7 +77,7 @@ export const stockController = {
   async enviarPedido(req: Request, res: Response) {
     try {
       const { producto_id, destinatario, cantidad_sugerida, notas_adicionales, cuerpo_personalizado,
-              adjuntar_pdf, precio_unitario } = req.body;
+              adjuntar_pdf, precio_unitario, porte_a } = req.body;
       if (!producto_id || !destinatario) {
         return res.status(400).json({ error: 'producto_id y destinatario son obligatorios' });
       }
@@ -90,6 +90,7 @@ export const stockController = {
         usuario_id: (req as any).user?.id,
         adjuntar_pdf: !!adjuntar_pdf,
         precio_unitario: precio_unitario != null && precio_unitario !== '' ? Number(precio_unitario) : null,
+        porte_a: porte_a === 'cliente' ? 'cliente' : 'proveedor',
       });
 
       // Si adjuntar_pdf=true, el helper crearSolicitudYRenderPDF ya insertó el registro.

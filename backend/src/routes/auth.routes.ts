@@ -191,18 +191,38 @@ router.put('/me', authMiddleware, async (req, res) => {
     if (!nombre || !String(nombre).trim()) {
       return res.status(400).json({ error: 'El nombre no puede estar vacío' });
     }
+    const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    // Pre-check: si el email cambia, asegúrate de que no lo tenga otro usuario.
+    // Más amigable que esperar al unique constraint error de Postgres.
+    if (emailNorm) {
+      const { rows: dup } = await pool.query(
+        `SELECT id FROM usuarios WHERE LOWER(email) = $1 AND id <> $2 LIMIT 1`,
+        [emailNorm, userId]
+      );
+      if (dup.length > 0) {
+        return res.status(409).json({
+          error: `El email "${emailNorm}" ya está en uso por otro usuario. Usa uno distinto.`,
+        });
+      }
+    }
     const { rows: [u] } = await pool.query(
       `UPDATE usuarios SET
          nombre = $1,
          email  = COALESCE($2, email)
        WHERE id = $3 AND activo = TRUE
        RETURNING id, nombre, email, rol`,
-      [String(nombre).trim(), email ? String(email).trim().toLowerCase() : null, userId]
+      [String(nombre).trim(), emailNorm, userId]
     );
     if (!u) return res.status(404).json({ error: 'Usuario no encontrado' });
     return res.json(u);
   } catch (e) {
-    return res.status(500).json({ error: (e as Error).message });
+    // Mensaje claro si Postgres lanza unique violation (defensa por si la
+    // condición de carrera deja pasar dos updates simultáneos).
+    const err = e as { code?: string; message?: string };
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Ese email ya está en uso por otro usuario.' });
+    }
+    return res.status(500).json({ error: err.message ?? 'Error al guardar perfil' });
   }
 });
 

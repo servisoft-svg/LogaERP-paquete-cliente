@@ -135,7 +135,9 @@ router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
   try {
     const { rows: [pp] } = await pool.query(
       `SELECT pp.*, p.codigo AS producto_codigo, p.nombre AS producto_nombre, p.unidad_medida,
-              pv.nombre AS proveedor_nombre,
+              pv.nombre    AS proveedor_nombre,
+              pv.direccion AS proveedor_direccion,
+              pv.telefono  AS proveedor_telefono,
               u.nombre AS solicitante_nombre
        FROM pedidos_proveedor pp
        JOIN productos p ON p.id = pp.producto_id
@@ -157,6 +159,8 @@ router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
       precio_unitario: pp.precio_unitario != null ? Number(pp.precio_unitario) : null,
       importe_total: pp.importe_total != null ? Number(pp.importe_total) : null,
       proveedor_nombre: pp.proveedor_nombre ?? 'Proveedor',
+      proveedor_direccion: pp.proveedor_direccion ?? null,
+      proveedor_telefono: pp.proveedor_telefono ?? null,
       destinatario: pp.destinatario_email,
       notas: pp.notas,
       fecha: new Date(pp.fecha_solicitud),
@@ -164,6 +168,7 @@ router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
       empresa_cif: empresa.cif,
       empresa_direccion: empresa.direccion,
       empresa_telefono: empresa.telefono,
+      datos_bancarios: empresa.datos_bancarios,
       solicitante_nombre: pp.solicitante_nombre ?? null,
     });
     res.setHeader('Content-Type', 'application/pdf');
