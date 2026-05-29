@@ -522,10 +522,16 @@ class ProduccionService {
 
     const countSql = `SELECT COUNT(*) FROM ordenes_produccion op ${where}`;
     const dataSql = `
-      SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre
+      SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre,
+             re.nombre AS receta_envasado_nombre,
+             COALESCE(pe_dir.nombre, pe_rec.nombre) AS pe_nombre,
+             COALESCE(pe_dir.codigo, pe_rec.codigo) AS pe_codigo
       FROM ordenes_produccion op
       JOIN recetas r ON r.id = op.receta_id
       JOIN productos p ON p.id = r.producto_id
+      LEFT JOIN recetas_envasado re ON re.id = op.receta_envasado_id
+      LEFT JOIN productos pe_dir ON pe_dir.id = op.producto_envasado_id
+      LEFT JOIN productos pe_rec ON pe_rec.id = re.producto_envasado_id
       ${where}
       ORDER BY op.created_at DESC
       LIMIT $${paramIdx++} OFFSET $${paramIdx++}

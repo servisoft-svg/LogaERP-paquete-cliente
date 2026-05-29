@@ -523,4 +523,142 @@ router.delete('/subcategorias-mp/:id', async (req, res) => {
   }
 });
 
+// ── SUBCATEGORÍAS ME (catálogo editable: Bote, Caja, Etiqueta, Tapón…) ──────
+router.get('/subcategorias-me', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nombre, orden, activo FROM subcategorias_me
+       WHERE activo = TRUE ORDER BY orden ASC, nombre ASC`
+    );
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+router.post('/subcategorias-me', async (req, res) => {
+  try {
+    const nombre = String(req.body?.nombre ?? '').trim().slice(0, 50);
+    const orden = Number.isFinite(Number(req.body?.orden)) ? Number(req.body?.orden) : 0;
+    if (!nombre) return res.status(400).json({ error: 'Nombre obligatorio' });
+    const { rows: [row] } = await pool.query(
+      `INSERT INTO subcategorias_me (nombre, orden) VALUES ($1, $2) RETURNING id, nombre, orden, activo`,
+      [nombre, orden]
+    );
+    return res.status(201).json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe una sub-categoría con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.put('/subcategorias-me/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, orden, activo } = req.body ?? {};
+    const nombreNorm = nombre != null ? String(nombre).trim().slice(0, 50) : null;
+    if (nombreNorm !== null && !nombreNorm) return res.status(400).json({ error: 'Nombre no puede estar vacío' });
+    // Propagar rename a productos.subcategoria_me (texto)
+    if (nombreNorm) {
+      const { rows: [actual] } = await pool.query(`SELECT nombre FROM subcategorias_me WHERE id = $1`, [id]);
+      if (actual && actual.nombre !== nombreNorm) {
+        await pool.query(
+          `UPDATE productos SET subcategoria_me = $1 WHERE subcategoria_me = $2`,
+          [nombreNorm, actual.nombre]
+        );
+      }
+    }
+    const { rows: [row] } = await pool.query(
+      `UPDATE subcategorias_me SET
+         nombre = COALESCE($1, nombre),
+         orden  = COALESCE($2::INT, orden),
+         activo = COALESCE($3, activo)
+       WHERE id = $4 RETURNING id, nombre, orden, activo`,
+      [nombreNorm, orden != null ? Number(orden) : null, activo ?? null, id]
+    );
+    if (!row) return res.status(404).json({ error: 'Sub-categoría no encontrada' });
+    return res.json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe una sub-categoría con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.delete('/subcategorias-me/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows: [row] } = await pool.query(
+      `UPDATE subcategorias_me SET activo = FALSE WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Sub-categoría no encontrada' });
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// ── INTEGRACIÓN ALILO — endpoints admin (JWT) para configurar/auditar ──────
+import { getAliloSharedSecret, regenerateAliloSecret } from './integracionAlilo.routes';
+
+router.get('/integracion/alilo/status', async (req, res) => {
+  const secret = await getAliloSharedSecret();
+  const port = process.env.PORT ?? '3001';
+  const host = (req.headers['host'] ?? '').toString().split(':')[0] || 'pc-loga.local';
+  const url = `http://${host}:${port}/api/integracion/alilo/consumir`;
+
+  const { rows: productosCompartidos } = await pool.query(
+    `SELECT codigo, nombre, unidad_medida, stock_actual, codigo_alilo
+     FROM productos
+     WHERE compartido_alilo = TRUE AND activo = TRUE
+     ORDER BY codigo`
+  );
+
+  const { rows: [cfg] } = await pool.query<{ alilo_webhook_url: string | null }>(
+    `SELECT alilo_webhook_url FROM integracion_alilo_config WHERE id = 1`
+  );
+
+  return res.json({
+    activo: !!secret,
+    url,
+    shared_secret: secret,
+    alilo_webhook_url: cfg?.alilo_webhook_url ?? null,
+    productos_compartidos: productosCompartidos,
+    instrucciones: 'Copia este secret a la configuración de Alilo. Genera uno nuevo si sospechas que se filtró.',
+  });
+});
+
+// POST /integracion/alilo/regenerar-secret — rota el HMAC compartido
+router.post('/integracion/alilo/regenerar-secret', async (_req, res) => {
+  const newSecret = await regenerateAliloSecret();
+  return res.json({ ok: true, shared_secret: newSecret });
+});
+
+// PUT /integracion/alilo/webhook-url — configura URL del webhook de Alilo
+router.put('/integracion/alilo/webhook-url', async (req, res) => {
+  const { url } = req.body ?? {};
+  const urlNorm = typeof url === 'string' && url.trim() ? url.trim().slice(0, 300) : null;
+  await pool.query(
+    `UPDATE integracion_alilo_config SET alilo_webhook_url = $1, updated_at = now() WHERE id = 1`,
+    [urlNorm]
+  );
+  return res.json({ ok: true, alilo_webhook_url: urlNorm });
+});
+
+router.get('/integracion/alilo/log', async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, endpoint, payload, status_code, respuesta, ip_origen, error, created_at
+     FROM integracion_alilo_log
+     ORDER BY created_at DESC
+     LIMIT 100`
+  );
+  return res.json(rows);
+});
+
 export default router;

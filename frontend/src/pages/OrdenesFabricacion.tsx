@@ -3,12 +3,13 @@ import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, ChevronRight, ChevronLeft, Factory,
-  Check, AlertCircle, ClipboardList, Trash2, Eye, X, Send, Search, Paperclip, Pencil, Sparkles, Package,
+  Check, AlertCircle, ClipboardList, Trash2, Eye, X, Send, Search, Paperclip, Pencil, Sparkles, Package, Tag,
 } from 'lucide-react';
 import { produccionApi, recetasApi, clientesApi, productosApi } from '../api/client';
 import type { OrdenProduccion, Receta, Cliente, Producto } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import FabricacionModal from '../components/FabricacionModal';
+import EtiquetaPreviewModal from '../components/EtiquetaPreviewModal';
 import EnvasadoRapido from '../components/EnvasadoRapido';
 import TanqueEnvasado from '../components/TanqueEnvasado';
 import ConfirmModal from '../components/ConfirmModal';
@@ -125,6 +126,9 @@ export default function OrdenesFabricacion() {
   const [emailDest, setEmailDest]           = useState('');
   const [enviandoEmail, setEnviandoEmail]   = useState(false);
   const [emailExito, setEmailExito]         = useState(false);
+
+  // Preview etiqueta L-800
+  const [etiquetaOrden, setEtiquetaOrden]   = useState<{ id: string; numero: string } | null>(null);
 
   const handleEnviarTrazabilidad = async () => {
     if (!emailOrdenId || !emailDest) return;
@@ -1027,6 +1031,11 @@ export default function OrdenesFabricacion() {
                             {colaNecesaria.toLocaleString('es-ES', { maximumFractionDigits: 2 })} kg
                           </span>
                         </div>
+                        {colaNecesaria === 0 && (
+                          <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 leading-tight">
+                            ⚠ Cola = 0. Configura <b>kg de cola por bote</b> en la ficha del envase ({envaseSelEnv.nombre}) o del producto envasado ({prodFinalSel.nombre}).
+                          </p>
+                        )}
                         <div className="flex justify-between">
                           <span className="text-gray-500">Produccion:</span>
                           <span className="font-black text-emerald-600 text-lg">{totalUds.toLocaleString('es-ES')} ud</span>
@@ -1359,6 +1368,15 @@ export default function OrdenesFabricacion() {
                     {['borrador', 'confirmada'].includes(o.estado) && (
                       <button onClick={() => abrirEditarOrden(o)} className="rounded-lg p-1.5 text-gray-400 hover:bg-blue-50 hover:text-blue-600 transition-colors" title="Editar orden">
                         <Pencil size={14} />
+                      </button>
+                    )}
+                    {o.estado === 'completada' && o.tipo_orden !== 'envasado' && (
+                      <button
+                        onClick={() => setEtiquetaOrden({ id: o.id, numero: o.numero_orden })}
+                        className="rounded-lg p-1.5 text-gray-400 hover:bg-amber-50 hover:text-amber-600 transition-colors"
+                        title="Preview e imprimir etiqueta L-800"
+                      >
+                        <Tag size={14} />
                       </button>
                     )}
                     {o.estado === 'completada' && (
@@ -1911,6 +1929,14 @@ export default function OrdenesFabricacion() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Preview etiqueta L-800 */}
+      <EtiquetaPreviewModal
+        ordenId={etiquetaOrden?.id ?? null}
+        numeroOrden={etiquetaOrden?.numero}
+        open={!!etiquetaOrden}
+        onClose={() => setEtiquetaOrden(null)}
+      />
     </div>
   );
 }

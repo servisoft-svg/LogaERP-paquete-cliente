@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request } from 'express';
 import cors    from 'cors';
 import helmet  from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -13,6 +13,7 @@ import stockRoutes            from './routes/stock.routes';
 import lotesRoutes            from './routes/lotes.routes';
 import productosRoutes        from './routes/productos.routes';
 import recetasRoutes          from './routes/recetas.routes';
+import recetasEnvasadoRoutes  from './routes/recetasEnvasado.routes';
 import proveedoresRoutes      from './routes/proveedores.routes';
 import clientesRoutes         from './routes/clientes.routes';
 import pedidosRoutes, { webhookHandler } from './routes/pedidos.routes';
@@ -35,6 +36,7 @@ import { logger }        from './lib/logger';
 import { automatizacionesService } from './services/automatizaciones.service';
 import { cronHeartbeat } from './services/cron-heartbeat.service';
 import automatizacionesRoutes from './routes/automatizaciones.routes';
+import integracionAliloRoutes from './routes/integracionAlilo.routes';
 import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
 import { runMigrations } from './db/migrations';
 
@@ -131,7 +133,14 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({
+  limit: '1mb',
+  // Captura el body crudo para que la verificación HMAC use el JSON bit-exacto
+  // que envió el cliente (sin re-serializar) — requisito para Integración Alilo.
+  verify: (req, _res, buf) => {
+    (req as Request & { rawBody?: string }).rawBody = buf.toString('utf8');
+  },
+}));
 app.use(auditoriaMiddleware);
 // Uploads protegidos por token (JWT con algoritmo pinneado vía verifyToken).
 // La validación de ownership real se hace en uploadsAuthMiddleware (Fix #6).
@@ -304,6 +313,7 @@ app.post('/api/pedidos/webhook', webhookGlobalLimiter, webhookLimiter, webhookHa
 // Protected routes (need token)
 app.use('/api/productos',     authMiddleware, productosRoutes);
 app.use('/api/recetas',       authMiddleware, recetasRoutes);
+app.use('/api/recetas-envasado', authMiddleware, recetasEnvasadoRoutes);
 app.use('/api/produccion',    authMiddleware, produccionRoutes);
 app.use('/api/lotes',         authMiddleware, lotesRoutes);
 app.use('/api/stock',         authMiddleware, stockRoutes);
@@ -313,6 +323,8 @@ app.use('/api/pedidos',       authMiddleware, pedidosRoutes);
 app.use('/api/finanzas',      authMiddleware, adminOnly, finanzasRoutes);
 app.use('/api/configuracion', authMiddleware, adminOnly, configuracionRoutes);
 app.use('/api/automatizaciones', authMiddleware, adminOnly, automatizacionesRoutes);
+// Integración externa Alilo — autenticada por HMAC (no JWT). Llamada desde otro PC en la LAN.
+app.use('/api/integracion/alilo', integracionAliloRoutes);
 app.use('/api/controles-calidad', authMiddleware, controlesCalidadRoutes);
 app.use('/api/specs',         authMiddleware, specsRoutes);
 app.use('/api/recordatorios', authMiddleware, recordatoriosRoutes);
@@ -400,6 +412,11 @@ async function startup() {
   server.listen(Number(PORT), '0.0.0.0', () => {
     logger.info(`Loga ERP Backend corriendo en puerto ${PORT}`);
   });
+
+  // Listener de cambios de stock para webhook Alilo (LISTEN/NOTIFY)
+  const { startAliloStockListener } = await import('./services/aliloStockListener.service');
+  startAliloStockListener().catch(err =>
+    logger.error('[startup] alilo stock listener', { err: err?.message ?? err }));
 }
 startup();
 

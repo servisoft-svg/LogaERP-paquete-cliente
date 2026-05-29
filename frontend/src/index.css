@@ -328,3 +328,24 @@
 /* Switch toggles activos: emerald */
 .dark .bg-emerald-500 { background-color: #10B981 !important; }
 .dark .bg-amber-500   { background-color: #F59E0B !important; }
+
+/* Inputs estándar para módulo Envasado */
+.input-base, .select-base {
+  display: block; width: 100%;
+  border: 1px solid #e4e4e7;
+  background: #fff;
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  color: #18181b;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-base:focus, .select-base:focus {
+  border-color: #FF0000;
+  box-shadow: 0 0 0 2px rgba(255,0,0,0.08);
+}
+
+/* Ocultar scrollbar (navbar) */
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }

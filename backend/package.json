@@ -1,6 +1,6 @@
 {
   "name": "loga-erp-backend",
-  "version": "1.0.0",
+  "version": "1.0.13",
   "description": "ERP Loga — Backend Node.js + TypeScript",
   "main": "dist/index.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "@types/pdfkit": "^0.17.6",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.76.1",
+    "bwip-js": "^4.10.2",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -32,6 +33,7 @@
     "multer": "^2.1.1",
     "nodemailer": "^6.9.13",
     "pdf-parse": "^1.1.1",
+    "pdf-to-png-converter": "^4.0.0",
     "pdfjs-dist": "^4.10.38",
     "pdfkit": "^0.18.0",
     "pg": "^8.11.5",

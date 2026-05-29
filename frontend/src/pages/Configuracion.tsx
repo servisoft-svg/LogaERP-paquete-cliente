@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Settings, Save, Percent, Mail, Bell, Eye, EyeOff, SendHorizontal, HardDrive, Building,
-  ShieldCheck, History, Award, CheckCircle2, AlertCircle, Info, Database, ChevronRight, Beaker,
+  ShieldCheck, History, Award, CheckCircle2, AlertCircle, Info, Database, ChevronRight, Beaker, Package,
 } from 'lucide-react';
 import { configuracionApi } from '../api/client';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import CatalogoSpecs from '../components/CatalogoSpecs';
-import CatalogoSubcategoriasMP from '../components/CatalogoSubcategoriasMP';
+import CatalogoSubcategorias from '../components/CatalogoSubcategorias';
+import IntegracionAlilo from '../components/IntegracionAlilo';
 import { FormField, Input, Textarea } from '../components/FormField';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
@@ -43,6 +44,8 @@ const TOC = [
   { id: 'niveles',  label: 'Niveles',     icon: Award },
   { id: 'specs',    label: 'Specs',       icon: Beaker },
   { id: 'subcategorias-mp', label: 'Sub-cat MP', icon: Beaker },
+  { id: 'subcategorias-me', label: 'Sub-cat ME', icon: Package },
+  { id: 'integracion-alilo', label: 'Alilo', icon: ShieldCheck },
   { id: 'backup',   label: 'Backup',      icon: Database },
   { id: 'historial',label: 'Historial',   icon: History },
 ];
@@ -600,10 +603,58 @@ export default function Configuracion() {
               </div>
               <div className="flex-1">
                 <h2 className="text-sm font-semibold text-gray-800">Sub-categorías de materias primas</h2>
-                <p className="text-[11px] text-gray-400">Familias químicas: resina, agua, pigmento… Editables aquí.</p>
+                <p className="text-[11px] text-gray-400">Familias químicas: resina, agua, pigmento… Clasifican las MP.</p>
               </div>
             </div>
-            <CatalogoSubcategoriasMP />
+            <CatalogoSubcategorias
+              color="purple"
+              api={{
+                listar:   configuracionApi.listarSubcategoriasMP,
+                crear:    configuracionApi.crearSubcategoriaMP,
+                editar:   configuracionApi.editarSubcategoriaMP,
+                eliminar: configuracionApi.eliminarSubcategoriaMP,
+              }}
+              descripcion="Familias químicas usadas para clasificar materias primas (Resina, Agua, Pigmento…). Renombrar aquí propaga el cambio a todos los productos que la tengan asignada."
+              placeholderNueva="Nueva sub-categoría (ej. Tensioactivo)"
+            />
+          </section>
+
+          {/* Sección: sub-categorías de material de embalaje */}
+          <section id="subcategorias-me" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-amber-50/60 to-transparent">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-100/70 text-amber-600">
+                <Package size={15} />
+              </div>
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-gray-800">Sub-categorías de material de embalaje</h2>
+                <p className="text-[11px] text-gray-400">Bote, Caja, Etiqueta, Tapón… El tipo determina qué campo se pide al crear el producto.</p>
+              </div>
+            </div>
+            <CatalogoSubcategorias
+              color="amber"
+              api={{
+                listar:   configuracionApi.listarSubcategoriasME,
+                crear:    configuracionApi.crearSubcategoriaME,
+                editar:   configuracionApi.editarSubcategoriaME,
+                eliminar: configuracionApi.eliminarSubcategoriaME,
+              }}
+              descripcion="Clasifica los embalajes por rol: Bote/Garrafa (contienen cola, indica kg dentro), Caja (multiplica botes), Etiqueta/Tapón/Otro (consumibles). El modal de Producto mostrará solo el campo relevante."
+              placeholderNueva="Nueva sub-categoría (ej. Bolsa)"
+            />
+          </section>
+
+          {/* Sección: integración Alilo */}
+          <section id="integracion-alilo" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-violet-50/60 to-transparent">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-100/70 text-violet-600">
+                <ShieldCheck size={15} />
+              </div>
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-gray-800">Integración Alilo</h2>
+                <p className="text-[11px] text-gray-400">El otro sistema en la fábrica puede descontar stock vía API HMAC. Activar con <code className="text-violet-600">ALILO_SHARED_SECRET</code> en .env.</p>
+              </div>
+            </div>
+            <IntegracionAlilo />
           </section>
 
           {/* Sección: backup */}

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  LayoutDashboard, Factory, Layers, Bell,
+  LayoutDashboard, Factory, Layers, Bell, Boxes,
   Package, ChefHat, Truck, Users, ShoppingBag, BarChart3, Settings, LogOut, MoreHorizontal, X, Zap,
   Moon, Sun, ClipboardCheck,
 } from 'lucide-react';
@@ -17,6 +17,7 @@ const LINKS = [
   { to: '/productos',      label: 'Productos',   icon: Package          },
   { to: '/recetas',        label: 'Fórmulas',     icon: ChefHat          },
   { to: '/produccion',     label: 'Produccion',  icon: Factory          },
+  { to: '/envasado',       label: 'Envasado',    icon: Boxes            },
   { to: '/lotes',          label: 'Lotes',       icon: Layers           },
   { to: '/proveedores',    label: 'Proveedores', icon: Truck            },
   { to: '/solicitudes-compra', label: 'Compras', icon: ShoppingBag       },
@@ -56,13 +57,14 @@ export default function Navbar() {
     <>
       {/* ── Desktop top bar ── */}
       <header className="sticky top-0 z-40 w-full border-b border-gray-100 bg-white/95 backdrop-blur-sm hidden md:block">
-        <div className="flex h-14 w-full items-center justify-between pl-3 pr-4 gap-4">
-          <Link to="/" className="flex items-center gap-3 shrink-0">
-            <img src="/colas-loga.png" alt="Loga" className="h-9 w-auto object-contain" />
-            <span className="text-base font-bold text-loga-red">Colas Loga</span>
+        <div className="flex h-12 w-full items-center justify-between pl-2 pr-2 gap-1">
+          <Link to="/" className="flex items-center gap-1.5 shrink-0" title={`Loga ERP v${__APP_VERSION__}`}>
+            <img src="/colas-loga.png" alt="Loga" className="h-7 w-auto object-contain" />
+            <span className="text-sm font-bold text-loga-red hidden 2xl:inline">Colas Loga</span>
+            <span className="hidden sm:inline-flex items-center rounded-md bg-gray-100 text-gray-500 px-1.5 py-px text-[9px] font-mono font-semibold leading-none">v{__APP_VERSION__}</span>
           </Link>
 
-          <nav className="flex items-center gap-0.5 flex-1 justify-center min-w-0 overflow-x-auto">
+          <nav className="flex items-center gap-px flex-1 justify-center min-w-0 overflow-x-auto scrollbar-hide">
             {visibleLinks.map(({ to, label, icon: Icon }) => {
               const active = pathname === to || (to !== '/' && pathname.startsWith(to));
               return (
@@ -71,16 +73,16 @@ export default function Navbar() {
                   to={to}
                   title={label}
                   className={clsx(
-                    'relative flex items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium whitespace-nowrap transition-colors shrink-0',
+                    'relative flex items-center gap-1 rounded-md px-1.5 py-1.5 text-[11px] font-medium whitespace-nowrap transition-colors shrink-0',
                     active ? 'text-loga-red' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'
                   )}
                 >
-                  <Icon size={14} />
+                  <Icon size={13} className="shrink-0" />
                   <span className="hidden xl:inline">{label}</span>
                   {active && (
                     <motion.div
                       layoutId="nav-indicator"
-                      className="absolute inset-0 rounded-lg bg-red-50 -z-10"
+                      className="absolute inset-0 rounded-md bg-red-50 -z-10"
                       transition={{ type: 'spring', stiffness: 400, damping: 30 }}
                     />
                   )}
@@ -89,26 +91,26 @@ export default function Navbar() {
             })}
           </nav>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-px shrink-0">
             <button
               onClick={() => setCrearAlerta(true)}
               title="Nuevo recordatorio"
-              className="flex items-center justify-center w-9 h-9 rounded-lg hover:bg-red-50 transition-colors text-gray-500 hover:text-loga-red"
+              className="flex items-center justify-center w-7 h-7 rounded-md hover:bg-red-50 transition-colors text-gray-500 hover:text-loga-red"
             >
-              <Bell size={16} />
+              <Bell size={14} />
             </button>
-            <button onClick={() => setDark(d => !d)} className="flex items-center justify-center w-9 h-9 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
-              {dark ? <Sun size={16} className="text-amber-400" /> : <Moon size={16} className="text-gray-500" />}
+            <button onClick={() => setDark(d => !d)} className="flex items-center justify-center w-7 h-7 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+              {dark ? <Sun size={14} className="text-amber-400" /> : <Moon size={14} className="text-gray-500" />}
             </button>
             <button
               onClick={() => setPerfilAbierto(true)}
               title={user ? `${user.nombre} — editar perfil` : 'Mi perfil'}
-              className="w-8 h-8 rounded-full bg-loga-red flex items-center justify-center text-white text-xs font-bold select-none hover:bg-loga-red-dark transition-colors cursor-pointer"
+              className="w-7 h-7 rounded-full bg-loga-red flex items-center justify-center text-white text-[10px] font-bold select-none hover:bg-loga-red-dark transition-colors cursor-pointer ml-0.5"
             >
               {initials}
             </button>
-            <button onClick={logout} className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-gray-50 transition-colors text-gray-400 hover:text-gray-600" title="Salir">
-              <LogOut size={16} />
+            <button onClick={logout} className="flex items-center justify-center w-7 h-7 rounded-md hover:bg-gray-50 transition-colors text-gray-400 hover:text-gray-600" title="Salir">
+              <LogOut size={14} />
             </button>
           </div>
         </div>

@@ -54,6 +54,9 @@ router.post('/:id/adjuntar',    uploadFiles.array('archivos', 10), produccionCon
 router.get ('/:id/trazabilidad.pdf', produccionController.trazabilidadPdf);
 router.get ('/:id/receta.pdf',       produccionController.recetaPdf);
 router.post('/:id/receta.pdf',       produccionController.recetaPdf);
+router.get ('/:id/etiqueta.pdf',     produccionController.etiquetaL800Pdf);
+router.get ('/:id/etiqueta.ezpx',    produccionController.etiquetaL800Ezpx);
+router.get ('/:id/etiqueta-defaults', produccionController.etiquetaDefaults);
 router.get ('/:id/detalle',     produccionController.detalle);
 router.post('/:id/enviar-trazabilidad', produccionController.enviarTrazabilidad);
 router.delete('/:id',           produccionController.eliminar);
@@ -861,7 +864,7 @@ router.get('/lote/:loteId/origen', async (req, res) => {
     const { rows: consumos } = await pool.query(
       `SELECT sm.id, sm.tipo, sm.cantidad,
          p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida,
-         l.lote_interno, l.fecha_caducidad, COALESCE(l.precio_compra, p.precio_unitario) AS precio_unitario
+         l.lote_interno, l.fecha_caducidad, COALESCE(NULLIF(l.precio_compra, 0), NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS precio_unitario
        FROM stock_moves sm
        JOIN productos p ON p.id = sm.producto_id
        LEFT JOIN lotes l ON l.id = sm.lote_id

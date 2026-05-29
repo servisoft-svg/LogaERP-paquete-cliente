@@ -553,4 +553,54 @@ router.patch('/:id/estado', async (req, res) => {
   }
 });
 
+// GET /api/lotes/:id/origen — para trazabilidad recursiva en envasado:
+// devuelve la OF de producción que generó este lote + los consumos de MP de
+// esa OF (para mostrar la "trazabilidad de la cola usada").
+router.get('/:id/origen', async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Lote → producto + cantidad inicial
+    const { rows: [lote] } = await pool.query<{
+      id: string; producto_id: string; producto_nombre: string;
+      cantidad_inicial: string; lote_interno: string;
+    }>(
+      `SELECT l.id, l.producto_id, p.nombre AS producto_nombre,
+              l.cantidad_inicial::TEXT, l.lote_interno
+       FROM lotes l JOIN productos p ON p.id = l.producto_id
+       WHERE l.id = $1`, [id]);
+    if (!lote) return res.status(404).json({ ok: false, error: 'lote no encontrado' });
+
+    // OF que produjo este lote (stock_move de produccion_salida con este lote_id)
+    const { rows: [movEntrada] } = await pool.query<{ orden_id: string }>(
+      `SELECT orden_id FROM stock_moves
+       WHERE lote_id = $1 AND tipo = 'produccion_salida'
+       ORDER BY created_at ASC LIMIT 1`, [id]);
+    if (!movEntrada) return res.json({ ok: false, error: 'sin OF de origen', lote });
+
+    // Consumos de MP de esa OF
+    const { rows: consumos } = await pool.query(
+      `SELECT sm.id, sm.cantidad, sm.lote_id,
+              p.nombre AS producto_nombre, p.codigo AS producto_codigo,
+              p.unidad_medida, p.tipo AS producto_tipo,
+              l.lote_interno, l.lote_proveedor, l.fecha_caducidad,
+              COALESCE(NULLIF(l.precio_compra, 0), NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS precio_unitario
+       FROM stock_moves sm
+       JOIN productos p ON p.id = sm.producto_id
+       LEFT JOIN lotes l ON l.id = sm.lote_id
+       WHERE sm.orden_id = $1 AND sm.tipo = 'produccion_consumo'
+       ORDER BY p.nombre ASC, sm.created_at ASC`,
+      [movEntrada.orden_id]
+    );
+
+    const { rows: [orden] } = await pool.query(
+      `SELECT op.numero_orden, op.fecha_fin, op.tipo_orden FROM ordenes_produccion op WHERE op.id = $1`,
+      [movEntrada.orden_id]
+    );
+
+    res.json({ ok: true, lote, orden, consumos });
+  } catch (err: unknown) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 export default router;

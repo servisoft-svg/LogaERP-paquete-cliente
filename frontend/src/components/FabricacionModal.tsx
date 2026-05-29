@@ -3,9 +3,9 @@
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText, Download } from 'lucide-react';
+import { X, Check, AlertCircle, Factory, ChevronRight, ChevronLeft, FlaskConical, Camera, ScanLine, Thermometer, Clock, Droplets, FileText, Download, Tag } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { recetasApi, produccionApi, lotesApi, proveedoresApi, productosApi } from '../api/client';
+import { recetasApi, produccionApi, lotesApi, proveedoresApi, productosApi, controlesCalidadApi } from '../api/client';
 import type { OrdenProduccion, IngredienteReceta, Receta, PasoReceta } from '../types';
 import clsx from 'clsx';
 import axios from 'axios';
@@ -64,10 +64,12 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
   const [temperatura, setTemperatura] = useState(25);
   const [registroLimpieza, setRegistroLimpieza] = useState('');
   const [limpiezaTipo, setLimpiezaTipo] = useState<'interna' | 'externa' | ''>('');
+  const [limpiezaTanque, setLimpiezaTanque] = useState('');
   const [limpiezaProducto, setLimpiezaProducto] = useState('');
-  const [limpiezaVolumen, setLimpiezaVolumen] = useState('');
   const [limpiezaDestino, setLimpiezaDestino] = useState('');
+  const [limpiezaObservaciones, setLimpiezaObservaciones] = useState('');
   const [limpiezaProveedorId, setLimpiezaProveedorId] = useState('');
+  const [limpiezaAlbaran, setLimpiezaAlbaran] = useState('');
   const [proveedores, setProveedores] = useState<{ id: string; nombre: string; telefono?: string; email?: string }[]>([]);
   const inicioFabRef = useRef<string | null>(null);
 
@@ -346,6 +348,50 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
       if (lsKey) localStorage.removeItem(lsKey);
       if (orden) localStorage.removeItem(`fab_paso_${orden.id}`);
       if (orden) localStorage.removeItem(`fab_ajustes_${orden.id}`);
+
+      // ── Auto-crear registro en Control de Calidad → Limpieza ──
+      // Si la receta requería limpieza y el operario rellenó la sección,
+      // generamos un control firmado tipo='limpieza' con los datos. Aparece
+      // automáticamente en Control Calidad → pestaña Limpieza.
+      if (requiereLimpieza && registroLimpieza && registroLimpieza.trim()) {
+        try {
+          const accionTxt = limpiezaTipo === 'externa'
+            ? (() => {
+                const prov = proveedores.find(p => p.id === limpiezaProveedorId);
+                const partes: string[] = [];
+                if (prov) partes.push(`Limpieza externa por ${prov.nombre}`);
+                if (limpiezaAlbaran) partes.push(`Albarán: ${limpiezaAlbaran}`);
+                return partes.length > 0 ? partes.join(' · ') : 'Limpieza externa';
+              })()
+            : (() => {
+                const partes: string[] = [];
+                if (limpiezaProducto) partes.push(`Producto: ${limpiezaProducto}`);
+                if (limpiezaDestino)  partes.push(`Destino residuo: ${limpiezaDestino}`);
+                return `Limpieza interna — ${partes.join(' · ')}`;
+              })();
+          const resultadoCtrl = 'correcto';
+          const deposito = limpiezaTanque
+            || (receta?.nombre ? `Reactor (${receta.nombre})` : 'Reactor');
+          await controlesCalidadApi.crear({
+            tipo: 'limpieza',
+            fecha: (fechaFab || new Date().toISOString()).slice(0, 10),
+            resultado: resultadoCtrl,
+            estado: 'completado',
+            deposito_equipo: deposito,
+            accion: accionTxt,
+            observaciones: [
+              limpiezaObservaciones,
+              `Auto-generado al confirmar fabricación ${orden.numero_orden}${res.lote_producido ? ` — Lote ${res.lote_producido}` : ''}.`,
+            ].filter(Boolean).join(' '),
+            lote_codigo: res.lote_producido ?? null,
+            producto_id: receta?.producto_id ?? null,
+            producto_nombre: orden.receta_nombre ?? receta?.nombre ?? null,
+          });
+        } catch {
+          console.warn('[fabricacion] no se pudo crear control de limpieza auto');
+        }
+      }
+
       // If QC out of range, show warning before completing
       if (res.qc_fuera_de_rango) {
         const errMsg = `⚠ Control de calidad fuera de rango:\n${(res.qc_desviaciones ?? []).join('\n')}\n\nEl lote se ha creado en CUARENTENA. Requiere aprobación manual en Lotes.`;
@@ -505,6 +551,27 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
               >
                 <Download size={16} />
                 <span className="text-xs font-semibold hidden sm:inline">Descargar receta</span>
+              </button>
+              <button
+                onClick={async () => {
+                  if (!orden) return;
+                  try {
+                    const { default: api } = await import('../api/client');
+                    const res = await api.get(`/produccion/${orden.id}/etiqueta.pdf`, { responseType: 'blob' });
+                    const blob = new Blob([res.data], { type: 'application/pdf' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `etiqueta-${orden.numero_orden ?? orden.id}.pdf`;
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 1500);
+                  } catch { /* silent */ }
+                }}
+                className="inline-flex items-center gap-1 rounded-lg p-2 text-gray-500 hover:bg-gray-100 hover:text-loga-red transition-colors"
+                title="Descargar etiqueta para imprimir"
+              >
+                <Tag size={16} />
+                <span className="text-xs font-semibold hidden sm:inline">Etiqueta</span>
               </button>
               {fase !== 'fabricando' && (
                 <button onClick={onClose} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 transition-colors">
@@ -1466,69 +1533,144 @@ export default function FabricacionModal({ orden, onClose, onDone }: Props) {
                         )}
                       </div>
                     )}
-                    {/* Registro de Limpieza */}
-                    {requiereLimpieza && (
-                      <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-4 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-amber-700 font-bold text-sm">Limpieza</span>
-                          <span className="text-[10px] text-loga-red font-bold bg-red-50 rounded px-2 py-0.5">Obligatorio</span>
-                        </div>
+                    {/* Registro de Limpieza — formato APPCC / sanidad */}
+                    {requiereLimpieza && (() => {
+                      // Construye el string registroLimpieza desde los campos del form
+                      const buildRegistroInterna = (over: Partial<{
+                        tanque: string; producto: string; destino: string; obs: string;
+                      }> = {}) => {
+                        const tanque = over.tanque ?? limpiezaTanque;
+                        const producto = over.producto ?? limpiezaProducto;
+                        const destino = over.destino ?? limpiezaDestino;
+                        const obs = over.obs ?? limpiezaObservaciones;
+                        const partes: string[] = [];
+                        if (tanque) partes.push(`Tanque: ${tanque}`);
+                        if (producto) partes.push(`Producto: ${producto}`);
+                        if (destino) partes.push(`Destino residuo: ${destino}`);
+                        if (obs) partes.push(`Obs: ${obs}`);
+                        return `Interna — ${partes.join(' · ')}`;
+                      };
+                      const buildRegistroExterna = (over: Partial<{ proveedorId: string; albaran: string; obs: string }> = {}) => {
+                        const proveedorId = over.proveedorId ?? limpiezaProveedorId;
+                        const albaran = over.albaran ?? limpiezaAlbaran;
+                        const obs = over.obs ?? limpiezaObservaciones;
+                        const prov = proveedores.find(p => p.id === proveedorId);
+                        const partes: string[] = [];
+                        if (prov) partes.push(`Proveedor: ${prov.nombre}`);
+                        if (albaran) partes.push(`Albarán: ${albaran}`);
+                        if (obs) partes.push(`Obs: ${obs}`);
+                        return partes.length > 0 ? `Externa — ${partes.join(' · ')}` : 'Externa';
+                      };
 
-                        <div className="grid grid-cols-2 gap-2">
-                          <button type="button" onClick={() => setLimpiezaTipo('interna')}
-                            className={clsx('rounded-lg py-3 text-sm font-bold border-2 transition-all text-center',
-                              limpiezaTipo === 'interna' ? 'border-amber-500 bg-amber-200 text-amber-900' : 'border-gray-200 bg-white text-gray-500')}>
-                            Interna
-                          </button>
-                          <button type="button" onClick={() => { setLimpiezaTipo('externa'); setRegistroLimpieza('Limpieza externa'); }}
-                            className={clsx('rounded-lg py-3 text-sm font-bold border-2 transition-all text-center',
-                              limpiezaTipo === 'externa' ? 'border-amber-500 bg-amber-200 text-amber-900' : 'border-gray-200 bg-white text-gray-500')}>
-                            Externa
-                          </button>
-                        </div>
+                      const fieldCls = 'w-full rounded-md border border-amber-200/70 bg-white px-2.5 py-2 text-sm outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100 transition-all placeholder:text-gray-400';
+                      const labelCls = 'block text-[10px] font-bold text-amber-900/70 uppercase tracking-wider mb-1';
 
-                        {limpiezaTipo === 'interna' && (
-                          <div className="space-y-2 pt-1">
-                            <input value={limpiezaProducto} onChange={e => { setLimpiezaProducto(e.target.value); setRegistroLimpieza(`Interna: ${e.target.value}, ${limpiezaVolumen}, destino: ${limpiezaDestino}`); }}
-                              placeholder="Producto (agua caliente, sosa, disolvente...)"
-                              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400" />
-                            <div className="grid grid-cols-2 gap-2">
-                              <input value={limpiezaVolumen} onChange={e => { setLimpiezaVolumen(e.target.value); setRegistroLimpieza(`Interna: ${limpiezaProducto}, ${e.target.value}, destino: ${limpiezaDestino}`); }}
-                                placeholder="Volumen (200 L)"
-                                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400" />
-                              <input value={limpiezaDestino} onChange={e => { setLimpiezaDestino(e.target.value); setRegistroLimpieza(`Interna: ${limpiezaProducto}, ${limpiezaVolumen}, destino: ${e.target.value}`); }}
-                                placeholder="Destino (depuradora)"
-                                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400" />
+                      return (
+                        <div className="rounded-xl border border-amber-300 bg-gradient-to-br from-amber-50 to-amber-50/40 shadow-sm overflow-hidden">
+                          {/* Header */}
+                          <div className="flex items-center gap-2 px-3.5 py-2 bg-amber-100/60 border-b border-amber-200/70">
+                            <Droplets size={14} className="text-amber-700" />
+                            <span className="text-sm font-bold text-amber-900">Registro de Limpieza</span>
+                            <span className="ml-auto text-[10px] text-loga-red font-bold bg-white/80 border border-red-200 rounded-md px-1.5 py-0.5">Obligatorio</span>
+                          </div>
+
+                          <div className="p-3 space-y-2.5">
+                            {/* Tipo — segmented pill */}
+                            <div className="flex rounded-lg border border-amber-200 bg-white p-0.5 gap-0.5">
+                              <button type="button" onClick={() => { setLimpiezaTipo('interna'); setRegistroLimpieza(buildRegistroInterna()); }}
+                                className={clsx('flex-1 rounded-md py-1.5 text-xs font-bold transition-all',
+                                  limpiezaTipo === 'interna' ? 'bg-amber-500 text-white shadow-sm' : 'text-amber-700 hover:bg-amber-50')}>
+                                Interna
+                              </button>
+                              <button type="button" onClick={() => { setLimpiezaTipo('externa'); setRegistroLimpieza(buildRegistroExterna()); }}
+                                className={clsx('flex-1 rounded-md py-1.5 text-xs font-bold transition-all',
+                                  limpiezaTipo === 'externa' ? 'bg-amber-500 text-white shadow-sm' : 'text-amber-700 hover:bg-amber-50')}>
+                                Externa
+                              </button>
                             </div>
-                          </div>
-                        )}
 
-                        {limpiezaTipo === 'externa' && (
-                          <div className="space-y-2 pt-1">
-                            <SearchSelect
-                              options={proveedores.map(p => ({ id: p.id, label: p.nombre, sub: p.telefono || p.email || '' }))}
-                              value={limpiezaProveedorId}
-                              onChange={id => {
-                                setLimpiezaProveedorId(id);
-                                const prov = proveedores.find(p => p.id === id);
-                                setRegistroLimpieza(prov ? `Limpieza externa: ${prov.nombre}` : 'Limpieza externa');
-                              }}
-                              placeholder="Buscar proveedor de limpieza..."
-                              selectedLabel={proveedores.find(p => p.id === limpiezaProveedorId)?.nombre}
-                              selectedSub={proveedores.find(p => p.id === limpiezaProveedorId)?.telefono ?? ''}
-                            />
-                            <textarea rows={2} value={registroLimpieza.includes(': ') ? registroLimpieza.split(': ').slice(1).join(': ').replace(proveedores.find(p => p.id === limpiezaProveedorId)?.nombre ?? '___', '').replace(/^[,\s]+/, '') : ''}
-                              onChange={e => {
-                                const prov = proveedores.find(p => p.id === limpiezaProveedorId);
-                                const base = prov ? `Limpieza externa: ${prov.nombre}` : 'Limpieza externa';
-                                setRegistroLimpieza(e.target.value ? `${base}. ${e.target.value}` : base);
-                              }}
-                              placeholder="Observaciones (opcional)"
-                              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none resize-none focus:border-amber-400" />
+                            {limpiezaTipo === 'interna' && (
+                              <div className="space-y-2.5">
+                                {/* Tanque + Producto */}
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className={labelCls}>Tanque / equipo</label>
+                                    <input value={limpiezaTanque}
+                                      onChange={e => { setLimpiezaTanque(e.target.value); setRegistroLimpieza(buildRegistroInterna({ tanque: e.target.value })); }}
+                                      placeholder="Reactor 1, Tanque 2…"
+                                      className={fieldCls} />
+                                  </div>
+                                  <div>
+                                    <label className={labelCls}>Producto de limpieza</label>
+                                    <input value={limpiezaProducto}
+                                      onChange={e => { setLimpiezaProducto(e.target.value); setRegistroLimpieza(buildRegistroInterna({ producto: e.target.value })); }}
+                                      placeholder="Sosa, agua caliente…"
+                                      className={fieldCls} />
+                                  </div>
+                                </div>
+
+                                {/* Destino residuo (opcional, solo si hay) */}
+                                <div>
+                                  <label className={labelCls}>Destino del residuo <span className="text-amber-600/60 normal-case font-normal">(opcional)</span></label>
+                                  <input value={limpiezaDestino}
+                                    onChange={e => { setLimpiezaDestino(e.target.value); setRegistroLimpieza(buildRegistroInterna({ destino: e.target.value })); }}
+                                    placeholder="Depuradora, gestor autorizado…"
+                                    className={fieldCls} />
+                                </div>
+
+                                {/* Observaciones */}
+                                <div>
+                                  <label className={labelCls}>Observaciones</label>
+                                  <textarea rows={3} value={limpiezaObservaciones}
+                                    onChange={e => { setLimpiezaObservaciones(e.target.value); setRegistroLimpieza(buildRegistroInterna({ obs: e.target.value })); }}
+                                    placeholder="Anota cualquier incidencia o detalle adicional…"
+                                    className={fieldCls + ' resize-none leading-snug'} />
+                                </div>
+                              </div>
+                            )}
+
+                            {limpiezaTipo === 'externa' && (
+                              <div className="space-y-2.5">
+                                <div>
+                                  <label className={labelCls}>Proveedor</label>
+                                  <SearchSelect
+                                    options={proveedores.map(p => ({ id: p.id, label: p.nombre, sub: p.telefono || p.email || '' }))}
+                                    value={limpiezaProveedorId}
+                                    onChange={id => { setLimpiezaProveedorId(id); setRegistroLimpieza(buildRegistroExterna({ proveedorId: id })); }}
+                                    placeholder="Buscar proveedor de limpieza..."
+                                    selectedLabel={proveedores.find(p => p.id === limpiezaProveedorId)?.nombre}
+                                    selectedSub={proveedores.find(p => p.id === limpiezaProveedorId)?.telefono ?? ''}
+                                  />
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className={labelCls}>Tanque / equipo</label>
+                                    <input value={limpiezaTanque}
+                                      onChange={e => setLimpiezaTanque(e.target.value)}
+                                      placeholder="Reactor 1, Tanque 2…"
+                                      className={fieldCls} />
+                                  </div>
+                                  <div>
+                                    <label className={labelCls}>Nº albarán <span className="text-amber-600/60 normal-case font-normal">(opcional)</span></label>
+                                    <input value={limpiezaAlbaran}
+                                      onChange={e => { setLimpiezaAlbaran(e.target.value); setRegistroLimpieza(buildRegistroExterna({ albaran: e.target.value })); }}
+                                      placeholder="ALB-2026-042"
+                                      className={fieldCls + ' font-mono'} />
+                                  </div>
+                                </div>
+                                <div>
+                                  <label className={labelCls}>Observaciones</label>
+                                  <textarea rows={3} value={limpiezaObservaciones}
+                                    onChange={e => { setLimpiezaObservaciones(e.target.value); setRegistroLimpieza(buildRegistroExterna({ obs: e.target.value })); }}
+                                    placeholder="Anota cualquier incidencia o detalle adicional…"
+                                    className={fieldCls + ' resize-none leading-snug'} />
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    )}
+                        </div>
+                      );
+                    })()}
                     {/* Stock warning */}
                     {ingredientesSinStock.length > 0 && (
                       <div className="rounded-lg border-2 border-red-300 bg-red-50 p-3 space-y-1">

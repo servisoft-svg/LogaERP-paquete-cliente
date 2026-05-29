@@ -8,6 +8,8 @@ import path                  from 'path';
 import { invalidarCacheFinanzas } from '../routes/finanzas.routes';
 import { alertaService }          from '../services/alerta.service';
 import { logger }                 from '../lib/logger';
+import { buildEtiquetaL800Pdf }   from '../lib/pdfEtiquetaL800';
+import { buildEtiquetaL800Ezpx }  from '../lib/ezpxEtiquetaL800';
 
 export const produccionController = {
   async crear(req: Request, res: Response) {
@@ -267,7 +269,7 @@ export const produccionController = {
       const { rows: consumos } = await pool.query(
         `SELECT sm.tipo, sm.cantidad, sm.created_at,
                 p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida,
-                COALESCE(l.precio_compra, p.precio_unitario) AS precio_unitario,
+                COALESCE(NULLIF(l.precio_compra, 0), NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS precio_unitario,
                 l.lote_interno, l.lote_proveedor, l.fecha_caducidad, l.precio_compra
          FROM stock_moves sm
          JOIN productos p ON p.id = sm.producto_id
@@ -595,7 +597,10 @@ export const produccionController = {
       const { id } = req.params;
 
       const { rows: [orden] } = await pool.query(
-        `SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre, p.unidad_medida,
+        `SELECT op.*, r.nombre AS receta_nombre,
+                COALESCE(pe.nombre, p.nombre) AS producto_nombre,
+                COALESCE(pe.codigo, p.codigo) AS producto_codigo,
+                COALESCE(pe.unidad_medida, p.unidad_medida) AS unidad_medida,
                 u.nombre AS operario_nombre, u.rol AS operario_rol,
                 CASE
                   WHEN op.fecha_inicio IS NOT NULL AND op.fecha_fin IS NOT NULL
@@ -625,6 +630,7 @@ export const produccionController = {
          FROM ordenes_produccion op
          JOIN recetas r ON r.id = op.receta_id
          JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN productos pe ON pe.id = op.producto_envasado_id
          LEFT JOIN usuarios u ON u.id = op.operario_id
          WHERE op.id = $1`,
         [id]
@@ -650,7 +656,7 @@ export const produccionController = {
            sm.id, sm.tipo, sm.cantidad, sm.cantidad_antes, sm.cantidad_despues,
            sm.created_at, sm.lote_id,
            p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida, p.tipo AS producto_tipo,
-           COALESCE(l.precio_compra, p.precio_unitario) AS precio_unitario,
+           COALESCE(NULLIF(l.precio_compra, 0), NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS precio_unitario,
            l.lote_interno, l.lote_proveedor, l.fecha_caducidad, l.precio_compra
          FROM stock_moves sm
          JOIN productos p ON p.id = sm.producto_id
@@ -1382,6 +1388,268 @@ export const produccionController = {
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
     } finally {
       client.release();
+    }
+  },
+
+  // GET /api/produccion/:id/etiqueta-defaults — JSON con lote y cantidad
+  // auto-detectados. Usado por el preview modal para pre-rellenar los inputs
+  // editables sin tener que parsear el PDF.
+  async etiquetaDefaults(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      // Para órdenes de envasado, el producto objetivo es el PE (no el granel).
+      // Si op.producto_envasado_id está set → priorizar ese; si no, el de la receta.
+      const { rows: [orden] } = await pool.query(
+        `SELECT op.id, op.cantidad_planificada, op.tipo_orden, op.producto_envasado_id,
+                COALESCE(pe.id, r.producto_id) AS producto_id,
+                COALESCE(pe.nombre, p.nombre) AS producto_nombre,
+                COALESCE(pe.nombre_comercial, p.nombre_comercial) AS producto_nombre_comercial
+         FROM ordenes_produccion op
+         JOIN recetas r ON r.id = op.receta_id
+         JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN productos pe ON pe.id = op.producto_envasado_id
+         WHERE op.id = $1`,
+        [id]
+      );
+      if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+      const { rows: [lote] } = await pool.query(
+        `SELECT DISTINCT l.lote_interno, l.cantidad_inicial
+         FROM stock_moves sm
+         JOIN lotes l ON l.id = sm.lote_id AND l.producto_id = $2
+         WHERE sm.orden_id = $1 AND sm.lote_id IS NOT NULL
+         ORDER BY l.lote_interno
+         LIMIT 1`,
+        [id, orden.producto_id]
+      );
+
+      // URL del QR — misma lógica que el endpoint del PDF
+      const frontendBase =
+        (process.env.CORS_ORIGIN?.split(',')[0]?.trim()) ||
+        (req.get('origin')) ||
+        `${req.protocol}://${req.get('host')}`;
+      const qrUrl = `${frontendBase.replace(/\/$/, '')}/produccion?detalle_id=${id}`;
+
+      const nombreCom = (orden.producto_nombre_comercial ?? '').trim();
+      const nombre = (orden.producto_nombre ?? '').trim();
+
+      // Para envasado: extraer formato del nombre del PE (ej. "200 ml", "1 kg", "5 L").
+      // Cada etiqueta muestra el CONTENIDO POR BOTE (no el total de la OF).
+      let cantidadEtiq = lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada);
+      let unidadEtiq = 'Kg';
+      if (orden.tipo_orden === 'envasado') {
+        const m = (nombreCom || nombre).match(/(\d+(?:[.,]\d+)?)\s*(ml|mL|cl|cL|l|L|g|kg|Kg|KG)\b/);
+        if (m) {
+          cantidadEtiq = parseFloat(m[1].replace(',', '.'));
+          unidadEtiq = m[2].toLowerCase() === 'ml' ? 'mL'
+                    : m[2].toLowerCase() === 'cl' ? 'cL'
+                    : m[2].toLowerCase() === 'l'  ? 'L'
+                    : m[2].toLowerCase() === 'g'  ? 'g'
+                    : 'Kg';
+        }
+      }
+
+      return res.json({
+        lote: lote?.lote_interno ?? '',
+        cantidad: cantidadEtiq,
+        unidad: unidadEtiq,
+        qrUrl,
+        titulo: nombreCom || nombre,
+        subtitulo: nombreCom ? nombre : '',
+        contenedorText: 'Contenedor nº: 1',
+      });
+    } catch (err: unknown) {
+      return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+    }
+  },
+
+  // GET /api/produccion/:id/etiqueta.pdf — Etiqueta L-800 con lote dinámico.
+  // Lote y cantidad se sacan del lote producido por la orden (vía stock_moves).
+  // Si la orden aún no produjo lote (estado planificado), usa cantidad_planificada
+  // y un lote placeholder. Año del sello aniversario = añoActual − 1958.
+  async etiquetaL800Pdf(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+
+      // Buscar lote producido por esta orden. El stock_move tipo es 'produccion_salida'
+      // y el lote.producto_id debe matchear el producto de la receta (PT, no MPs).
+      // En envasado, prioriza op.producto_envasado_id (el PE producido, no el granel).
+      const { rows: [orden] } = await pool.query(
+        `SELECT op.id, op.cantidad_planificada, op.estado, op.tipo_orden, op.producto_envasado_id,
+                COALESCE(pe.id, p.id)           AS producto_id,
+                COALESCE(pe.codigo, p.codigo)   AS producto_codigo,
+                COALESCE(pe.nombre, p.nombre)   AS producto_nombre,
+                COALESCE(pe.nombre_comercial, p.nombre_comercial) AS producto_nombre_comercial
+         FROM ordenes_produccion op
+         JOIN recetas r ON r.id = op.receta_id
+         JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN productos pe ON pe.id = op.producto_envasado_id
+         WHERE op.id = $1`,
+        [id]
+      );
+      if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+      const { rows: [lote] } = await pool.query(
+        `SELECT DISTINCT l.lote_interno, l.cantidad_inicial
+         FROM stock_moves sm
+         JOIN lotes l ON l.id = sm.lote_id AND l.producto_id = $2
+         WHERE sm.orden_id = $1 AND sm.lote_id IS NOT NULL
+         ORDER BY l.lote_interno
+         LIMIT 1`,
+        [id, orden.producto_id]
+      );
+
+      // Permite overrides desde query: lote / cantidad / contenedor / ean / qr
+      // Útil cuando el operario quiere imprimir variante manual (corrección, prueba…).
+      const loteAuto = lote?.lote_interno ?? 'PENDIENTE';
+      const cantidadAuto = lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada);
+
+      // URL del QR → abre la orden en la app de fabricación.
+      // Prioridad: CORS_ORIGIN (primer valor) → header Origin → host del request.
+      const frontendBase =
+        (process.env.CORS_ORIGIN?.split(',')[0]?.trim()) ||
+        (req.get('origin')) ||
+        `${req.protocol}://${req.get('host')}`;
+      const qrUrlAuto = `${frontendBase.replace(/\/$/, '')}/produccion?detalle_id=${id}`;
+
+      // Título principal: si hay nombre_comercial → es el título grande,
+      // y nombre técnico va como subtítulo. Si no → solo nombre como título.
+      const nombreCom = (orden.producto_nombre_comercial ?? '').trim();
+      const nombre = (orden.producto_nombre ?? '').trim();
+      const tituloAuto = nombreCom || nombre;
+      const subtituloAuto = nombreCom ? nombre : '';
+
+      // En envasado: extraer formato (200 ml, 1 kg, 5 L) del nombre del PE
+      let cantidadEnvasado = cantidadAuto;
+      let unidadEnvasado = 'Kg';
+      if (orden.tipo_orden === 'envasado') {
+        const m = (nombreCom || nombre).match(/(\d+(?:[.,]\d+)?)\s*(ml|mL|cl|cL|l|L|g|kg|Kg|KG)\b/);
+        if (m) {
+          cantidadEnvasado = parseFloat(m[1].replace(',', '.'));
+          unidadEnvasado = m[2].toLowerCase() === 'ml' ? 'mL'
+                        : m[2].toLowerCase() === 'cl' ? 'cL'
+                        : m[2].toLowerCase() === 'l'  ? 'L'
+                        : m[2].toLowerCase() === 'g'  ? 'g'
+                        : 'Kg';
+        }
+      }
+
+      const datos = {
+        lote: typeof req.query.lote === 'string' && req.query.lote.trim() !== ''
+          ? req.query.lote.trim() : loteAuto,
+        cantidad: req.query.cantidad != null && !isNaN(Number(req.query.cantidad))
+          ? Number(req.query.cantidad) : cantidadEnvasado,
+        unidad: typeof req.query.unidad === 'string' && req.query.unidad.trim() !== ''
+          ? req.query.unidad.trim() : unidadEnvasado,
+        contenedorText: typeof req.query.contenedorText === 'string' && req.query.contenedorText.trim() !== ''
+          ? req.query.contenedorText.trim() : `Contenedor nº: ${Number(req.query.contenedor ?? 1)}`,
+        qrUrl: typeof req.query.qr === 'string' && req.query.qr.trim() !== ''
+          ? req.query.qr.trim() : qrUrlAuto,
+        titulo: typeof req.query.titulo === 'string' && req.query.titulo.trim() !== ''
+          ? req.query.titulo.trim() : tituloAuto,
+        subtitulo: typeof req.query.subtitulo === 'string'
+          ? req.query.subtitulo.trim() : subtituloAuto,
+        añoActual: new Date().getFullYear(),
+        añoFundacion: 1958,
+      };
+
+      const doc = await buildEtiquetaL800Pdf(datos);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="etiqueta-${datos.lote}.pdf"`);
+      doc.pipe(res);
+      doc.end();
+    } catch (err: unknown) {
+      console.error('[produccion.etiquetaL800Pdf]', err);
+      return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+    }
+  },
+
+  // GET /api/produccion/:id/etiqueta.ezpx — Etiqueta L-800 en formato GoDEX
+  // QLabel. Genera un .ezpx con los campos dinámicos sustituidos en la
+  // plantilla original. El operario lo descarga, abre con QLabel e imprime
+  // directo a la impresora térmica.
+  async etiquetaL800Ezpx(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+
+      const { rows: [orden] } = await pool.query(
+        `SELECT op.id, op.cantidad_planificada, op.estado, op.tipo_orden, op.producto_envasado_id,
+                COALESCE(pe.id, p.id)           AS producto_id,
+                COALESCE(pe.codigo, p.codigo)   AS producto_codigo,
+                COALESCE(pe.nombre, p.nombre)   AS producto_nombre,
+                COALESCE(pe.nombre_comercial, p.nombre_comercial) AS producto_nombre_comercial
+         FROM ordenes_produccion op
+         JOIN recetas r ON r.id = op.receta_id
+         JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN productos pe ON pe.id = op.producto_envasado_id
+         WHERE op.id = $1`,
+        [id]
+      );
+      if (!orden) return res.status(404).json({ error: 'Orden no encontrada' });
+
+      const { rows: [lote] } = await pool.query(
+        `SELECT DISTINCT l.lote_interno, l.cantidad_inicial
+         FROM stock_moves sm
+         JOIN lotes l ON l.id = sm.lote_id AND l.producto_id = $2
+         WHERE sm.orden_id = $1 AND sm.lote_id IS NOT NULL
+         ORDER BY l.lote_interno
+         LIMIT 1`,
+        [id, orden.producto_id]
+      );
+
+      const loteAuto = lote?.lote_interno ?? 'PENDIENTE';
+      const cantidadAuto = lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada);
+      const nombreCom = (orden.producto_nombre_comercial ?? '').trim();
+      const nombre = (orden.producto_nombre ?? '').trim();
+
+      // En envasado: extraer formato (200 ml, 1 kg…) del nombre
+      let cantidadEnvasado = cantidadAuto;
+      let unidadEnvasado = 'Kg';
+      if (orden.tipo_orden === 'envasado') {
+        const m = (nombreCom || nombre).match(/(\d+(?:[.,]\d+)?)\s*(ml|mL|cl|cL|l|L|g|kg|Kg|KG)\b/);
+        if (m) {
+          cantidadEnvasado = parseFloat(m[1].replace(',', '.'));
+          unidadEnvasado = m[2].toLowerCase() === 'ml' ? 'mL'
+                        : m[2].toLowerCase() === 'cl' ? 'cL'
+                        : m[2].toLowerCase() === 'l'  ? 'L'
+                        : m[2].toLowerCase() === 'g'  ? 'g'
+                        : 'Kg';
+        }
+      }
+
+      // URL del QR (igual lógica que etiqueta.pdf — para que .ezpx sea visual idéntico)
+      const frontendBase =
+        (process.env.CORS_ORIGIN?.split(',')[0]?.trim()) ||
+        (req.get('origin')) ||
+        `${req.protocol}://${req.get('host')}`;
+      const qrUrlAuto = `${frontendBase.replace(/\/$/, '')}/produccion?detalle_id=${id}`;
+
+      const datos = {
+        lote: typeof req.query.lote === 'string' && req.query.lote.trim() !== ''
+          ? req.query.lote.trim() : loteAuto,
+        cantidad: req.query.cantidad != null && !isNaN(Number(req.query.cantidad))
+          ? Number(req.query.cantidad) : cantidadEnvasado,
+        unidad: typeof req.query.unidad === 'string' && req.query.unidad.trim() !== ''
+          ? req.query.unidad.trim() : unidadEnvasado,
+        contenedorText: typeof req.query.contenedorText === 'string' && req.query.contenedorText.trim() !== ''
+          ? req.query.contenedorText.trim() : 'Contenedor nº: 1',
+        titulo: typeof req.query.titulo === 'string' && req.query.titulo.trim() !== ''
+          ? req.query.titulo.trim() : (nombreCom || nombre),
+        subtitulo: typeof req.query.subtitulo === 'string'
+          ? req.query.subtitulo.trim() : (nombreCom ? nombre : ''),
+        qrUrl: typeof req.query.qr === 'string' && req.query.qr.trim() !== ''
+          ? req.query.qr.trim() : qrUrlAuto,
+        añoActual: new Date().getFullYear(),
+        añoFundacion: 1958,
+      };
+
+      const ezpxXml = await buildEtiquetaL800Ezpx(datos);
+      res.setHeader('Content-Type', 'application/xml');
+      res.setHeader('Content-Disposition', `attachment; filename="etiqueta-${datos.lote}.ezpx"`);
+      return res.send(ezpxXml);
+    } catch (err: unknown) {
+      console.error('[produccion.etiquetaL800Ezpx]', err);
+      return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
     }
   },
 };

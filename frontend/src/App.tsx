@@ -16,6 +16,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
 const Recetas = lazy(() => import('./pages/Recetas'));
 const OrdenesFabricacion = lazy(() => import('./pages/OrdenesFabricacion'));
+const Envasado = lazy(() => import('./pages/Envasado'));
 const Lotes = lazy(() => import('./pages/Lotes'));
 const Proveedores = lazy(() => import('./pages/Proveedores'));
 const Clientes = lazy(() => import('./pages/Clientes'));
@@ -56,6 +57,7 @@ function AppContent() {
             <Route path="/productos" element={<Productos />} />
             <Route path="/recetas" element={<Recetas />} />
             <Route path="/produccion" element={<OrdenesFabricacion />} />
+            <Route path="/envasado" element={<Envasado />} />
             <Route path="/lotes" element={<Lotes />} />
             <Route path="/proveedores" element={isAdmin ? <Proveedores /> : <Navigate to="/" replace />} />
             <Route path="/clientes" element={isAdmin ? <Clientes /> : <Navigate to="/" replace />} />

@@ -32,6 +32,16 @@ export const recetasApi = {
   eliminarHistorial: (id: string, historialId: string) => api.delete(`/recetas/${id}/historial/${historialId}`),
 };
 
+export const recetasEnvasadoApi = {
+  listar:  () => api.get('/recetas-envasado'),
+  obtener: (id: string) => api.get(`/recetas-envasado/${id}`),
+  crear:   (data: object) => api.post('/recetas-envasado', data),
+  editar:  (id: string, data: object) => api.put(`/recetas-envasado/${id}`, data),
+  eliminar:(id: string) => api.delete(`/recetas-envasado/${id}`),
+  simular: (data: object) => api.post('/recetas-envasado/simular', data),
+  ejecutar:(data: object) => api.post('/recetas-envasado/ejecutar', data),
+};
+
 export const proveedoresApi = {
   listar:  () => api.get('/proveedores'),
   obtener: (id: string) => api.get(`/proveedores/${id}`),
@@ -96,6 +106,18 @@ export const produccionApi = {
     return api.post(`/produccion/${id}/adjuntar`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
   },
   enviarTrazabilidad: (id: string, email: string) => api.post(`/produccion/${id}/enviar-trazabilidad`, { email }),
+  etiquetaPdf: (id: string, params?: {
+    lote?: string; cantidad?: number; unidad?: string; contenedorText?: string;
+    titulo?: string; subtitulo?: string; qr?: string;
+  }) =>
+    api.get(`/produccion/${id}/etiqueta.pdf`, { params, responseType: 'blob' }),
+  etiquetaEzpx: (id: string, params?: {
+    lote?: string; cantidad?: number; unidad?: string; contenedorText?: string;
+    titulo?: string; subtitulo?: string;
+  }) =>
+    api.get(`/produccion/${id}/etiqueta.ezpx`, { params, responseType: 'blob' }),
+  // Defaults sugeridos para el preview: trae el lote y cantidad reales de la orden.
+  etiquetaDefaults: (id: string) => api.get(`/produccion/${id}/etiqueta-defaults`),
   eliminar:  (id: string, modo?: 'revertir' | 'borrar') => api.delete(`/produccion/${id}`, { params: modo ? { modo } : {} }),
   envasadoRapido: (data: { cola_id: string; envase_id: string; etiqueta_id?: string; cantidad_unidades: number; formato_label?: string }) => api.post('/produccion/envasado-rapido', data),
   envasadoPlanificar: (data: { producto_final_id?: string; cola_id: string; envase_id: string; cantidad_unidades: number; fecha_planificada?: string; cliente?: string; cliente_id?: string; formato_label?: string; notas?: string; materiales?: { producto_id: string; cantidad: number }[] }) => api.post('/produccion/envasado-planificar', data),
@@ -163,6 +185,16 @@ export const configuracionApi = {
   editarSubcategoriaMP:  (id: string, data: { nombre?: string; orden?: number; activo?: boolean }) =>
     api.put(`/configuracion/subcategorias-mp/${id}`, data),
   eliminarSubcategoriaMP: (id: string) => api.delete(`/configuracion/subcategorias-mp/${id}`),
+  // Integración Alilo (admin: status, log, regenerar secret)
+  aliloStatus: () => api.get('/configuracion/integracion/alilo/status'),
+  aliloLog:    () => api.get('/configuracion/integracion/alilo/log'),
+  aliloRegenerarSecret: () => api.post('/configuracion/integracion/alilo/regenerar-secret'),
+  // Sub-categorías de material de embalaje (catálogo editable: Bote, Caja, Etiqueta…)
+  listarSubcategoriasME: () => api.get('/configuracion/subcategorias-me'),
+  crearSubcategoriaME:   (data: { nombre: string; orden?: number }) => api.post('/configuracion/subcategorias-me', data),
+  editarSubcategoriaME:  (id: string, data: { nombre?: string; orden?: number; activo?: boolean }) =>
+    api.put(`/configuracion/subcategorias-me/${id}`, data),
+  eliminarSubcategoriaME: (id: string) => api.delete(`/configuracion/subcategorias-me/${id}`),
 };
 
 export const automatizacionesApi = {

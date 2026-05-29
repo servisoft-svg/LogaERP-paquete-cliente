@@ -190,12 +190,23 @@ router.post('/', adminOnly, async (req, res) => {
       nombre, descripcion, tipo, unidad_medida,
       stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
       peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses,
-      numero_cas, subcategoria_mp, es_aditivo, confirmacion_msg,
+      numero_cas, subcategoria_mp, subcategoria_me, es_aditivo, confirmacion_msg,
+      nombre_comercial, compartido_alilo, subcategoria_pf, codigo_alilo,
     } = req.body;
+    const codigoAliloNorm = (codigo_alilo != null && String(codigo_alilo).trim() !== '')
+      ? String(codigo_alilo).trim().toUpperCase().slice(0, 50) : null;
+
+    // subcategoria_pf solo aplica a producto_fabricado / producto_envasado
+    const subcatPfNorm = ((tipo === 'producto_fabricado' || tipo === 'producto_envasado')
+      && subcategoria_pf != null && (subcategoria_pf === 'propia' || subcategoria_pf === 'terceros'))
+      ? subcategoria_pf : null;
 
     // subcategoria_mp y es_aditivo solo aplican a materia_prima
     const subcatNorm = (tipo === 'materia_prima' && subcategoria_mp != null && String(subcategoria_mp).trim() !== '')
       ? String(subcategoria_mp).trim().slice(0, 50) : null;
+    // subcategoria_me solo aplica a material_embalaje
+    const subcatMeNorm = (tipo === 'material_embalaje' && subcategoria_me != null && String(subcategoria_me).trim() !== '')
+      ? String(subcategoria_me).trim().slice(0, 50) : null;
     const aditivoNorm = tipo === 'materia_prima' ? (es_aditivo === true || es_aditivo === 'true') : false;
 
     // Auto-generar codigo si no viene. Rellena huecos: si el MP-007 quedó libre
@@ -223,10 +234,11 @@ router.post('/', adminOnly, async (req, res) => {
          (codigo, nombre, descripcion, tipo, unidad_medida,
           stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
           peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses, numero_cas,
-          subcategoria_mp, es_aditivo, confirmacion_msg)
+          subcategoria_mp, es_aditivo, confirmacion_msg, subcategoria_me, nombre_comercial,
+          compartido_alilo, subcategoria_pf, codigo_alilo)
        VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10,
                $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER,$15,
-               $16,$17,$18)
+               $16,$17,$18,$19,$20,$21,$22,$23)
        RETURNING *`,
       [
         codigo.trim().toUpperCase(),
@@ -251,6 +263,11 @@ router.post('/', adminOnly, async (req, res) => {
         subcatNorm,
         aditivoNorm,
         confirmacion_msg != null && String(confirmacion_msg).trim() !== '' ? String(confirmacion_msg).trim() : null,
+        subcatMeNorm,
+        nombre_comercial != null && String(nombre_comercial).trim() !== '' ? String(nombre_comercial).trim().slice(0, 200) : null,
+        compartido_alilo === true || compartido_alilo === 'true',
+        subcatPfNorm,
+        codigoAliloNorm,
       ]
     );
     invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
@@ -276,6 +293,16 @@ router.put('/:id', adminOnly, async (req, res) => {
       numero_cas,
       // Subcategoría MP + aditivo (solo materia prima)
       subcategoria_mp, es_aditivo,
+      // Subcategoría ME (solo material embalaje)
+      subcategoria_me,
+      // Nombre comercial opcional (usado en etiquetas)
+      nombre_comercial,
+      // Flag compartido con Alilo
+      compartido_alilo,
+      // Sub-categoría PF (propia | terceros) — solo producto_fabricado / producto_envasado
+      subcategoria_pf,
+      // Código del mismo producto en Alilo (mapeo cross-sistema)
+      codigo_alilo,
       // Mensaje opcional de confirmación en fabricación
       confirmacion_msg,
       // Granel asociado al producto envasado (cola que lleva dentro)
@@ -367,7 +394,12 @@ router.put('/:id', adminOnly, async (req, res) => {
          subcategoria_mp = COALESCE($24, subcategoria_mp),
          es_aditivo     = COALESCE($25, es_aditivo),
          confirmacion_msg = CASE WHEN $26::BOOLEAN THEN $27::TEXT ELSE confirmacion_msg END,
-         granel_id      = CASE WHEN $28::BOOLEAN THEN $29::UUID ELSE granel_id END
+         granel_id      = CASE WHEN $28::BOOLEAN THEN $29::UUID ELSE granel_id END,
+         subcategoria_me = CASE WHEN $30::BOOLEAN THEN $31::VARCHAR ELSE subcategoria_me END,
+         nombre_comercial = CASE WHEN $32::BOOLEAN THEN $33::VARCHAR ELSE nombre_comercial END,
+         compartido_alilo = COALESCE($34::BOOLEAN, compartido_alilo),
+         subcategoria_pf  = CASE WHEN $35::BOOLEAN THEN $36::VARCHAR ELSE subcategoria_pf END,
+         codigo_alilo     = CASE WHEN $37::BOOLEAN THEN $38::VARCHAR ELSE codigo_alilo END
        WHERE id = $11
        RETURNING *`,
       [
@@ -406,6 +438,23 @@ router.put('/:id', adminOnly, async (req, res) => {
         confirmacion_msg != null && String(confirmacion_msg).trim() !== '' ? String(confirmacion_msg).trim() : null,
         granel_id !== undefined,
         granel_id != null && String(granel_id).trim() !== '' ? String(granel_id).trim() : null,
+        subcategoria_me !== undefined,
+        subcategoria_me != null && String(subcategoria_me).trim() !== ''
+          ? String(subcategoria_me).trim().slice(0, 50)
+          : null,
+        nombre_comercial !== undefined,
+        nombre_comercial != null && String(nombre_comercial).trim() !== ''
+          ? String(nombre_comercial).trim().slice(0, 200)
+          : null,
+        compartido_alilo !== undefined
+          ? (compartido_alilo === true || compartido_alilo === 'true')
+          : null,
+        subcategoria_pf !== undefined,
+        subcategoria_pf === 'propia' || subcategoria_pf === 'terceros' ? subcategoria_pf : null,
+        codigo_alilo !== undefined,
+        codigo_alilo != null && String(codigo_alilo).trim() !== ''
+          ? String(codigo_alilo).trim().toUpperCase().slice(0, 50)
+          : null,
       ]
     );
 

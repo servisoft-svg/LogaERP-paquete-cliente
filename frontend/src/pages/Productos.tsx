@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import {
   Plus, Pencil, Trash2, Package, Search, Filter,
   ChevronUp, ChevronDown, AlertTriangle, PackagePlus, RefreshCw, Download, ScanLine, Mail, Factory, Upload, ClipboardList, Sparkles, CalendarClock,
+  Layers, Beaker, Boxes,
 } from 'lucide-react';
 import { productosApi, proveedoresApi, lotesApi, specsApi, cambioApi, facturasApi, configuracionApi } from '../api/client';
 import type { Producto, Proveedor, TipoProducto, SpecCatalogo, ProductoSpec } from '../types';
@@ -19,12 +20,20 @@ import { ToastBlock, ToastField } from '../components/ToastFields';
 
 import clsx from 'clsx';
 
-const FILTROS_TIPO: { value: TipoProducto | ''; label: string }[] = [
-  { value: '',                     label: 'Todos'               },
-  { value: 'materia_prima',        label: 'Materia Prima'       },
-  { value: 'producto_fabricado',   label: 'Productos Fabricados'},
-  { value: 'producto_envasado',    label: 'Envasado (botes)'    },
-  { value: 'material_embalaje',    label: 'Embalaje'            },
+type FiltroTipoMeta = {
+  value: TipoProducto | '';
+  label: string;
+  icon: typeof Layers;
+  /** Tailwind color base (sin tonos). Se usa para clases dinámicas: bg-{color}-50, text-{color}-700… */
+  color: 'red' | 'purple' | 'blue' | 'emerald' | 'amber';
+};
+
+const FILTROS_TIPO_META: FiltroTipoMeta[] = [
+  { value: '',                     label: 'Todos',                icon: Layers,  color: 'red' },
+  { value: 'materia_prima',        label: 'Materia prima',        icon: Beaker,  color: 'purple' },
+  { value: 'producto_fabricado',   label: 'Productos fabricados', icon: Factory, color: 'blue' },
+  { value: 'producto_envasado',    label: 'Envasado',             icon: Boxes,   color: 'emerald' },
+  { value: 'material_embalaje',    label: 'Embalaje',             icon: Package, color: 'amber' },
 ];
 
 const TIPOS_FORM: { value: TipoProducto; label: string }[] = [
@@ -35,6 +44,20 @@ const TIPOS_FORM: { value: TipoProducto; label: string }[] = [
 ];
 
 interface SubcategoriaMP { id: string; nombre: string; orden: number; activo: boolean }
+interface SubcategoriaME { id: string; nombre: string; orden: number; activo: boolean }
+
+// Clasifica una sub-categoría ME según su nombre para mostrar el campo correcto
+// en el formulario. Heurística simple — el admin puede crear nuevas sub-categorías
+// y siguen funcionando: si el nombre cae en alguna palabra clave se enrutará al
+// campo adecuado; si no, se considera "consumible" (sin campo extra).
+type RolEmbalaje = 'contenedor' | 'agrupador' | 'consumible';
+const rolEmbalaje = (nombre?: string): RolEmbalaje => {
+  const n = (nombre ?? '').toLowerCase();
+  if (!n) return 'consumible';
+  if (/bote|botella|garrafa|bidón|bidon|frasco|envase|tarro|lata/.test(n)) return 'contenedor';
+  if (/caja|cartón|carton|paleta|palet|agrupador|estuche|bolsa.*master/.test(n)) return 'agrupador';
+  return 'consumible';
+};
 
 const UNIDADES = ['kg', 'g', 'L', 'mL', 'ud', 'caja', 'saco', 't'];
 
@@ -63,6 +86,15 @@ interface FormData {
   viscosidad_max: string;
   // Sub-categoría + aditivo (sólo materia prima)
   subcategoria_mp: string;
+  // Sub-categoría (sólo material embalaje)
+  subcategoria_me: string;
+  // Nombre comercial opcional (sólo productos fabricados/envasados)
+  nombre_comercial: string;
+  // Flag: producto compartido con Alilo (consumible vía API HMAC)
+  compartido_alilo: boolean;
+  codigo_alilo: string;
+  // Sub-categoría PF: 'propia' o 'terceros' (solo producto_fabricado / producto_envasado)
+  subcategoria_pf: '' | 'propia' | 'terceros';
   // Mensaje de confirmación opcional durante fabricación
   confirmacion_msg: string;
 }
@@ -74,7 +106,7 @@ const EMPTY: FormData = {
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
   precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
   solidos_min: '', solidos_max: '', ph_min: '', ph_max: '', viscosidad_min: '', viscosidad_max: '',
-  subcategoria_mp: '', confirmacion_msg: '',
+  subcategoria_mp: '', subcategoria_me: '', nombre_comercial: '', compartido_alilo: false, codigo_alilo: '', subcategoria_pf: '', confirmacion_msg: '',
 };
 
 const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
@@ -125,7 +157,10 @@ export default function Productos() {
   const [filtroTipo, setFiltroTipo]   = useState<TipoProducto | ''>('');
   const [filtroBajoStock, setFiltroBajoStock] = useState(false);
   const [filtroSubcategoria, setFiltroSubcategoria] = useState<string>('');
+  const [filtroSubcategoriaME, setFiltroSubcategoriaME] = useState<string>('');
+  const [filtroSubcategoriaPF, setFiltroSubcategoriaPF] = useState<'' | 'propia' | 'terceros'>('');
   const [subcategoriasMP, setSubcategoriasMP] = useState<SubcategoriaMP[]>([]);
+  const [subcategoriasME, setSubcategoriasME] = useState<SubcategoriaME[]>([]);
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Producto | null>(null);
   const [form, setForm]               = useState<FormData>(EMPTY);
@@ -241,6 +276,13 @@ export default function Productos() {
       .catch(() => setSubcategoriasMP([]));
   }, []);
 
+  // Sub-categorías ME (editables desde Configuración)
+  useEffect(() => {
+    configuracionApi.listarSubcategoriasME()
+      .then(({ data }) => setSubcategoriasME(data as SubcategoriaME[]))
+      .catch(() => setSubcategoriasME([]));
+  }, []);
+
   // Tasa de cambio: cuando user elige divisa distinta de EUR, fetch tasa actual.
   // Si el user editó la tasa manualmente (stockTasaAuto=false), no la sobreescribimos.
   useEffect(() => {
@@ -322,6 +364,11 @@ export default function Productos() {
       viscosidad_min: (p as any).viscosidad_min != null ? String((p as any).viscosidad_min) : '',
       viscosidad_max: (p as any).viscosidad_max != null ? String((p as any).viscosidad_max) : '',
       subcategoria_mp: (p as any).subcategoria_mp ?? '',
+      subcategoria_me: (p as any).subcategoria_me ?? '',
+      nombre_comercial: (p as any).nombre_comercial ?? '',
+      compartido_alilo: !!(p as any).compartido_alilo,
+      codigo_alilo: (p as any).codigo_alilo ?? '',
+      subcategoria_pf: ((p as any).subcategoria_pf as ('' | 'propia' | 'terceros')) ?? '',
       confirmacion_msg: (p as any).confirmacion_msg ?? '',
     });
     setEditLotes([]);
@@ -400,6 +447,14 @@ export default function Productos() {
       viscosidad_min: form.viscosidad_min !== '' ? Number(form.viscosidad_min) : null,
       viscosidad_max: form.viscosidad_max !== '' ? Number(form.viscosidad_max) : null,
       subcategoria_mp: form.tipo === 'materia_prima' && form.subcategoria_mp ? form.subcategoria_mp : null,
+      subcategoria_me: form.tipo === 'material_embalaje' && form.subcategoria_me ? form.subcategoria_me : null,
+      nombre_comercial: (form.tipo === 'producto_fabricado' || form.tipo === 'producto_envasado')
+        ? (form.nombre_comercial.trim() || null) : null,
+      compartido_alilo: form.tipo !== 'material_embalaje' ? form.compartido_alilo : false,
+      codigo_alilo: form.tipo !== 'material_embalaje' && form.compartido_alilo
+        ? (form.codigo_alilo.trim() || null) : null,
+      subcategoria_pf: (form.tipo === 'producto_fabricado' || form.tipo === 'producto_envasado')
+        ? (form.subcategoria_pf || null) : null,
       confirmacion_msg: form.tipo === 'materia_prima' ? (form.confirmacion_msg.trim() || null) : null,
     };
     // Si user pulsó "Restaurar auto", indicar al backend que vuelva a modo automático
@@ -727,6 +782,8 @@ export default function Productos() {
   const productosFiltrados = productos
     .filter((p) => !filtroTipo || p.tipo === filtroTipo)
     .filter((p) => !filtroSubcategoria || ((p as any).subcategoria_mp === filtroSubcategoria))
+    .filter((p) => !filtroSubcategoriaME || ((p as any).subcategoria_me === filtroSubcategoriaME))
+    .filter((p) => !filtroSubcategoriaPF || ((p as any).subcategoria_pf === filtroSubcategoriaPF))
     .filter((p) => !filtroBajoStock || p.nivel_stock === 'rojo' || p.nivel_stock === 'naranja')
     .filter((p) =>
       !busqueda ||
@@ -816,79 +873,233 @@ export default function Productos() {
         </div>
       </div>
 
-      {/* Filtros */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative">
-          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <Input
-            value={busqueda}
-            onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar producto…"
-            className="pl-8 w-full sm:w-52"
-          />
-        </div>
-        <button
-          onClick={() => setScanning(true)}
-          className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 hover:border-gray-300 hover:bg-gray-50 transition-colors"
-          title="Escanear codigo de barras"
-        >
-          <ScanLine size={14} />
-          <span className="hidden sm:inline">Escanear</span>
-        </button>
-        <div className="flex items-center gap-1 overflow-x-auto">
-          <Filter size={13} className="text-gray-400 shrink-0" />
-          {FILTROS_TIPO.map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => setFiltroTipo(value)}
-              className={clsx(
-                'rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0',
-                filtroTipo === value
-                  ? 'bg-loga-red text-white'
-                  : 'border border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+      {/* Filtros — estructura jerárquica:
+          Row 1: buscador + scanner + bajo stock (acción rápida)
+          Row 2: pestañas primarias por tipo (con icono + contador)
+          Row 3: chips de sub-categoría (sólo cuando la pestaña tiene sub-cats) */}
+      {(() => {
+        // Contador por tipo
+        const counts = productos.reduce<Record<string, number>>((acc, p) => {
+          acc[p.tipo] = (acc[p.tipo] ?? 0) + 1;
+          return acc;
+        }, {});
+        const totalCount = productos.length;
+
+        // Mapa de clases por color (Tailwind las necesita estáticas)
+        const COLOR_CLS: Record<FiltroTipoMeta['color'], {
+          activeBg: string; activeRing: string; chipActive: string; chipInactive: string; chipBand: string; iconColor: string;
+        }> = {
+          red:     { activeBg: 'bg-loga-red',     activeRing: 'ring-red-200',     chipActive: 'bg-loga-red text-white border-loga-red',         chipInactive: 'border-red-100 bg-red-50/50 text-red-700 hover:bg-red-50',                chipBand: 'bg-red-50/30 border-red-100',         iconColor: 'text-red-600' },
+          purple:  { activeBg: 'bg-purple-600',   activeRing: 'ring-purple-200',  chipActive: 'bg-purple-600 text-white border-purple-600',     chipInactive: 'border-purple-100 bg-purple-50/50 text-purple-700 hover:bg-purple-50',     chipBand: 'bg-purple-50/30 border-purple-100',   iconColor: 'text-purple-600' },
+          blue:    { activeBg: 'bg-blue-600',     activeRing: 'ring-blue-200',    chipActive: 'bg-blue-600 text-white border-blue-600',         chipInactive: 'border-blue-100 bg-blue-50/50 text-blue-700 hover:bg-blue-50',           chipBand: 'bg-blue-50/30 border-blue-100',       iconColor: 'text-blue-600' },
+          emerald: { activeBg: 'bg-emerald-600',  activeRing: 'ring-emerald-200', chipActive: 'bg-emerald-600 text-white border-emerald-600',   chipInactive: 'border-emerald-100 bg-emerald-50/50 text-emerald-700 hover:bg-emerald-50', chipBand: 'bg-emerald-50/30 border-emerald-100', iconColor: 'text-emerald-600' },
+          amber:   { activeBg: 'bg-amber-600',    activeRing: 'ring-amber-200',   chipActive: 'bg-amber-600 text-white border-amber-600',       chipInactive: 'border-amber-100 bg-amber-50/50 text-amber-700 hover:bg-amber-50',       chipBand: 'bg-amber-50/30 border-amber-100',     iconColor: 'text-amber-600' },
+        };
+
+        const activeMeta = FILTROS_TIPO_META.find(m => m.value === filtroTipo) ?? FILTROS_TIPO_META[0];
+        const showSubMP = filtroTipo === 'materia_prima' && subcategoriasMP.length > 0;
+        const showSubME = filtroTipo === 'material_embalaje' && subcategoriasME.length > 0;
+        const showSubPF = filtroTipo === 'producto_fabricado' || filtroTipo === 'producto_envasado';
+
+        return (
+          <div className="space-y-2.5">
+            {/* Row 1: Search + Scanner + Bajo stock */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <Input
+                  value={busqueda}
+                  onChange={(e) => setBusqueda(e.target.value)}
+                  placeholder="Buscar producto…"
+                  className="pl-8 w-full sm:w-64"
+                />
+              </div>
+              <button
+                onClick={() => setScanning(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-600 hover:border-gray-300 hover:bg-gray-50 transition-colors"
+                title="Escanear código de barras"
+              >
+                <ScanLine size={14} />
+                <span className="hidden sm:inline">Escanear</span>
+              </button>
+              <div className="flex-1" />
+              {cantidadBajoStock > 0 && (
+                <button
+                  onClick={() => setFiltroBajoStock(v => !v)}
+                  className={clsx(
+                    'inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap',
+                    filtroBajoStock
+                      ? 'bg-loga-red text-white shadow-sm'
+                      : 'border border-red-200 bg-red-50 text-loga-red hover:bg-red-100'
+                  )}
+                  title={filtroBajoStock ? 'Quitar filtro bajo stock' : 'Filtrar solo bajo stock'}
+                >
+                  <span className={clsx('h-1.5 w-1.5 rounded-full', filtroBajoStock ? 'bg-white' : 'bg-loga-red animate-pulse')} />
+                  Bajo stock
+                  <span className={clsx('rounded-md px-1.5 py-0.5 text-[10px] font-bold tabular-nums', filtroBajoStock ? 'bg-white/25' : 'bg-loga-red text-white')}>
+                    {cantidadBajoStock}
+                  </span>
+                </button>
               )}
-            >
-              {label}
-            </button>
-          ))}
-          {(filtroTipo === '' || filtroTipo === 'materia_prima') && (
-            <select
-              value={filtroSubcategoria}
-              onChange={(e) => setFiltroSubcategoria(e.target.value)}
-              className={clsx(
-                'ml-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
-                filtroSubcategoria
-                  ? 'bg-loga-red text-white border border-loga-red'
-                  : 'border border-gray-200 bg-white text-gray-600 hover:border-gray-300'
-              )}
-              title="Filtrar materias primas por sub-categoría"
-            >
-              <option value="">Sub-cat: todas</option>
-              {subcategoriasMP.map((s) => (
-                <option key={s.id} value={s.nombre}>{s.nombre}</option>
-              ))}
-            </select>
-          )}
-          {cantidadBajoStock > 0 && (
-            <button
-              onClick={() => setFiltroBajoStock(v => !v)}
-              className={clsx(
-                'ml-1 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0',
-                filtroBajoStock
-                  ? 'bg-loga-red text-white'
-                  : 'border border-red-100 bg-red-50 text-loga-red hover:bg-red-100'
-              )}
-              title={filtroBajoStock ? 'Quitar filtro' : 'Filtrar solo bajo stock'}
-            >
-              <span className={clsx('h-1.5 w-1.5 rounded-full', filtroBajoStock ? 'bg-white' : 'bg-loga-red animate-pulse')} />
-              Bajo stock
-              <span className={clsx('rounded-md px-1 text-[10px] tabular-nums', filtroBajoStock ? 'bg-white/20' : 'bg-loga-red text-white')}>
-                {cantidadBajoStock}
-              </span>
-            </button>
-          )}
-        </div>
-      </div>
+            </div>
+
+            {/* Row 2: Pestañas primarias (tipo de producto) */}
+            <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1 pb-0.5">
+              <Filter size={13} className="text-gray-400 shrink-0" />
+              {FILTROS_TIPO_META.map((meta) => {
+                const active = filtroTipo === meta.value;
+                const cls = COLOR_CLS[meta.color];
+                const count = meta.value === '' ? totalCount : (counts[meta.value] ?? 0);
+                const Icon = meta.icon;
+                return (
+                  <button
+                    key={meta.value}
+                    onClick={() => {
+                      setFiltroTipo(meta.value);
+                      // Reset sub-cat filters al cambiar tab — son específicas de cada tipo
+                      if (meta.value !== 'materia_prima')    setFiltroSubcategoria('');
+                      if (meta.value !== 'material_embalaje') setFiltroSubcategoriaME('');
+                      if (meta.value !== 'producto_fabricado' && meta.value !== 'producto_envasado') setFiltroSubcategoriaPF('');
+                    }}
+                    className={clsx(
+                      'inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition-all whitespace-nowrap shrink-0 border',
+                      active
+                        ? clsx(cls.activeBg, 'text-white border-transparent shadow-sm ring-2', cls.activeRing)
+                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:text-gray-900'
+                    )}
+                  >
+                    <Icon size={13} className={active ? 'text-white' : cls.iconColor} />
+                    {meta.label}
+                    <span className={clsx(
+                      'rounded-md px-1.5 py-0.5 text-[10px] font-bold tabular-nums',
+                      active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'
+                    )}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Row 3: Sub-cat chips — sólo cuando la pestaña activa tiene sub-cats */}
+            {showSubMP && (
+              <div className={clsx('flex items-center gap-1.5 overflow-x-auto rounded-xl border px-3 py-2', COLOR_CLS.purple.chipBand)}>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 shrink-0 mr-1">Familias</span>
+                <button
+                  onClick={() => setFiltroSubcategoria('')}
+                  className={clsx(
+                    'rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all whitespace-nowrap shrink-0',
+                    filtroSubcategoria === ''
+                      ? COLOR_CLS.purple.chipActive
+                      : COLOR_CLS.purple.chipInactive,
+                  )}
+                >
+                  Todas
+                </button>
+                {subcategoriasMP.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setFiltroSubcategoria(filtroSubcategoria === s.nombre ? '' : s.nombre)}
+                    className={clsx(
+                      'rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all whitespace-nowrap shrink-0',
+                      filtroSubcategoria === s.nombre
+                        ? COLOR_CLS.purple.chipActive
+                        : COLOR_CLS.purple.chipInactive,
+                    )}
+                  >
+                    {s.nombre}
+                  </button>
+                ))}
+              </div>
+            )}
+            {showSubME && (
+              <div className={clsx('flex items-center gap-1.5 overflow-x-auto rounded-xl border px-3 py-2', COLOR_CLS.amber.chipBand)}>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 shrink-0 mr-1">Tipo</span>
+                <button
+                  onClick={() => setFiltroSubcategoriaME('')}
+                  className={clsx(
+                    'rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all whitespace-nowrap shrink-0',
+                    filtroSubcategoriaME === ''
+                      ? COLOR_CLS.amber.chipActive
+                      : COLOR_CLS.amber.chipInactive,
+                  )}
+                >
+                  Todos
+                </button>
+                {subcategoriasME.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => setFiltroSubcategoriaME(filtroSubcategoriaME === s.nombre ? '' : s.nombre)}
+                    className={clsx(
+                      'rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all whitespace-nowrap shrink-0',
+                      filtroSubcategoriaME === s.nombre
+                        ? COLOR_CLS.amber.chipActive
+                        : COLOR_CLS.amber.chipInactive,
+                    )}
+                  >
+                    {s.nombre}
+                  </button>
+                ))}
+              </div>
+            )}
+            {showSubPF && (
+              <div className={clsx(
+                'flex items-center gap-1.5 overflow-x-auto rounded-xl border px-3 py-2',
+                filtroTipo === 'producto_fabricado' ? COLOR_CLS.blue.chipBand : COLOR_CLS.emerald.chipBand,
+              )}>
+                <span className={clsx(
+                  'text-[10px] font-bold uppercase tracking-wider shrink-0 mr-1',
+                  filtroTipo === 'producto_fabricado' ? 'text-blue-700' : 'text-emerald-700',
+                )}>Origen</span>
+                {([
+                  { value: '',         label: 'Todos' },
+                  { value: 'propia',   label: 'Fabricación propia' },
+                  { value: 'terceros', label: 'Fabricados por terceros' },
+                ] as const).map((opt) => {
+                  const active = filtroSubcategoriaPF === opt.value;
+                  const cls = filtroTipo === 'producto_fabricado' ? COLOR_CLS.blue : COLOR_CLS.emerald;
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => setFiltroSubcategoriaPF(opt.value === '' ? '' : (filtroSubcategoriaPF === opt.value ? '' : opt.value))}
+                      className={clsx(
+                        'rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-all whitespace-nowrap shrink-0',
+                        active ? cls.chipActive : cls.chipInactive,
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Hint: indica el filtro activo cuando hay sub-cat */}
+            {(filtroSubcategoria || filtroSubcategoriaME || filtroSubcategoriaPF) && (
+              <p className="text-[10px] text-gray-400 flex items-center gap-1">
+                <span className={clsx('h-1.5 w-1.5 rounded-full',
+                  activeMeta.color === 'purple' ? 'bg-purple-500' :
+                  activeMeta.color === 'amber'  ? 'bg-amber-500'  :
+                  activeMeta.color === 'blue'   ? 'bg-blue-500'   :
+                  'bg-emerald-500',
+                )} />
+                Filtrando <b className="text-gray-600">{
+                  filtroSubcategoria ||
+                  filtroSubcategoriaME ||
+                  (filtroSubcategoriaPF === 'propia' ? 'Fabricación propia' :
+                   filtroSubcategoriaPF === 'terceros' ? 'Fabricados por terceros' : '')
+                }</b> dentro de {activeMeta.label.toLowerCase()}
+                <button
+                  onClick={() => { setFiltroSubcategoria(''); setFiltroSubcategoriaME(''); setFiltroSubcategoriaPF(''); }}
+                  className="ml-1 text-loga-red hover:underline"
+                >
+                  limpiar
+                </button>
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Mobile cards (md:hidden) */}
       <div className="flex flex-col gap-2 md:hidden">
@@ -1013,10 +1224,28 @@ export default function Productos() {
                     {p.tipo === 'materia_prima' && (p as any).numero_cas ? (p as any).numero_cas : <span className="text-gray-300">—</span>}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-gray-900 cursor-pointer hover:text-loga-red" onClick={() => toggleLotes(p.id)}>{p.nombre}</span>
                       {p.nivel_stock === 'rojo' && <AlertTriangle size={13} className="text-loga-red shrink-0" />}
                       {p.nivel_stock === 'naranja' && <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                      {(p as any).compartido_alilo && (
+                        <span
+                          title="Producto compartido — Alilo puede descontar stock"
+                          className="inline-flex items-center gap-1 rounded-md bg-violet-100 text-violet-700 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                        >
+                          🔗 Alilo
+                        </span>
+                      )}
+                      {(p as any).subcategoria_pf === 'propia' && (
+                        <span title="Fabricación propia" className="inline-flex items-center gap-1 rounded-md bg-blue-100 text-blue-700 px-1.5 py-0.5 text-[10px] font-bold">
+                          Propia
+                        </span>
+                      )}
+                      {(p as any).subcategoria_pf === 'terceros' && (
+                        <span title="Fabricados por terceros" className="inline-flex items-center gap-1 rounded-md bg-emerald-100 text-emerald-700 px-1.5 py-0.5 text-[10px] font-bold">
+                          Terceros
+                        </span>
+                      )}
                     </div>
                     {p.descripcion && (
                       <p className="text-[11px] text-gray-400 truncate max-w-xs">{p.descripcion}</p>
@@ -1639,6 +1868,93 @@ export default function Productos() {
         subtitle={editando ? `${editando.codigo} — ${editando.nombre}` : 'Rellena los datos del producto'}
       >
         <div className="space-y-4">
+          {/* ── 1. IDENTIDAD ── */}
+          <FormField label="Nombre" required>
+            <Input
+              value={form.nombre}
+              onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))}
+              placeholder="Acetato de polivinilo 88%"
+            />
+          </FormField>
+
+          {/* Nombre comercial + Origen (sub-categoría PF) — productos fabricados/envasados */}
+          {(form.tipo === 'producto_fabricado' || form.tipo === 'producto_envasado') && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormField
+                label="Nombre comercial (opcional)"
+                hint="Cómo se llama al vender. Vacío = usa el nombre normal. Se imprime en etiquetas."
+              >
+                <Input
+                  value={form.nombre_comercial}
+                  onChange={(e) => setForm((f) => ({ ...f, nombre_comercial: e.target.value }))}
+                  placeholder="LOGA 800 / Cola Blanca Premium"
+                  maxLength={200}
+                />
+              </FormField>
+              <FormField
+                label="Origen"
+                hint="Fabricación propia o de terceros (re-vendido)."
+              >
+                <Select
+                  value={form.subcategoria_pf}
+                  onChange={(e) => setForm((f) => ({ ...f, subcategoria_pf: e.target.value as '' | 'propia' | 'terceros' }))}
+                >
+                  <option value="">— Sin clasificar —</option>
+                  <option value="propia">Fabricación propia</option>
+                  <option value="terceros">Fabricados por terceros</option>
+                </Select>
+              </FormField>
+            </div>
+          )}
+
+          {/* Compartido con Alilo — no aplica a embalaje */}
+          {form.tipo !== 'material_embalaje' && (
+            <div className={clsx(
+              'rounded-xl border transition-colors overflow-hidden',
+              form.compartido_alilo
+                ? 'border-violet-200 bg-violet-50/50'
+                : 'border-gray-200 hover:border-gray-300 bg-white',
+            )}>
+              <label className="flex items-start gap-3 px-3 py-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.compartido_alilo}
+                  onChange={(e) => setForm((f) => ({ ...f, compartido_alilo: e.target.checked }))}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-violet-600 focus:ring-violet-500 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                    🔗 Producto compartido con Alilo
+                  </p>
+                  <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                    El otro sistema (Alilo) puede descontar stock de este producto vía API HMAC.
+                    Lo consumido sale del inventario de Loga.
+                  </p>
+                </div>
+              </label>
+
+              {/* Campo mapeo código Alilo — solo si está marcado */}
+              {form.compartido_alilo && (
+                <div className="px-3 pb-3 pt-1 border-t border-violet-200 bg-white/60">
+                  <label className="block text-[10px] font-bold text-violet-700 uppercase tracking-wider mb-1">
+                    Código equivalente en Alilo
+                  </label>
+                  <Input
+                    value={form.codigo_alilo}
+                    onChange={(e) => setForm((f) => ({ ...f, codigo_alilo: e.target.value.toUpperCase() }))}
+                    placeholder="Ej: MP-A042 (cómo se llama en Alilo)"
+                    maxLength={50}
+                    className="font-mono"
+                  />
+                  <p className="text-[10px] text-gray-500 mt-1.5 leading-relaxed">
+                    Cuando Alilo llame con este código, descontará de este producto.
+                    Si lo dejas vacío, se busca por el código de Loga (<b className="font-mono text-violet-700">{editando?.codigo ?? '—'}</b>) directamente.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <FormField label="Tipo" required>
               <Select
@@ -1651,7 +1967,7 @@ export default function Productos() {
                 ))}
               </Select>
             </FormField>
-            <FormField label="Codigo" hint={editando ? undefined : 'Se auto-genera si lo dejas vacio'}>
+            <FormField label="Código" hint={editando ? undefined : 'Auto si vacío'}>
               <Input
                 value={form.codigo}
                 onChange={(e) => setForm((f) => ({ ...f, codigo: e.target.value.toUpperCase() }))}
@@ -1661,58 +1977,30 @@ export default function Productos() {
             </FormField>
           </div>
 
-          {/* Sub-categoría — sólo materia prima, justo debajo de Tipo */}
+          {/* Sub-categoría + Nº CAS — materia prima */}
           {form.tipo === 'materia_prima' && (
-            <FormField label="Sub-categoría" hint="Familia química: resina, agua, pigmento… (editable en Configuración)">
-              <Select
-                value={form.subcategoria_mp}
-                onChange={(e) => setForm((f) => ({ ...f, subcategoria_mp: e.target.value }))}
-              >
-                <option value="">— Sin clasificar —</option>
-                {subcategoriasMP.map((s) => (
-                  <option key={s.id} value={s.nombre}>{s.nombre}</option>
-                ))}
-              </Select>
-            </FormField>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormField label="Sub-categoría" hint="Familia química (editable en Configuración)">
+                <Select
+                  value={form.subcategoria_mp}
+                  onChange={(e) => setForm((f) => ({ ...f, subcategoria_mp: e.target.value }))}
+                >
+                  <option value="">— Sin clasificar —</option>
+                  {subcategoriasMP.map((s) => (
+                    <option key={s.id} value={s.nombre}>{s.nombre}</option>
+                  ))}
+                </Select>
+              </FormField>
+              <FormField label="Nº CAS" hint="Identificador químico. Ej: 7732-18-5">
+                <Input
+                  value={form.numero_cas}
+                  onChange={(e) => setForm((f) => ({ ...f, numero_cas: e.target.value }))}
+                  placeholder="Ej: 9003-20-7"
+                  className="font-mono"
+                />
+              </FormField>
+            </div>
           )}
-
-          {/* Mensaje de confirmación en fabricación — sólo materia prima */}
-          {form.tipo === 'materia_prima' && (
-            <FormField
-              label="Mensaje de confirmación en fabricación (opcional)"
-              hint="Si pones un texto aquí, al finalizar la fabricación de cualquier receta con esta materia prima se pedirá confirmar este mensaje. Útil para recordatorios de seguridad o verificaciones (ej: 'has verificado la viscosidad', 'has echado todo del tanque 2'). Déjalo vacío para no pedir nada."
-            >
-              <Textarea
-                rows={2}
-                value={form.confirmacion_msg}
-                onChange={(e) => setForm((f) => ({ ...f, confirmacion_msg: e.target.value }))}
-                placeholder="Ej: ¿Has verificado la viscosidad antes de cerrar?"
-                maxLength={500}
-              />
-              {form.confirmacion_msg.trim() && (
-                <p className="mt-1 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-                  ⚠ En cada fabricación que use este producto se mostrará este mensaje y habrá que confirmarlo.
-                </p>
-              )}
-            </FormField>
-          )}
-
-          <FormField label="Nombre" required>
-            <Input
-              value={form.nombre}
-              onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))}
-              placeholder="Acetato de polivinilo 88%"
-            />
-          </FormField>
-
-          <FormField label="Nº CAS" hint="Chemical Abstracts Service. Identificador único de la sustancia química. Ej: 7732-18-5 (agua)">
-            <Input
-              value={form.numero_cas}
-              onChange={(e) => setForm((f) => ({ ...f, numero_cas: e.target.value }))}
-              placeholder="Ej: 9003-20-7"
-              className="font-mono"
-            />
-          </FormField>
 
           <FormField label="Descripción">
             <Textarea
@@ -1723,8 +2011,9 @@ export default function Productos() {
             />
           </FormField>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <FormField label="Unidad de medida" required>
+          {/* ── 2. MEDIDAS Y PRECIOS ── */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <FormField label="Unidad" required>
               <Select
                 value={form.unidad_medida}
                 onChange={(e) => setForm((f) => ({ ...f, unidad_medida: e.target.value }))}
@@ -1736,9 +2025,7 @@ export default function Productos() {
               label="Precio coste (EUR)"
               hint={
                 costeReceta?.hasReceta
-                  ? costeReceta.esManual
-                    ? 'Editado manualmente — el cálculo automático está desactivado'
-                    : 'Calculado automáticamente desde la receta · Edita para sobrescribir'
+                  ? costeReceta.esManual ? 'Manual' : 'Auto desde receta'
                   : 'Precio de compra'
               }
             >
@@ -1747,11 +2034,11 @@ export default function Productos() {
                 value={form.precio_unitario}
                 onChange={(e) => {
                   setForm((f) => ({ ...f, precio_unitario: e.target.value }));
-                  setResetAuto(false); // si user edita manualmente, ya no es reset
+                  setResetAuto(false);
                 }}
               />
               {costeReceta?.hasReceta && costeReceta.calculado != null && (
-                <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+                <div className="mt-1.5 flex items-center gap-2 text-[10px] flex-wrap">
                   <span className={clsx(
                     'inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-bold uppercase tracking-wider',
                     costeReceta.esManual
@@ -1762,7 +2049,7 @@ export default function Productos() {
                     {costeReceta.esManual ? 'Manual' : 'Auto'}
                   </span>
                   <span className="text-zinc-500">
-                    Receta calcula: <b className="text-zinc-700 dark:text-zinc-300 tabular-nums">{costeReceta.calculado.toFixed(4)}</b> EUR
+                    Receta: <b className="text-zinc-700 dark:text-zinc-300 tabular-nums">{costeReceta.calculado.toFixed(4)}</b>
                   </span>
                   {costeReceta.esManual && (
                     <button
@@ -1771,7 +2058,7 @@ export default function Productos() {
                         setForm((f) => ({ ...f, precio_unitario: costeReceta.calculado!.toFixed(4) }));
                         setResetAuto(true);
                       }}
-                      className="ml-auto text-loga-red hover:underline font-bold"
+                      className="text-loga-red hover:underline font-bold"
                     >
                       Restaurar auto
                     </button>
@@ -1779,9 +2066,6 @@ export default function Productos() {
                 </div>
               )}
             </FormField>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <FormField label="Precio venta (EUR)" hint="Precio al cliente">
               <Input
                 type="number" min="0" step="0.01"
@@ -1791,7 +2075,8 @@ export default function Productos() {
             </FormField>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {/* ── 3. STOCK Y CADUCIDAD ── */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <FormField label="Stock mínimo" hint="Alerta si baja de aquí">
               <Input
                 type="number" min="0" step="0.001"
@@ -1799,53 +2084,122 @@ export default function Productos() {
                 onChange={(e) => setForm((f) => ({ ...f, stock_minimo: e.target.value }))}
               />
             </FormField>
-            <FormField label="Stock máximo" hint="Referencia para % alerta">
+            <FormField label="Stock máximo" hint="Referencia % alerta">
               <Input
                 type="number" min="0" step="0.001"
                 value={form.stock_maximo}
                 onChange={(e) => setForm((f) => ({ ...f, stock_maximo: e.target.value }))}
               />
             </FormField>
+            <FormField label="Caducidad (meses)" hint="Auto-calcula en lote">
+              <Input
+                type="number" min="0" step="1"
+                value={form.caducidad_meses ?? ''}
+                onChange={(e) => setForm((f) => ({ ...f, caducidad_meses: e.target.value }))}
+                placeholder="Ej: 36"
+              />
+            </FormField>
           </div>
 
-          {(form.tipo === 'producto_envasado' || form.tipo === 'material_embalaje' || form.peso_unitario_kg) && (
-            <>
+          {/* ── 4. EMBALAJE (sub-categoría + campo dinámico) ── */}
+          {form.tipo === 'material_embalaje' && (() => {
+            const rol = rolEmbalaje(form.subcategoria_me);
+            const subcatActual = subcategoriasME.find(s => s.nombre === form.subcategoria_me);
+            return (
+              <div className="rounded-xl border border-amber-100 bg-amber-50/30 p-3 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Package size={14} className="text-amber-600 shrink-0" />
+                  <p className="text-[11px] font-semibold text-amber-700 uppercase tracking-wider">Tipo de embalaje</p>
+                </div>
+
+                <FormField label="¿Qué es este embalaje?" hint="Determina qué campo se pide debajo. Editable en Configuración → Sub-categorías ME.">
+                  <Select
+                    value={form.subcategoria_me}
+                    onChange={(e) => setForm((f) => ({ ...f, subcategoria_me: e.target.value }))}
+                  >
+                    <option value="">— Selecciona tipo —</option>
+                    {subcategoriasME.map((s) => (
+                      <option key={s.id} value={s.nombre}>{s.nombre}</option>
+                    ))}
+                  </Select>
+                </FormField>
+
+                {/* Campo dinámico según rol */}
+                {rol === 'contenedor' && (
+                  <FormField
+                    label={`Kg de cola que entran en 1 ${subcatActual?.nombre.toLowerCase() ?? 'envase'}`}
+                    hint="Cuánta cola cabe dentro. Bote 1kg → 1. Frasco 75g → 0.075. Bidón 30kg → 30. Garrafa 10L (densidad ~1.05) → 10.5."
+                  >
+                    <Input
+                      type="number" min="0" step="0.001"
+                      value={form.peso_unitario_kg}
+                      onChange={(e) => setForm((f) => ({ ...f, peso_unitario_kg: e.target.value }))}
+                      placeholder="Ej: 1 (bote 1kg)"
+                    />
+                  </FormField>
+                )}
+
+                {rol === 'agrupador' && (
+                  <>
+                    <FormField
+                      label={`Botes dentro de 1 ${subcatActual?.nombre.toLowerCase() ?? 'caja'}`}
+                      hint="Solo el multiplicador. Caja de 24 botes → 24. Caja de 40 frascos → 40."
+                    >
+                      <Input
+                        type="number" min="1" step="1"
+                        value={form.unidades_por_envase}
+                        onChange={(e) => setForm((f) => ({ ...f, unidades_por_envase: e.target.value }))}
+                        placeholder="Ej: 24"
+                      />
+                    </FormField>
+                    <p className="text-[11px] text-gray-500 bg-white/70 border border-gray-100 rounded-lg px-3 py-2 leading-relaxed">
+                      ℹ Los kg de cola por bote se configuran en el <b className="text-gray-700">bote individual</b> (sub-cat Bote) o en el <b className="text-gray-700">producto envasado</b>. Al planificar envasado se multiplica: <span className="font-mono">cajas × botes × kg/bote</span>.
+                    </p>
+                  </>
+                )}
+
+                {form.subcategoria_me && rol === 'consumible' && (
+                  <p className="text-[11px] text-gray-500 bg-white/70 border border-gray-100 rounded-lg px-3 py-2">
+                    <b className="text-gray-700">{subcatActual?.nombre}</b> es un consumible (1 por bote por defecto). No requiere campo extra — se usa tal cual en la receta de envasado.
+                  </p>
+                )}
+
+                {!form.subcategoria_me && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    ⚠ Selecciona el tipo arriba para ver el campo correcto.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Para producto_envasado: mantener bloque clásico (PT envasado usa peso_unitario_kg) */}
+          {(form.tipo === 'producto_envasado' || (form.tipo !== 'material_embalaje' && form.peso_unitario_kg)) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <FormField
-                label="Peso total de cola que lleva el envase (kg)"
-                hint={form.tipo === 'material_embalaje'
-                  ? 'Cuántos kg de cola entran en este envase. Ej: Bidón 30kg → 30. Caja 40 uds × 250g → 10. Etiqueta → 0.'
-                  : 'Peso neto de cola por unidad envasada (bote / garrafa / bidón). Ej: Bote 1kg → 1. Frasco 75g → 0.075.'}
+                label="Peso neto de cola (kg)"
+                hint="Peso por unidad envasada. Bote 1kg → 1. Frasco 75g → 0.075."
               >
                 <Input
                   type="number" min="0" step="0.001"
                   value={form.peso_unitario_kg}
                   onChange={(e) => setForm((f) => ({ ...f, peso_unitario_kg: e.target.value }))}
-                  placeholder="Ej: 30 (bidón 30kg) o 10 (caja 40 × 250g)"
+                  placeholder="Ej: 1"
                 />
               </FormField>
-
               <FormField
-                label="Unidades por envase (botes dentro)"
-                hint="Cuántos botes individuales contiene. Caja de 40 frascos → 40. Caja de 18 → 18. Bidones, garrafas, sacos, frascos sueltos → dejar vacío (1 unidad)."
+                label="Unidades por envase (caja)"
+                hint="Botes en la caja. Sueltos → vacío."
               >
                 <Input
                   type="number" min="1" step="1"
                   value={form.unidades_por_envase}
                   onChange={(e) => setForm((f) => ({ ...f, unidades_por_envase: e.target.value }))}
-                  placeholder="Ej: 40 (caja de 40 botes). Vacío para envases sueltos."
+                  placeholder="Ej: 40"
                 />
               </FormField>
-            </>
+            </div>
           )}
-
-          <FormField label="Caducidad automática (meses)" hint="Si se define, al crear lote se auto-calcula la fecha de caducidad">
-            <Input
-              type="number" min="0" step="1"
-              value={form.caducidad_meses ?? ''}
-              onChange={(e) => setForm((f) => ({ ...f, caducidad_meses: e.target.value }))}
-              placeholder="Ej: 36 (3 años)"
-            />
-          </FormField>
 
           {/* ── Especificaciones requeridas (dinámicas desde catálogo) — materia prima ── */}
           {form.tipo === 'materia_prima' && (
@@ -1984,6 +2338,31 @@ export default function Productos() {
               ))}
             </Select>
           </FormField>
+
+          {/* ── AVANZADO: Mensaje de confirmación en fabricación — colapsable, sólo MP ── */}
+          {form.tipo === 'materia_prima' && (
+            <details className="rounded-xl border border-gray-200 bg-gray-50/40" open={!!form.confirmacion_msg.trim()}>
+              <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold text-gray-600 hover:text-gray-800 flex items-center gap-2">
+                <span>⚙ Mensaje de confirmación en fabricación</span>
+                <span className="text-[10px] font-normal text-gray-400">(opcional)</span>
+                {form.confirmacion_msg.trim() && (
+                  <span className="ml-auto text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">activo</span>
+                )}
+              </summary>
+              <div className="px-3 pb-3">
+                <p className="text-[11px] text-gray-500 mb-2">
+                  Si pones un texto, al finalizar cada fabricación con esta materia prima se pedirá confirmar el mensaje. Útil para recordatorios (ej: "has verificado la viscosidad").
+                </p>
+                <Textarea
+                  rows={2}
+                  value={form.confirmacion_msg}
+                  onChange={(e) => setForm((f) => ({ ...f, confirmacion_msg: e.target.value }))}
+                  placeholder="Ej: ¿Has verificado la viscosidad antes de cerrar?"
+                  maxLength={500}
+                />
+              </div>
+            </details>
+          )}
 
           {error && (
             <p className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 text-xs text-loga-red">
