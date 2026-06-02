@@ -56,6 +56,9 @@ export const clientesApi = {
   crear:   (data: object) => api.post('/clientes', data),
   editar:  (id: string, data: object) => api.put(`/clientes/${id}`, data),
   eliminar:(id: string) => api.delete(`/clientes/${id}`),
+  precios: (id: string) => api.get(`/clientes/${id}/precios`),
+  archivar: (id: string, motivo?: string) => api.post(`/clientes/${id}/archivar`, { motivo }),
+  recuperar: (id: string) => api.post(`/clientes/${id}/recuperar`),
 };
 
 export const stockApi = {
@@ -78,9 +81,11 @@ export const produccionApi = {
     fecha_fabricacion?: string; fotos?: File[]; cantidad_real_producida?: string; registro_limpieza?: string;
     fecha_inicio_cliente?: string;
     ingredientes_ajustados?: { materia_prima_id: string; cantidad: number }[];
+    lotes_override?: { materia_prima_id: string; lotes: { lote_id: string; cantidad: number }[] }[];
   }) => {
     const hasAjustes = data?.ingredientes_ajustados && data.ingredientes_ajustados.length > 0;
-    const hasData = data && (data.ph || data.solidos || data.viscosidad || data.fecha_fabricacion || data.cantidad_real_producida || data.registro_limpieza || data.fecha_inicio_cliente || (data.fotos && data.fotos.length > 0) || hasAjustes);
+    const hasLotesOverride = data?.lotes_override && data.lotes_override.length > 0;
+    const hasData = data && (data.ph || data.solidos || data.viscosidad || data.fecha_fabricacion || data.cantidad_real_producida || data.registro_limpieza || data.fecha_inicio_cliente || (data.fotos && data.fotos.length > 0) || hasAjustes || hasLotesOverride);
     if (hasData) {
       const fd = new FormData();
       if (data!.ph) fd.append('ph', data!.ph);
@@ -92,6 +97,7 @@ export const produccionApi = {
       if (data!.fecha_inicio_cliente) fd.append('fecha_inicio_cliente', data!.fecha_inicio_cliente);
       if (data!.fotos) data!.fotos.forEach(f => fd.append('fotos', f));
       if (hasAjustes) fd.append('ingredientes_ajustados', JSON.stringify(data!.ingredientes_ajustados));
+      if (hasLotesOverride) fd.append('lotes_override', JSON.stringify(data!.lotes_override));
       return api.post(`/produccion/${id}/confirmar`, fd, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
@@ -127,10 +133,22 @@ export const produccionApi = {
   dashboard: (mes?: string) => api.get('/produccion/dashboard', { params: mes ? { mes } : {} }),
   // Dosificación parcial — echadas durante la fabricación
   listarDosificaciones: (ordenId: string) => api.get(`/produccion/${ordenId}/dosificaciones`),
+  // Confirmaciones manuales (source-of-truth en BD, sustituye localStorage)
+  listarConfirmaciones: (ordenId: string) => api.get(`/produccion/${ordenId}/confirmaciones`),
+  confirmarIngrediente:  (ordenId: string, ingrediente_receta_id: string, paso_index: number) =>
+    api.post(`/produccion/${ordenId}/confirmaciones`, { ingrediente_receta_id, paso_index }),
+  deshacerIngrediente:   (ordenId: string, ingrediente_receta_id: string, paso_index: number) =>
+    api.delete(`/produccion/${ordenId}/confirmaciones/${ingrediente_receta_id}?paso=${paso_index}`),
+  reiniciarConfirmaciones: (ordenId: string) =>
+    api.delete(`/produccion/${ordenId}/confirmaciones`),
   dosificar: (ordenId: string, data: { producto_id: string; lote_id?: string | null; cantidad: number; notas?: string; ingrediente_receta_id?: string; paso_index?: number | null }) =>
     api.post(`/produccion/${ordenId}/dosificar`, data),
   revertirDosificacion: (ordenId: string, dosifId: string) =>
     api.delete(`/produccion/${ordenId}/dosificar/${dosifId}`),
+  // Admin firma la revisión pre-fabricación + persiste el override de lotes.
+  // Después cualquier operario entra directo a producción con esos lotes.
+  revisarLotes: (ordenId: string, lotes_override: Array<{ materia_prima_id: string; lotes: { lote_id: string; cantidad: number }[] }>) =>
+    api.post(`/produccion/${ordenId}/revisar-lotes`, { lotes_override }),
   // Apunta al nuevo endpoint /api/recordatorios — filtra por usuario destinatario.
   recordatorios: (mes?: string) => api.get('/recordatorios', { params: mes ? { mes } : {} }),
   crearRecordatorio: (data: { fecha: string; titulo: string; descripcion?: string; color?: string }) => api.post('/recordatorios', data),
@@ -152,7 +170,8 @@ export const pedidosApi = {
   listar:   (params?: Record<string, string>) => api.get('/pedidos', { params }),
   crear:    (data: object) => api.post('/pedidos', data),
   editar:   (id: string, data: object) => api.put(`/pedidos/${id}`, data),
-  consumir: (id: string, lotesOverride?: Record<string, string[]>) => api.post(`/pedidos/${id}/consumir`, { lotes_override: lotesOverride }),
+  consumir: (id: string, lotesOverride?: Record<string, string[] | Array<{ lote_id: string; cantidad: number }>>) =>
+    api.post(`/pedidos/${id}/consumir`, { lotes_override: lotesOverride }),
   lotesDisponibles: (id: string) => api.get(`/pedidos/${id}/lotes-disponibles`),
   desgloseCoste: (id: string) => api.get(`/pedidos/${id}/desglose-coste`),
   cancelar: (id: string) => api.delete(`/pedidos/${id}`),
@@ -178,7 +197,9 @@ export const configuracionApi = {
   listarBackups:  () => api.get('/configuracion/backups'),
   restaurarBackup:(filename: string) => api.post('/configuracion/restaurar', { filename }),
   enviarEmail:    (data: { to: string; subject: string; body: string }) => api.post('/configuracion/enviar-email', data),
-  auditoria:      () => api.get('/configuracion/auditoria'),
+  auditoria:      (params?: Record<string, string | number | undefined>) =>
+                     api.get('/configuracion/auditoria', { params: params as Record<string, string | number> | undefined }),
+  auditoriaAcciones: () => api.get('/configuracion/auditoria/acciones'),
   // Sub-categorías de materias primas (catálogo editable)
   listarSubcategoriasMP: () => api.get('/configuracion/subcategorias-mp'),
   crearSubcategoriaMP:   (data: { nombre: string; orden?: number }) => api.post('/configuracion/subcategorias-mp', data),
@@ -195,6 +216,12 @@ export const configuracionApi = {
   editarSubcategoriaME:  (id: string, data: { nombre?: string; orden?: number; activo?: boolean }) =>
     api.put(`/configuracion/subcategorias-me/${id}`, data),
   eliminarSubcategoriaME: (id: string) => api.delete(`/configuracion/subcategorias-me/${id}`),
+  // Tipos de material de embalaje (Plástico, Cartón, Madera…)
+  listarTiposMaterial: () => api.get('/configuracion/tipos-material-embalaje'),
+  crearTipoMaterial:   (data: { nombre: string; orden?: number }) => api.post('/configuracion/tipos-material-embalaje', data),
+  editarTipoMaterial:  (id: string, data: { nombre?: string; orden?: number; activo?: boolean }) =>
+    api.put(`/configuracion/tipos-material-embalaje/${id}`, data),
+  eliminarTipoMaterial: (id: string) => api.delete(`/configuracion/tipos-material-embalaje/${id}`),
 };
 
 export const automatizacionesApi = {

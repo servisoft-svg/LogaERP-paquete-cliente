@@ -135,21 +135,20 @@ router.post('/:id/recibir', async (req, res) => {
       ]
     );
 
-    // Get current stock
-    const { rows: [prod] } = await client.query(
+    // El INSERT de lotes ya disparó trigger 025 (fn_trg_lotes_stock_actual)
+    // que recalculó productos.stock_actual = SUM(lotes aprobados). No hace
+    // falta UPDATE manual aquí: causaría doble escritura redundante.
+    // OJO: el lote entra en 'cuarentena', así que el trigger NO modifica
+    // stock_actual hasta que QC lo apruebe. Por tanto antes==despues en el
+    // stock_move de recepción (la entrada real al disponible se registra al
+    // pasar el lote a 'aprobado' desde lotes.routes.ts).
+    const { rows: [prodAhora] } = await client.query(
       `SELECT stock_actual FROM productos WHERE id = $1`,
       [oc.producto_id]
     );
-    const stockAntes = parseFloat(prod.stock_actual);
-    const stockDespues = stockAntes + cantidadFinal;
+    const stockActual = parseFloat(prodAhora.stock_actual);
 
-    // Update product stock
-    await client.query(
-      `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
-      [stockDespues.toFixed(6), oc.producto_id]
-    );
-
-    // Create stock_move record
+    // Create stock_move record (trazabilidad del ingreso en cuarentena)
     await client.query(
       `INSERT INTO stock_moves
          (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, motivo)
@@ -158,9 +157,9 @@ router.post('/:id/recibir', async (req, res) => {
         oc.producto_id,
         lote.id,
         cantidadFinal.toFixed(6),
-        stockAntes.toFixed(6),
-        stockDespues.toFixed(6),
-        `Recepcion OC ${oc.numero_oc}`,
+        stockActual.toFixed(6),
+        stockActual.toFixed(6),
+        `Recepcion OC ${oc.numero_oc} (lote en cuarentena, pendiente de QC)`,
       ]
     );
 

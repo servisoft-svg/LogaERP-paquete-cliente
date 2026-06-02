@@ -43,11 +43,40 @@ const ACCIONES: Record<string, string> = {
   'POST /api/auth/register': 'CREAR_USUARIO',
 };
 
+// Sub-rutas que NO deben auditarse automáticamente porque el código de la
+// ruta concreta ya inserta una entrada detallada (evita duplicados ruidosos
+// como "Crear OF · cantidad: 0.27" cuando en realidad era una dosificación).
+const SUBRUTAS_EXCLUIDAS = [
+  /^\/api\/produccion\/[0-9a-f-]{36}\/dosificar/i,
+  /^\/api\/produccion\/[0-9a-f-]{36}\/confirmaciones/i,
+  /^\/api\/produccion\/[0-9a-f-]{36}\/revisar-lotes/i,
+  /^\/api\/produccion\/[0-9a-f-]{36}\/envasado-rapido/i,
+  /^\/api\/produccion\/envasado-rapido/i,
+  /^\/api\/produccion\/envasado-planificar/i,
+  /^\/api\/produccion\/[0-9a-f-]{36}\/confirmar-envasado/i,
+  /^\/api\/produccion\/preview-envasado/i,
+  /^\/api\/pedidos\/[0-9a-f-]{36}\/consumir/i,
+  /^\/api\/clientes\/[0-9a-f-]{36}\/(archivar|recuperar)/i,
+  /^\/api\/recetas-envasado\/(ejecutar|simular)/i,
+];
+
+// Normaliza el path reemplazando UUIDs por ":id" para hacer matching exacto
+// frente al mapa de acciones, sin que sub-rutas hereden la acción del padre.
+function normalizePath(p: string): string {
+  return p.replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/:id');
+}
+
 function getAccion(method: string, path: string): string | null {
-  // Intentar match exacto primero, luego parcial
+  // 1) Excluir sub-rutas que se auditan a mano
+  if (SUBRUTAS_EXCLUIDAS.some(rx => rx.test(path))) return null;
+  // 2) Match exacto con UUIDs normalizados a :id
+  const np = normalizePath(path);
   for (const [pattern, accion] of Object.entries(ACCIONES)) {
     const [m, p] = pattern.split(' ');
-    if (method === m && path.startsWith(p)) return accion;
+    if (method !== m) continue;
+    if (np === p) return accion;                          // /api/produccion
+    if (np === `${p}/:id`) return accion;                 // /api/produccion/:id
+    // Solo se aceptan exactos para evitar que /produccion/:id/foo herede
   }
   return null;
 }

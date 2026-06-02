@@ -92,15 +92,22 @@ class StockService {
 
       if (despues < 0) throw new Error('STOCK_RESULTANTE_NEGATIVO');
 
-      await client.query(
-        `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
-        [despues.toFixed(6), payload.producto_id]
-      );
-
       if (payload.lote_id) {
+        // UPDATE lotes dispara trigger 025 (fn_trg_lotes_stock_actual) que
+        // recalcula productos.stock_actual = SUM(lotes aprobados). No hace
+        // falta UPDATE manual a productos.stock_actual aquí.
         await client.query(
           `UPDATE lotes SET cantidad_actual = GREATEST(0, cantidad_actual + $1::NUMERIC) WHERE id = $2`,
           [payload.cantidad.toFixed(6), payload.lote_id]
+        );
+      } else {
+        // Caso defensivo: ajuste sin lote — actualizamos stock_actual
+        // directamente. NO debería ocurrir en flujos normales (siempre debe
+        // haber lote_id). Sólo aquí porque el trigger 025 no se dispara sin
+        // cambio en lotes.
+        await client.query(
+          `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
+          [despues.toFixed(6), payload.producto_id]
         );
       }
 

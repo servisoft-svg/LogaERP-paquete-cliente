@@ -2,7 +2,8 @@
  * ComboCreate — combobox tipo SearchSelect con CTA "+ Crear" inline.
  * Si el texto tecleado no coincide con ningún producto, ofrece crearlo.
  */
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, X, Plus, Check } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -38,14 +39,47 @@ export default function ComboCreate({
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Posición del panel desplegable (portal · position: fixed).
+  // Se recalcula al abrir y en scroll/resize para mantenerse anclado al input.
+  const [rect, setRect] = useState<{ top: number; left: number; width: number; openUp: boolean } | null>(null);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t)) return;
+      if (panelRef.current?.contains(t)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, []);
+
+  // Calcula la posición del panel al input ancla. Si no cabe abajo, abre arriba.
+  useLayoutEffect(() => {
+    if (!open) { setRect(null); return; }
+    const update = () => {
+      const el = ref.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const MAX_H = 288; // ~max-h-72
+      const room = window.innerHeight - r.bottom;
+      const openUp = room < MAX_H && r.top > MAX_H;
+      setRect({
+        top: openUp ? r.top - 4 : r.bottom + 4,
+        left: r.left,
+        width: r.width,
+        openUp,
+      });
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [open]);
 
   const filtered = query.trim()
     ? options.filter(o => norm(o.label).includes(norm(query)) || norm(o.sub ?? '').includes(norm(query))).slice(0, 30)
@@ -97,10 +131,21 @@ export default function ComboCreate({
         </div>
       )}
 
-      {open && (
-        <div className="absolute z-30 top-full mt-1 left-0 right-0 max-h-72 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+      {open && rect && createPortal(
+        <div
+          ref={panelRef}
+          style={{
+            position: 'fixed',
+            top: rect.openUp ? undefined : rect.top,
+            bottom: rect.openUp ? window.innerHeight - rect.top : undefined,
+            left: rect.left,
+            width: rect.width,
+            zIndex: 9999,
+          }}
+          className="max-h-72 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-2xl"
+        >
           {puedeCrear && (
-            <button type="button" onClick={handleCreate} disabled={creating}
+            <button type="button" onMouseDown={e => e.preventDefault()} onClick={handleCreate} disabled={creating}
               className="w-full px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-left border-b border-gray-100 bg-emerald-50/50 hover:bg-emerald-50 disabled:opacity-50">
               <div className="rounded p-0.5 bg-emerald-600 text-white"><Plus size={10} /></div>
               <span className="text-gray-700">
@@ -114,6 +159,7 @@ export default function ComboCreate({
           )}
           {filtered.map(o => (
             <button key={o.id} type="button"
+              onMouseDown={e => e.preventDefault()}
               onClick={() => { onChange(o.id); setOpen(false); setQuery(''); }}
               className={clsx('w-full px-2.5 py-1.5 flex items-center gap-2 text-left hover:bg-gray-50 border-b border-gray-50 last:border-b-0',
                 value === o.id && 'bg-emerald-50/40')}>
@@ -124,7 +170,8 @@ export default function ComboCreate({
               {o.right && <span className="text-[10px] text-gray-500 tabular-nums shrink-0">{o.right}</span>}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

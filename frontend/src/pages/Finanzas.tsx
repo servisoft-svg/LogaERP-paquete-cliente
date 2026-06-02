@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download, ArrowUpRight, ArrowDownRight, Search, ChevronDown,
   AlertTriangle, Plus, Minus, Activity, TrendingUp,
-  Factory, Warehouse, Package, Layers, Beaker, Zap, Eye, EyeOff,
+  Factory, Warehouse, Package, Layers, Beaker, Zap, Eye, EyeOff, X,
   type LucideIcon,
 } from 'lucide-react';
 import { finanzasApi } from '../api/client';
@@ -68,7 +68,8 @@ interface ImpactoReceta {
     diff: number;
   }[];
 }
-interface MPPrecio { codigo: string; nombre: string; unidad_medida: string; precio_actual: string; precio_anterior: string | null; variacion_pct: string }
+interface MPPrecio { id: string; codigo: string; nombre: string; unidad_medida: string; precio_actual: string; precio_anterior: string | null; variacion_pct: string }
+interface PrecioHistRow { id: string; tipo: string; precio_anterior: string | null; precio_nuevo: string; motivo: string | null; created_at: string }
 
 // ── Helpers — SIN ABREVIATURAS K/M ──────────────────────────────────
 const fmt = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -93,6 +94,9 @@ export default function Finanzas() {
   const [data, setData] = useState<ResumenData | null>(null);
   const [impactoRecetas, setImpactoRecetas] = useState<ImpactoReceta[]>([]);
   const [mpPrecios, setMpPrecios] = useState<MPPrecio[]>([]);
+  const [mpDetalle, setMpDetalle] = useState<MPPrecio | null>(null);
+  const [mpDetalleHist, setMpDetalleHist] = useState<PrecioHistRow[]>([]);
+  const [mpDetalleLoading, setMpDetalleLoading] = useState(false);
   const [expandedReceta, setExpandedReceta] = useState<string | null>(null);
   const [filtroImpacto, setFiltroImpacto] = useState<'todos' | 'granel' | 'envasado'>('todos');
   const [loading, setLoading] = useState(true);
@@ -393,7 +397,7 @@ export default function Finanzas() {
               <div className="flex items-center text-[11px] font-medium">
                 {([
                   { v: 'todos',              l: 'Todos' },
-                  { v: 'producto_fabricado', l: 'Granel' },
+                  { v: 'producto_fabricado', l: 'Producto fabricado' },
                   { v: 'producto_envasado',  l: 'Envasado' },
                 ] as const).map(({ v, l }, idx) => {
                   const count = v === 'todos' ? data.rentabilidad.length : data.rentabilidad.filter(r => r.tipo === v).length;
@@ -442,7 +446,7 @@ export default function Finanzas() {
                   ? { text: 'text-amber-700 dark:text-amber-400', bg: 'bg-amber-500/10', dot: 'bg-amber-500' }
                   : { text: 'text-emerald-700 dark:text-emerald-400', bg: 'bg-emerald-500/10', dot: 'bg-emerald-500' };
                 const tipoStyle = r.tipo === 'producto_fabricado'
-                  ? { text: 'text-loga-red', bg: 'bg-loga-red/10', label: 'Granel' }
+                  ? { text: 'text-loga-red', bg: 'bg-loga-red/10', label: 'Producto fabricado' }
                   : { text: 'text-emerald-700 dark:text-emerald-400', bg: 'bg-emerald-500/10', label: 'Envasado' };
                 return (
                   <React.Fragment key={r.id}>
@@ -635,7 +639,7 @@ export default function Finanzas() {
                 const maxVal = data.topInmovilizado[0] ? parseFloat(String(data.topInmovilizado[0].valor)) : 1;
                 const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
                 const tipoConfig = p.tipo === 'producto_fabricado'
-                  ? { color: '#FF0000', label: 'Granel' }
+                  ? { color: '#FF0000', label: 'Producto fabricado' }
                   : p.tipo === 'producto_envasado'
                   ? { color: '#10b981', label: 'Envasado' }
                   : p.tipo === 'materia_prima'
@@ -745,7 +749,7 @@ export default function Finanzas() {
               <div className="mt-4 inline-flex rounded-lg border border-zinc-200 dark:border-white/10 bg-white dark:bg-zinc-900 p-1 gap-1">
                 {([
                   { key: 'todos',    label: 'Todos',    n: impactoRecetas.length },
-                  { key: 'granel',   label: 'Granel',   n: granel.length + otros.length },
+                  { key: 'granel',   label: 'Producto fabricado',   n: granel.length + otros.length },
                   { key: 'envasado', label: 'Envasado', n: envasado.length },
                 ] as const).map(opt => (
                   <button
@@ -857,17 +861,17 @@ export default function Finanzas() {
                           ) : (
                             <>
                               <p className="text-[10px] text-zinc-500 mb-3 italic leading-relaxed">
-                                <b className="text-emerald-600 dark:text-emerald-400">Precio lote barato</b>: precio del lote más barato que tienes ahora en almacén — lo que pagarías hoy si solo gastaras de ese lote.{' '}
-                                <b className="text-amber-600 dark:text-amber-400">Precio lote caro</b>: precio del lote más caro en stock — lo que pagarás cuando se agote el barato y consumas el caro.{' '}
-                                Si un ingrediente no tiene lotes propios (granel sin stock), se calcula recursivamente con los precios mín/máx de SUS materias primas.
+                                <b className="text-emerald-600 dark:text-emerald-400">Precio actual</b>: el del lote más barato que tienes en almacén ahora.{' '}
+                                <b className="text-amber-600 dark:text-amber-400">Precio tras subida</b>: el del lote más caro en stock — lo que pagarás cuando se acabe el barato.{' '}
+                                Si no hay stock propio, se calcula con los precios mín/máx de sus materias primas.
                               </p>
                               <div className="grid grid-cols-12 gap-2 text-[10px] uppercase tracking-[0.1em] font-bold text-zinc-400 mb-2 pb-2 border-b border-zinc-200 dark:border-white/10">
                                 <span className="col-span-3">Ingrediente</span>
                                 <span className="col-span-1 text-right">Cant.</span>
-                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Precio del lote más barato disponible en almacén ahora mismo">Precio lote barato</span>
-                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Precio del lote más caro disponible en almacén — lo que pagarás cuando el barato se agote">Precio lote caro</span>
-                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Cantidad × precio lote barato = coste de producción si todo el lote viniera del barato">Coste prod. con stock barato</span>
-                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Cantidad × precio lote caro = coste futuro de producción cuando se agote el barato">Coste futuro producción</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Precio del lote más barato disponible en almacén — el que se está consumiendo ahora">Precio actual</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Precio del lote más caro disponible — lo que pagarás cuando se acabe el barato">Precio tras subida</span>
+                                <span className="col-span-2 text-right text-emerald-600 dark:text-emerald-400" title="Cantidad × precio actual = coste de fabricar este batch hoy">Coste fabricación actual</span>
+                                <span className="col-span-2 text-right text-amber-600 dark:text-amber-400" title="Cantidad × precio tras subida = coste cuando se acabe el lote barato">Coste con subida</span>
                               </div>
                               {r.detalle_mp.map((mp, i) => {
                                 const pMin = mp.precio_stock_min ?? mp.precio_actual;
@@ -912,13 +916,13 @@ export default function Finanzas() {
                                   <span className="block text-emerald-700 dark:text-emerald-300 font-bold">
                                     {priv ? '**' : (r.coste_stock_min_batch ?? 0).toFixed(2)} €
                                   </span>
-                                  <span className="block text-[9px] text-emerald-600 dark:text-emerald-400 font-normal">coste prod. stock barato</span>
+                                  <span className="block text-[9px] text-emerald-600 dark:text-emerald-400 font-normal">coste fabricación actual</span>
                                 </span>
                                 <span className="col-span-2 text-right tabular-nums">
                                   <span className="block text-amber-700 dark:text-amber-300 font-bold">
                                     {priv ? '**' : (r.coste_stock_max_batch ?? 0).toFixed(2)} €
                                   </span>
-                                  <span className="block text-[9px] text-amber-600 dark:text-amber-400 font-normal">coste futuro producción</span>
+                                  <span className="block text-[9px] text-amber-600 dark:text-amber-400 font-normal">coste tras subida MP</span>
                                 </span>
                               </div>
                               {/* Coste por unidad final */}
@@ -961,10 +965,20 @@ export default function Finanzas() {
                 const act = parseFloat(item.precio_actual);
                 const intensity = Math.min(Math.abs(variacion) / 30, 1);
                 return (
-                  <motion.div
+                  <motion.button
                     key={i}
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.025 * i, duration: 0.2 }}
-                    className="grid grid-cols-12 items-baseline gap-2 py-2.5 border-t border-zinc-100 dark:border-white/5 first:border-t-0 md:[&:nth-child(2)]:border-t-0 lg:[&:nth-child(3)]:border-t-0 group rounded px-2 -mx-2 transition-colors hover:bg-zinc-50/60 dark:hover:bg-white/[0.02] relative overflow-hidden"
+                    onClick={async () => {
+                      setMpDetalle(item);
+                      setMpDetalleHist([]);
+                      setMpDetalleLoading(true);
+                      try {
+                        const { data } = await finanzasApi.historialPrecios(item.id);
+                        setMpDetalleHist((data as PrecioHistRow[]).filter(r => r.tipo === 'compra'));
+                      } catch { setMpDetalleHist([]); }
+                      finally { setMpDetalleLoading(false); }
+                    }}
+                    className="text-left grid grid-cols-12 items-baseline gap-2 py-2.5 border-t border-zinc-100 dark:border-white/5 first:border-t-0 md:[&:nth-child(2)]:border-t-0 lg:[&:nth-child(3)]:border-t-0 group rounded px-2 -mx-2 transition-colors hover:bg-zinc-50/60 dark:hover:bg-white/[0.02] relative overflow-hidden cursor-pointer"
                   >
                     {/* Background tint según variación */}
                     {variacion !== 0 && (
@@ -994,11 +1008,163 @@ export default function Finanzas() {
                         <span className="text-[11px] text-zinc-300">—</span>
                       )}
                     </div>
-                  </motion.div>
+                  </motion.button>
                 );
               })}
           </div>
         </motion.section>
+      )}
+
+      {/* Modal detalle MP — gráfico de historial de precios */}
+      {mpDetalle && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setMpDetalle(null)} />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 w-full max-w-2xl rounded-2xl bg-white shadow-2xl flex flex-col max-h-[85vh]"
+          >
+            <div className="flex items-center justify-between px-5 py-3 bg-gradient-to-r from-red-50 to-white border-b border-red-100 shrink-0">
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold text-loga-red uppercase tracking-wider">Historial de precio</p>
+                <p className="text-base font-bold text-gray-900 truncate">{mpDetalle.nombre}</p>
+                <p className="text-[11px] text-gray-500 font-mono">{mpDetalle.codigo}</p>
+              </div>
+              <button onClick={() => setMpDetalle(null)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-700 shrink-0">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto flex-1 space-y-4">
+              {mpDetalleLoading ? (
+                <p className="text-xs text-gray-400 text-center py-6">Cargando…</p>
+              ) : mpDetalleHist.length === 0 ? (
+                <p className="text-xs text-gray-400 italic text-center py-6">Sin cambios de precio registrados.</p>
+              ) : (() => {
+                // Ordenar ASC para gráfico cronológico. Ignoramos los registros
+                // con precio_nuevo ≤ 0.01 (entradas iniciales sin precio real)
+                // — solo distorsionan el gráfico y la subida acumulada.
+                const hist = [...mpDetalleHist]
+                  .filter(h => parseFloat(h.precio_nuevo) > 0.01)
+                  .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+                if (hist.length === 0) {
+                  return <p className="text-xs text-gray-400 italic text-center py-6">Sin cambios de precio &gt; 0,01 € registrados.</p>;
+                }
+                const precios = hist.map(h => parseFloat(h.precio_nuevo));
+                const minP = Math.min(...precios);
+                const maxP = Math.max(...precios);
+                const rangeP = maxP - minP || 1;
+                const W = 600, H = 180, padX = 30, padY = 20;
+                const xStep = hist.length > 1 ? (W - 2 * padX) / (hist.length - 1) : 0;
+                const yOf = (p: number) => H - padY - ((p - minP) / rangeP) * (H - 2 * padY);
+                const points = hist.map((h, i) => ({ x: padX + i * xStep, y: yOf(parseFloat(h.precio_nuevo)), p: parseFloat(h.precio_nuevo), d: h.created_at }));
+                const pathD = points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(' ');
+                // Primer precio "real" = precio_anterior de la primera fila si es > 0.01,
+                // si no precio_nuevo de la primera. Así el 0→3 no aparece como cambio.
+                const primerPrecio = (() => {
+                  const ant = parseFloat(hist[0].precio_anterior ?? '0');
+                  return ant > 0.01 ? ant : parseFloat(hist[0].precio_nuevo);
+                })();
+                const ultPrecio = parseFloat(hist[hist.length - 1].precio_nuevo);
+                const acumPct = primerPrecio > 0 ? ((ultPrecio - primerPrecio) / primerPrecio) * 100 : 0;
+                const acumAbs = ultPrecio - primerPrecio;
+                return (
+                  <>
+                    {/* Stat cards */}
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">Precio actual</p>
+                        <p className="text-lg font-bold text-gray-900 tabular-nums">{ultPrecio.toFixed(4)} €</p>
+                        <p className="text-[10px] text-gray-400">/ {mpDetalle.unidad_medida}</p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">Primer precio registrado</p>
+                        <p className="text-lg font-bold text-gray-900 tabular-nums">{primerPrecio.toFixed(4)} €</p>
+                        <p className="text-[10px] text-gray-400">{new Date(hist[0].created_at).toLocaleDateString('es-ES')}</p>
+                      </div>
+                      <div className={clsx(
+                        "rounded-lg border p-3",
+                        acumPct > 0 ? "border-loga-red/30 bg-loga-red/10" : acumPct < 0 ? "border-emerald-300 bg-emerald-50" : "border-gray-200 bg-gray-50"
+                      )}>
+                        <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">Subida acumulada</p>
+                        <p className={clsx("text-lg font-bold tabular-nums", acumPct > 0 ? "text-loga-red" : acumPct < 0 ? "text-emerald-700" : "text-gray-900")}>
+                          {acumPct > 0 ? '+' : ''}{acumPct.toFixed(1)}%
+                        </p>
+                        <p className="text-[10px] text-gray-500 tabular-nums">{acumAbs > 0 ? '+' : ''}{acumAbs.toFixed(4)} €/{mpDetalle.unidad_medida}</p>
+                      </div>
+                    </div>
+
+                    {/* Gráfico SVG */}
+                    <div className="rounded-lg border border-gray-200 bg-white p-3">
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">Evolución del precio</p>
+                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+                        {/* Eje Y referencia */}
+                        <text x={4} y={padY + 4} fontSize="9" fill="#9ca3af">{maxP.toFixed(2)}</text>
+                        <text x={4} y={H - padY + 4} fontSize="9" fill="#9ca3af">{minP.toFixed(2)}</text>
+                        <line x1={padX} y1={padY} x2={padX} y2={H - padY} stroke="#e5e7eb" strokeWidth="1" />
+                        <line x1={padX} y1={H - padY} x2={W - padX} y2={H - padY} stroke="#e5e7eb" strokeWidth="1" />
+                        {/* Path */}
+                        <path d={pathD} fill="none" stroke="#FF0000" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        {/* Dots */}
+                        {points.map((pt, i) => (
+                          <g key={i}>
+                            <circle cx={pt.x} cy={pt.y} r={3} fill="#FF0000" />
+                            <title>{`${pt.p.toFixed(4)} € — ${new Date(pt.d).toLocaleDateString('es-ES')}`}</title>
+                          </g>
+                        ))}
+                      </svg>
+                    </div>
+
+                    {/* Tabla de cambios */}
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">Cambios de precio ({hist.length})</p>
+                      <div className="rounded-lg border border-gray-200 overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50">
+                            <tr className="text-gray-500">
+                              <th className="text-left px-3 py-2 font-medium">Fecha</th>
+                              <th className="text-right px-3 py-2 font-medium">Precio anterior</th>
+                              <th className="text-right px-3 py-2 font-medium">Precio nuevo</th>
+                              <th className="text-right px-3 py-2 font-medium">Δ</th>
+                              <th className="text-left px-3 py-2 font-medium">Motivo</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {[...hist].reverse().map((h, i) => {
+                              const ant = h.precio_anterior ? parseFloat(h.precio_anterior) : null;
+                              const nuevo = parseFloat(h.precio_nuevo);
+                              const delta = ant != null ? nuevo - ant : null;
+                              const deltaPct = ant != null && ant > 0 ? ((nuevo - ant) / ant) * 100 : null;
+                              return (
+                                <tr key={i} className="hover:bg-gray-50">
+                                  <td className="px-3 py-2 text-gray-700 whitespace-nowrap">{new Date(h.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums text-gray-500">{ant != null ? `${ant.toFixed(4)} €` : '—'}</td>
+                                  <td className="px-3 py-2 text-right tabular-nums font-semibold text-gray-900">{nuevo.toFixed(4)} €</td>
+                                  <td className={clsx('px-3 py-2 text-right tabular-nums font-bold',
+                                    delta == null ? 'text-gray-300' :
+                                    delta > 0 ? 'text-loga-red' :
+                                    delta < 0 ? 'text-emerald-700' : 'text-gray-400'
+                                  )}>
+                                    {delta == null ? '—' : `${delta > 0 ? '+' : ''}${delta.toFixed(4)}`}
+                                    {deltaPct != null && delta !== 0 && (
+                                      <span className="block text-[10px] font-normal opacity-70">
+                                        ({deltaPct > 0 ? '+' : ''}{deltaPct.toFixed(1)}%)
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2 text-gray-500 truncate" title={h.motivo ?? undefined}>{h.motivo ?? '—'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </motion.div>
+        </div>
       )}
 
       <div className="h-12" />

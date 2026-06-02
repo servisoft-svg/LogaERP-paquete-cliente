@@ -4,6 +4,7 @@ import { pool, acquireProductLocks, withSerializableTransaction } from '../db/po
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
+import { pedidoAlbaranService } from '../services/pedido-albaran.service';
 import { adminOnly } from '../middleware/auth';
 import { logger } from '../lib/logger';
 
@@ -194,6 +195,34 @@ router.post('/', async (req, res) => {
            VALUES ${placeholders.join(', ')}`,
           params
         );
+        // Reactivar cliente si estaba archivado (auto-recovery cuando vuelve a comprar)
+        if (p.cliente_id) {
+          await client.query(
+            `UPDATE clientes
+               SET archivado_at = NULL, archivado_motivo = NULL, archivado_por_id = NULL
+             WHERE id = $1 AND archivado_at IS NOT NULL`,
+            [p.cliente_id]
+          );
+        }
+
+        // Memoria de precio cliente↔producto. UPSERT por cada línea con
+        // precio > 0. Se usa luego como sugerencia en el siguiente pedido.
+        if (p.cliente_id) {
+          for (const l of lineasValidas) {
+            const precioNum = parseFloat(String(l.precio_unitario ?? '0'));
+            if (!l.producto_id || !(precioNum > 0)) continue;
+            await client.query(
+              `INSERT INTO precios_cliente_producto
+                 (cliente_id, producto_id, precio_unitario, num_usos, ultimo_uso_at)
+               VALUES ($1, $2, $3::NUMERIC, 1, NOW())
+               ON CONFLICT (cliente_id, producto_id) DO UPDATE
+                 SET precio_unitario = EXCLUDED.precio_unitario,
+                     num_usos = precios_cliente_producto.num_usos + 1,
+                     ultimo_uso_at = NOW()`,
+              [p.cliente_id, l.producto_id, precioNum]
+            );
+          }
+        }
       }
 
       // 3) Reservar stock FIFO. Si falta stock, marca warning pero no aborta
@@ -329,6 +358,19 @@ router.put('/:id', adminOnly, async (req, res) => {
         if (estado === 'cancelado') {
           await pool.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [req.params.id]);
         }
+
+        // Auditoría · transición de estado pedido (todas las válidas)
+        if (estado !== actual.estado) {
+          const { rows: [pedInfo] } = await pool.query<{ numero_pedido: string; cliente_nombre: string | null }>(
+            `SELECT numero_pedido, cliente_nombre FROM pedidos WHERE id = $1`, [req.params.id]
+          );
+          pool.query(
+            `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+             VALUES ($1, 'CAMBIO_ESTADO_PEDIDO', 'pedidos', $2, $3)`,
+            [(req as any).user?.id ?? null, req.params.id,
+             `${pedInfo?.numero_pedido ?? ''} · ${actual.estado} → ${estado}${pedInfo?.cliente_nombre ? ` · ${pedInfo.cliente_nombre}` : ''}`]
+          ).catch(() => undefined);
+        }
       }
     }
 
@@ -354,6 +396,25 @@ router.put('/:id', adminOnly, async (req, res) => {
              VALUES ${placeholders.join(', ')}`,
             params
           );
+          // Memoria precio cliente↔producto (mismo upsert que en POST)
+          const { rows: [ped] } = await txClient.query<{ cliente_id: string | null }>(
+            `SELECT cliente_id FROM pedidos WHERE id = $1`, [req.params.id]
+          );
+          if (ped?.cliente_id) {
+            for (const l of lineasValidas as { producto_id?: string; precio_unitario?: string|number }[]) {
+              const precioNum = parseFloat(String(l.precio_unitario ?? '0'));
+              if (!l.producto_id || !(precioNum > 0)) continue;
+              await txClient.query(
+                `INSERT INTO precios_cliente_producto (cliente_id, producto_id, precio_unitario, num_usos, ultimo_uso_at)
+                 VALUES ($1, $2, $3::NUMERIC, 1, NOW())
+                 ON CONFLICT (cliente_id, producto_id) DO UPDATE
+                   SET precio_unitario = EXCLUDED.precio_unitario,
+                       num_usos = precios_cliente_producto.num_usos + 1,
+                       ultimo_uso_at = NOW()`,
+                [ped.cliente_id, l.producto_id, precioNum]
+              );
+            }
+          }
         }
         await txClient.query('COMMIT');
       } catch (txErr) {
@@ -432,19 +493,99 @@ router.put('/:id', adminOnly, async (req, res) => {
 });
 
 // DELETE /api/pedidos/:id — restringido a admin
+// Cancela un pedido. Si estaba 'completado' (stock ya consumido), REVIERTE el
+// stock: devuelve las cantidades a sus lotes originales e inserta stock_moves
+// de 'entrada' como reversión auditable. Identifica los movimientos a revertir
+// por referencia_externa='PED:<pedido_id>' (precise) con fallback al patrón
+// motivo='Pedido <numero> -%' para pedidos anteriores al fix BUG B.
 router.delete('/:id', adminOnly, async (req, res) => {
+  const client = await pool.connect();
   try {
-    await pool.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [req.params.id]);
-    await pool.query(`UPDATE pedidos SET estado = 'cancelado' WHERE id = $1`, [req.params.id]);
-    // [H1.1 audit v3] Auditoría fail-soft: no bloquea la respuesta.
-    pool.query(
+    await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+
+    const { rows: [pedido] } = await client.query<{
+      id: string; numero_pedido: string; estado: string; cliente_nombre: string | null;
+    }>(`SELECT id, numero_pedido, estado, cliente_nombre FROM pedidos WHERE id = $1 FOR UPDATE`,
+       [req.params.id]);
+    if (!pedido) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    if (pedido.estado === 'cancelado') {
+      await client.query('ROLLBACK');
+      return res.json({ ok: true, ya_cancelado: true });
+    }
+
+    let reversiones = 0;
+    if (pedido.estado === 'completado') {
+      // Recuperar los stock_moves de tipo 'salida' generados por este pedido.
+      // Filtra por referencia_externa precisa y, como fallback, por motivo
+      // legacy (pedidos consumidos antes de la introducción de referencia_externa).
+      const { rows: salidas } = await client.query<{
+        id: string; producto_id: string; lote_id: string | null; cantidad: string;
+      }>(`SELECT id, producto_id, lote_id, cantidad
+          FROM stock_moves
+          WHERE tipo = 'salida'
+            AND cantidad < 0
+            AND (
+              referencia_externa = 'PED:' || $1::text
+              OR motivo LIKE 'Pedido ' || $2 || ' -%'
+            )
+          ORDER BY created_at ASC`,
+         [pedido.id, pedido.numero_pedido]);
+
+      for (const mov of salidas) {
+        if (!mov.lote_id) continue; // sin lote no sabemos a dónde devolver
+        const devolverCant = Math.abs(parseFloat(mov.cantidad));
+        if (devolverCant <= 0) continue;
+
+        // Bloquear lote y devolver. El trigger 025 recalcula productos.stock_actual.
+        const { rows: [loteActual] } = await client.query<{ cantidad_actual: string }>(
+          `SELECT cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`, [mov.lote_id]
+        );
+        if (!loteActual) continue;
+        const antes = parseFloat(loteActual.cantidad_actual);
+        const despues = antes + devolverCant;
+        await client.query(
+          `UPDATE lotes SET cantidad_actual = $1::NUMERIC WHERE id = $2`,
+          [despues.toFixed(6), mov.lote_id]
+        );
+
+        await client.query(
+          `INSERT INTO stock_moves
+             (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues,
+              referencia_externa, usuario_id, motivo)
+           VALUES ($1, $2, 'entrada', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC,
+                   'PED-REV:' || $6, $7, $8)`,
+          [mov.producto_id, mov.lote_id,
+           devolverCant.toFixed(6), antes.toFixed(6), despues.toFixed(6),
+           pedido.id, (req as any).user?.id ?? null,
+           `Reversión cancelación Pedido ${pedido.numero_pedido}${pedido.cliente_nombre ? ' - ' + pedido.cliente_nombre : ''}`]
+        );
+        reversiones++;
+      }
+    }
+
+    await client.query(`DELETE FROM reservas_stock WHERE pedido_id = $1`, [pedido.id]);
+    await client.query(`UPDATE pedidos SET estado = 'cancelado' WHERE id = $1`, [pedido.id]);
+    await client.query(
       `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
-       VALUES ($1, 'CANCELAR_PEDIDO', 'pedidos', $2, 'Pedido cancelado por admin')`,
-      [(req as any).user?.id ?? null, req.params.id]
-    ).catch((e: unknown) => logger.warn('[auditoria CANCELAR_PEDIDO]', { err: e instanceof Error ? e.message : e }));
-    res.json({ ok: true });
+       VALUES ($1, 'CANCELAR_PEDIDO', 'pedidos', $2, $3)`,
+      [(req as any).user?.id ?? null, pedido.id,
+       reversiones > 0
+         ? `Pedido ${pedido.numero_pedido} cancelado; stock revertido en ${reversiones} movimientos`
+         : `Pedido ${pedido.numero_pedido} cancelado`]
+    );
+
+    await client.query('COMMIT');
+    invalidarCacheFinanzas();
+    return res.json({ ok: true, reversiones });
   } catch (err: unknown) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+    await client.query('ROLLBACK').catch(() => undefined);
+    logger.error('[DELETE pedidos]', { err, pedido_id: req.params.id });
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error al cancelar pedido' });
+  } finally {
+    client.release();
   }
 });
 
@@ -518,8 +659,9 @@ router.get('/:id/lotes-disponibles', async (req, res) => {
       const { rows: lotes } = await pool.query<{
         id: string; producto_id: string; lote_interno: string; cantidad_actual: string;
         precio_compra: string | null; fecha_caducidad: string | null; fecha_entrada: string;
+        tanque: number | null;
       }>(
-        `SELECT id, producto_id, lote_interno, cantidad_actual, precio_compra, fecha_caducidad, fecha_entrada
+        `SELECT id, producto_id, lote_interno, cantidad_actual, precio_compra, fecha_caducidad, fecha_entrada, tanque
          FROM lotes
          WHERE producto_id = ANY($1::uuid[]) AND estado = 'aprobado' AND cantidad_actual > 0
          ORDER BY producto_id, fecha_caducidad ASC NULLS LAST, fecha_entrada ASC`,
@@ -550,7 +692,10 @@ router.post('/:id/consumir', async (req, res) => {
   try {
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
     const { id } = req.params;
-    const lotesOverride: Record<string, string[]> = req.body.lotes_override ?? {};
+    // Acepta dos formatos:
+    //   - { producto_id: ['lote_id', ...] }                       → orden, consume FEFO usando solo esos lotes
+    //   - { producto_id: [{lote_id, cantidad}, ...] }             → cantidad EXACTA por lote (respeta split manual)
+    const lotesOverride: Record<string, string[] | Array<{ lote_id: string; cantidad: number }>> = req.body.lotes_override ?? {};
     const { rows: [pedido] } = await client.query(`SELECT * FROM pedidos WHERE id = $1 FOR UPDATE`, [id]);
     if (!pedido) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Pedido no encontrado' }); }
 
@@ -628,45 +773,75 @@ router.post('/:id/consumir', async (req, res) => {
     for (const item of items) {
       if (item.cantidad <= 0) continue;
 
-      // Si hay override de lotes para este producto, usar ese orden
-      const overrideIds = lotesOverride[item.producto_id];
-      let lotes;
-      if (overrideIds && overrideIds.length > 0) {
-        const { rows } = await client.query(
+      // Detectar formato del override
+      const override = lotesOverride[item.producto_id];
+      const isExactFormat = Array.isArray(override) && override.length > 0
+        && typeof override[0] === 'object' && override[0] !== null && 'lote_id' in override[0];
+
+      let stockAntes = item.stock;
+      let restante = item.cantidad;
+
+      if (isExactFormat) {
+        // Cantidades EXACTAS por lote — respeta el split manual del usuario
+        const items = override as Array<{ lote_id: string; cantidad: number }>;
+        const loteIds = items.map(x => x.lote_id);
+        const { rows: locked } = await client.query<{ id: string; cantidad_actual: string }>(
           `SELECT id, cantidad_actual FROM lotes
            WHERE id = ANY($1) AND producto_id = $2 AND estado = 'aprobado' AND cantidad_actual > 0 FOR UPDATE`,
-          [overrideIds, item.producto_id]
+          [loteIds, item.producto_id]
         );
-        // Mantener el orden del override
-        lotes = overrideIds.map(oid => rows.find(r => r.id === oid)).filter(Boolean);
+        const locMap = new Map(locked.map(l => [l.id, parseFloat(l.cantidad_actual)]));
+        for (const slot of items) {
+          const disp = locMap.get(slot.lote_id) ?? 0;
+          const consumir = Math.min(slot.cantidad, disp);
+          if (consumir <= 0) continue;
+          await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1::NUMERIC WHERE id = $2`,
+            [consumir.toFixed(6), slot.lote_id]);
+          const stockDespues = stockAntes - consumir;
+          await client.query(
+            `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+             VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, 'PED:' || $7, $6)`,
+            [item.producto_id, slot.lote_id, (-consumir).toFixed(6), stockAntes.toFixed(6), stockDespues.toFixed(6),
+             `Pedido ${pedido.numero_pedido} - ${pedido.cliente_nombre ?? ''}`, pedido.id]
+          );
+          stockAntes = stockDespues;
+          restante -= consumir;
+        }
       } else {
-        const { rows } = await client.query(
-          `SELECT id, cantidad_actual FROM lotes
-           WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
-           ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
-          [item.producto_id]
-        );
-        lotes = rows;
-      }
-
-      let restante = item.cantidad;
-      // Stock ya bloqueado y validado arriba con FOR UPDATE — usar item.stock como punto de partida.
-      let stockAntes = item.stock;
-      for (const lote of lotes) {
-        if (restante <= 0) break;
-        const disponible = parseFloat(lote.cantidad_actual);
-        const consumir = Math.min(disponible, restante);
-        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1::NUMERIC WHERE id = $2`, [consumir.toFixed(6), lote.id]);
-
-        const stockDespues = stockAntes - consumir;
-        await client.query(
-          `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, motivo)
-           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6)`,
-          [item.producto_id, lote.id, (-consumir).toFixed(6), stockAntes.toFixed(6), stockDespues.toFixed(6),
-           `Pedido ${pedido.numero_pedido} - ${pedido.cliente_nombre ?? ''}`]
-        );
-        stockAntes = stockDespues;
-        restante -= consumir;
+        // Formato legacy: solo orden de IDs → FEFO con esa preferencia
+        const overrideIds = override as string[] | undefined;
+        let lotes;
+        if (overrideIds && overrideIds.length > 0) {
+          const { rows } = await client.query(
+            `SELECT id, cantidad_actual FROM lotes
+             WHERE id = ANY($1) AND producto_id = $2 AND estado = 'aprobado' AND cantidad_actual > 0 FOR UPDATE`,
+            [overrideIds, item.producto_id]
+          );
+          lotes = overrideIds.map(oid => rows.find(r => r.id === oid)).filter(Boolean);
+        } else {
+          const { rows } = await client.query(
+            `SELECT id, cantidad_actual FROM lotes
+             WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
+             ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
+            [item.producto_id]
+          );
+          lotes = rows;
+        }
+        for (const lote of lotes) {
+          if (restante <= 0) break;
+          const disponible = parseFloat(lote.cantidad_actual);
+          const consumir = Math.min(disponible, restante);
+          await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1::NUMERIC WHERE id = $2`, [consumir.toFixed(6), lote.id]);
+          const stockDespues = stockAntes - consumir;
+          await client.query(
+            `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+             VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, 'PED:' || $7, $6)`,
+            [item.producto_id, lote.id, (-consumir).toFixed(6), stockAntes.toFixed(6), stockDespues.toFixed(6),
+             `Pedido ${pedido.numero_pedido} - ${pedido.cliente_nombre ?? ''}`, pedido.id]
+          );
+          stockAntes = stockDespues;
+          restante -= consumir;
+        }
       }
 
       // Verify all quantity was consumed from approved lots
@@ -704,7 +879,21 @@ router.post('/:id/consumir', async (req, res) => {
       // Auto-email albarán al cliente si toggle activo
       automatizacionesService.autoEmailAlbaran(req.params.id)
         .catch(err => console.error('[auto.email-albaran]', err));
+      // Copia de archivo INDEPENDIENTE: si email_copia_albaranes está
+      // configurado, mandamos el albarán al archivo aunque el cliente no tenga
+      // email o el toggle de auto-email esté desactivado. Idempotente
+      // (albaran_copia_archivada_at evita reenvíos).
+      pedidoAlbaranService.enviarCopiaArchivoSiProcede(req.params.id)
+        .catch(err => logger.warn('[auto.albaran.copia-archivo]', { err: err instanceof Error ? err.message : err, pedido_id: req.params.id }));
     });
+
+    // Auditoría · pedido consumido (stock descontado)
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'CONSUMIR_PEDIDO', 'pedidos', $2, $3)`,
+      [(req as any).user?.id ?? null, pedido.id,
+       `${pedido.numero_pedido} · ${pedido.cliente_nombre ?? 'cliente'} · ${items.length} líneas consumidas (${consumidos.length} mov. de stock)`]
+    ).catch(() => undefined);
 
     return res.json({ ok: true, consumidos });
   } catch (err: unknown) {
@@ -750,6 +939,11 @@ async function cargarDatosDoc(id: string): Promise<{ pedido: any; lineas: any[];
 }
 
 // GET /api/pedidos/:id/albaran.pdf — Albarán de entrega minimalista (sin trazabilidad/fotos)
+// Side-effect: si configuracion_global.email_copia_albaranes está definido y el
+// pedido aún no ha sido archivado por email (campo albaran_copia_archivada_at),
+// se dispara un envío silencioso al email de archivo. Idempotente: solo una vez
+// por pedido. Cualquier sistema interno (token sistema) está excluido para
+// evitar bucles cuando es el propio servidor el que pide el PDF para adjuntarlo.
 router.get('/:id/albaran.pdf', async (req, res) => {
   try {
     const datos = await cargarDatosDoc(req.params.id);
@@ -770,6 +964,17 @@ router.get('/:id/albaran.pdf', async (req, res) => {
     });
 
     doc.end();
+
+    // Disparar copia de archivo (fire-and-forget). El servicio internamente
+    // comprueba si ya fue archivado y si hay email_copia_albaranes configurado.
+    // No esperamos su finalización para no demorar la respuesta del PDF.
+    const tokenInterno = (req as { user?: { sistema?: boolean } }).user?.sistema === true;
+    if (!tokenInterno) {
+      setImmediate(() => {
+        pedidoAlbaranService.enviarCopiaArchivoSiProcede(req.params.id)
+          .catch(err => logger.warn('[albaran.pdf.copia]', { err: err instanceof Error ? err.message : err, pedido_id: req.params.id }));
+      });
+    }
   } catch (err) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }

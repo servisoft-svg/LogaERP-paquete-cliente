@@ -518,6 +518,41 @@ setTimeout(() => {
     .catch(err => logger.error('[auto.stock-sweep:initial] error', { err }));
 }, 10_000);
 
+// Auto-archivado de clientes inactivos (≥2 años sin pedido). Corre 1 vez al
+// día. Idempotente: solo afecta a clientes que aún no estén archivados.
+const CLIENTES_ARCHIVO_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+const archivarClientesInactivos = async () => {
+  try {
+    const { rows } = await pool.query<{ id: string; nombre: string }>(
+      `UPDATE clientes c
+         SET archivado_at = NOW(),
+             archivado_motivo = 'Auto-archivado por inactividad ≥24 meses'
+       WHERE c.archivado_at IS NULL
+         AND c.activo = TRUE
+         AND EXISTS (
+           SELECT 1 FROM pedidos p WHERE p.cliente_id = c.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM pedidos p
+           WHERE p.cliente_id = c.id
+             AND p.created_at > NOW() - INTERVAL '24 months'
+         )
+       RETURNING c.id, c.nombre`
+    );
+    if (rows.length > 0) {
+      logger.info(`[clientes.auto-archivado] ${rows.length} clientes archivados por inactividad ≥24 meses`);
+    }
+    await cronHeartbeat.tick('archivado_clientes', 'ok');
+  } catch (err) {
+    logger.error('[clientes.auto-archivado] error', { err });
+    await cronHeartbeat.tick('archivado_clientes', 'error').catch(() => undefined);
+  }
+};
+const archivoClientesTimer = setInterval(archivarClientesInactivos, CLIENTES_ARCHIVO_INTERVAL_MS);
+archivoClientesTimer.unref();
+// Primera pasada 30s después de arrancar (no en el path crítico)
+setTimeout(archivarClientesInactivos, 30_000);
+
 // ── Graceful shutdown ───────────────────────────────────────
 function shutdown(signal: string) {
   logger.info(`${signal} recibido — cerrando servidor...`);

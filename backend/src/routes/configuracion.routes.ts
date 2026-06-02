@@ -15,7 +15,8 @@ router.get('/', async (_req, res) => {
               smtp_host, smtp_port, smtp_user,
               CASE WHEN smtp_pass_enc <> '' THEN '••••••••' ELSE '' END AS smtp_pass_set,
               empresa_nombre, empresa_cif, empresa_direccion, empresa_telefono, empresa_web,
-              datos_bancarios
+              datos_bancarios,
+              email_copia_albaranes
        FROM configuracion_global WHERE id = 1`
     );
     return res.json(cfg);
@@ -368,7 +369,21 @@ router.put('/', async (req, res) => {
   try {
     const { porcentaje_alerta, plantilla_email, email_remitente, smtp_user, smtp_pass_enc,
             empresa_nombre, empresa_cif, empresa_direccion, empresa_telefono, empresa_web,
-            nivel_bronce, nivel_plata, nivel_oro, datos_bancarios } = req.body;
+            nivel_bronce, nivel_plata, nivel_oro, datos_bancarios,
+            email_copia_albaranes } = req.body;
+    // email_copia_albaranes: '' o null borra; valor válido lo guarda
+    let emailCopiaParam: string | null | undefined;
+    if (email_copia_albaranes === undefined) {
+      emailCopiaParam = undefined;
+    } else if (email_copia_albaranes == null || String(email_copia_albaranes).trim() === '') {
+      emailCopiaParam = null;
+    } else {
+      const e = String(email_copia_albaranes).trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+        return res.status(400).json({ error: 'email_copia_albaranes inválido' });
+      }
+      emailCopiaParam = e;
+    }
     const { rows: [cfg] } = await pool.query(
       `UPDATE configuracion_global SET
          porcentaje_alerta = COALESCE($1::NUMERIC, porcentaje_alerta),
@@ -384,7 +399,8 @@ router.put('/', async (req, res) => {
          nivel_bronce      = COALESCE($11::NUMERIC, nivel_bronce),
          nivel_plata       = COALESCE($12::NUMERIC, nivel_plata),
          nivel_oro         = COALESCE($13::NUMERIC, nivel_oro),
-         datos_bancarios   = CASE WHEN $14::BOOLEAN THEN $15::TEXT ELSE datos_bancarios END
+         datos_bancarios   = CASE WHEN $14::BOOLEAN THEN $15::TEXT ELSE datos_bancarios END,
+         email_copia_albaranes = CASE WHEN $16::BOOLEAN THEN $17::VARCHAR ELSE email_copia_albaranes END
        WHERE id = 1
        RETURNING *`,
       [
@@ -403,6 +419,8 @@ router.put('/', async (req, res) => {
         nivel_oro != null ? Number(nivel_oro) : null,
         datos_bancarios !== undefined,
         datos_bancarios != null ? String(datos_bancarios) : null,
+        emailCopiaParam !== undefined,
+        emailCopiaParam ?? null,
       ]
     );
 
@@ -426,14 +444,60 @@ router.put('/', async (req, res) => {
 });
 
 // GET /api/configuracion/auditoria
-router.get('/auditoria', async (_req, res) => {
+// Filtros opcionales:
+//   ?q=<texto>        — texto libre (busca en motivo, acción, usuario)
+//   ?accion=<csv>     — lista de acciones separadas por coma
+//   ?desde=<ISO>      — fecha mínima
+//   ?hasta=<ISO>      — fecha máxima
+//   ?usuario_id=<id>  — sólo de ese usuario
+//   ?registro_id=<id> — sólo de esa OF/pedido/lote concreto
+//   ?limit=<n>        — máximo de entradas (default 50, máx 1000)
+router.get('/auditoria', async (req, res) => {
   try {
-    const { rows } = await pool.query(`
-      SELECT a.*, u.nombre AS usuario_nombre
+    const { q, accion, desde, hasta, usuario_id, registro_id, limit } = req.query as Record<string, string | undefined>;
+    const where: string[] = [];
+    const params: unknown[] = [];
+    let i = 1;
+
+    if (q && q.trim()) {
+      params.push(`%${q.trim().toLowerCase()}%`);
+      where.push(`(LOWER(COALESCE(a.motivo,'')) LIKE $${i} OR LOWER(a.accion) LIKE $${i} OR LOWER(COALESCE(u.nombre,'')) LIKE $${i})`);
+      i++;
+    }
+    if (accion && accion.trim()) {
+      const arr = accion.split(',').map(s => s.trim()).filter(Boolean);
+      if (arr.length > 0) {
+        params.push(arr);
+        where.push(`a.accion = ANY($${i}::TEXT[])`);
+        i++;
+      }
+    }
+    if (desde) { params.push(desde); where.push(`a.fecha >= $${i++}::TIMESTAMPTZ`); }
+    if (hasta) { params.push(hasta); where.push(`a.fecha <= $${i++}::TIMESTAMPTZ`); }
+    if (usuario_id) { params.push(usuario_id); where.push(`a.usuario_id = $${i++}::UUID`); }
+    if (registro_id) { params.push(registro_id); where.push(`(a.registro_id = $${i}::UUID OR a.motivo LIKE '%' || $${i}::TEXT || '%')`); i++; }
+
+    const lim = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 1000);
+    const sql = `
+      SELECT a.*, u.nombre AS usuario_nombre, u.rol AS usuario_rol
       FROM auditoria a
       LEFT JOIN usuarios u ON u.id = a.usuario_id
-      ORDER BY a.fecha DESC LIMIT 50
-    `);
+      ${where.length > 0 ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY a.fecha DESC LIMIT ${lim}
+    `;
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// GET /api/configuracion/auditoria/acciones — lista única de acciones para filtros
+router.get('/auditoria/acciones', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT accion, COUNT(*)::INT AS total FROM auditoria GROUP BY accion ORDER BY total DESC`
+    );
     res.json(rows);
   } catch (err: unknown) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
@@ -598,6 +662,87 @@ router.delete('/subcategorias-me/:id', async (req, res) => {
       [id]
     );
     if (!row) return res.status(404).json({ error: 'Sub-categoría no encontrada' });
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// ── TIPOS DE MATERIAL DE EMBALAJE (Plástico, Cartón, Madera…) ──────────────
+router.get('/tipos-material-embalaje', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nombre, orden, activo FROM tipos_material_embalaje
+       WHERE activo = TRUE ORDER BY orden ASC, nombre ASC`
+    );
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+router.post('/tipos-material-embalaje', async (req, res) => {
+  try {
+    const nombre = String(req.body?.nombre ?? '').trim().slice(0, 50);
+    const orden = Number.isFinite(Number(req.body?.orden)) ? Number(req.body?.orden) : 0;
+    if (!nombre) return res.status(400).json({ error: 'Nombre obligatorio' });
+    const { rows: [row] } = await pool.query(
+      `INSERT INTO tipos_material_embalaje (nombre, orden) VALUES ($1, $2) RETURNING id, nombre, orden, activo`,
+      [nombre, orden]
+    );
+    return res.status(201).json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe un material con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.put('/tipos-material-embalaje/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, orden, activo } = req.body ?? {};
+    const nombreNorm = nombre != null ? String(nombre).trim().slice(0, 50) : null;
+    if (nombreNorm !== null && !nombreNorm) return res.status(400).json({ error: 'Nombre no puede estar vacío' });
+    // Propagar rename a productos.material_embalaje (texto)
+    if (nombreNorm) {
+      const { rows: [actual] } = await pool.query(`SELECT nombre FROM tipos_material_embalaje WHERE id = $1`, [id]);
+      if (actual && actual.nombre !== nombreNorm) {
+        await pool.query(
+          `UPDATE productos SET material_embalaje = $1 WHERE material_embalaje = $2`,
+          [nombreNorm, actual.nombre]
+        );
+      }
+    }
+    const { rows: [row] } = await pool.query(
+      `UPDATE tipos_material_embalaje SET
+         nombre = COALESCE($1, nombre),
+         orden  = COALESCE($2::INT, orden),
+         activo = COALESCE($3, activo)
+       WHERE id = $4 RETURNING id, nombre, orden, activo`,
+      [nombreNorm, orden != null ? Number(orden) : null, activo ?? null, id]
+    );
+    if (!row) return res.status(404).json({ error: 'Material no encontrado' });
+    return res.json(row);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return res.status(409).json({ error: 'Ya existe un material con ese nombre.' });
+    }
+    return res.status(500).json({ error: msg });
+  }
+});
+
+router.delete('/tipos-material-embalaje/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows: [row] } = await pool.query(
+      `UPDATE tipos_material_embalaje SET activo = FALSE WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Material no encontrado' });
     return res.json({ ok: true });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });

@@ -98,6 +98,8 @@ router.get('/lotes-estado', async (_req, res) => {
               ) AS lotes
        FROM productos p
        WHERE p.tipo = 'materia_prima' AND p.activo = TRUE
+         -- Solo MPs clasificadas como "Emulsión" (acepta variantes con/sin acento)
+         AND p.subcategoria_mp ILIKE 'emulsi%n'
        ORDER BY p.nombre`
     );
     res.json(rows);
@@ -136,14 +138,24 @@ router.get('/', async (req, res) => {
   try {
     const tipo = String(req.query.tipo ?? '').trim();
     const params: string[] = [];
-    let where = '';
+    const conds: string[] = [];
     if (tipo && (TIPOS as readonly string[]).includes(tipo)) {
       params.push(tipo);
-      where = `WHERE tipo = $1`;
+      conds.push(`cc.tipo = $${params.length}`);
     }
-    // Query simple sin JOINs para máxima compatibilidad. Enriquecemos en JS.
+    // Para analítico: solo registros de MPs con subcategoría 'Emulsión'.
+    // Productos sin id (controles legacy con lote_codigo manual) se incluyen siempre.
+    if (tipo === 'analitico') {
+      conds.push(`(cc.producto_id IS NULL OR EXISTS (
+        SELECT 1 FROM productos p
+        WHERE p.id = cc.producto_id
+          AND p.tipo = 'materia_prima'
+          AND p.subcategoria_mp ILIKE 'emulsi%n'
+      ))`);
+    }
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
     const { rows } = await pool.query(
-      `SELECT * FROM controles_calidad ${where} ORDER BY fecha DESC, created_at DESC LIMIT 500`,
+      `SELECT cc.* FROM controles_calidad cc ${where} ORDER BY cc.fecha DESC, cc.created_at DESC LIMIT 500`,
       params
     );
 

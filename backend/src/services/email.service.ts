@@ -64,11 +64,30 @@ class EmailService {
       maximumFractionDigits: 3,
     });
 
-    const cuerpoBase = cfg.plantilla_email
+    // Saludo dinámico según hora local (Europe/Madrid):
+    //   06:00 – 13:59 → Buenos días
+    //   14:00 – 20:59 → Buenas tardes
+    //   21:00 – 05:59 → Buenas noches
+    const horaMadrid = parseInt(
+      new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hour12: false }),
+      10
+    );
+    let saludoFranja = 'Buenos días';
+    if (horaMadrid >= 14 && horaMadrid < 21) saludoFranja = 'Buenas tardes';
+    else if (horaMadrid >= 21 || horaMadrid < 6) saludoFranja = 'Buenas noches';
+
+    // Limpiamos cualquier carácter zero-width (U+200B–U+200D, U+FEFF) que se
+    // haya colado en la plantilla — vienen de copy/paste desde la UI antes del
+    // fix y rompen el match de las llaves `{{...}}`.
+    const plantillaLimpia = (cfg.plantilla_email ?? '').replace(/[​‌‍﻿]/g, '');
+
+    const cuerpoBase = plantillaLimpia
       .replace(/\{\{producto\}\}/g,  prod.nombre)
       .replace(/\{\{cantidad\}\}/g,  cantidadFormateada)
       .replace(/\{\{unidad\}\}/g,    prod.unidad_medida)
       .replace(/\{\{proveedor\}\}/g, prod.proveedor_nombre ?? 'Proveedor')
+      .replace(/\{\{saludo\}\}/g,    saludoFranja)
+      .replace(/\{\{hola\}\}/g,      `Hola, ${saludoFranja.toLowerCase()}`)
       + (payload.notas_adicionales ? `\n\nNotas adicionales: ${payload.notas_adicionales}` : '');
 
     const cuerpo = payload.cuerpo_personalizado ?? cuerpoBase;

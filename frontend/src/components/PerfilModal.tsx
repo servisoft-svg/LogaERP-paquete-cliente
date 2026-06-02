@@ -13,20 +13,23 @@ interface Props {
 export default function PerfilModal({ abierto, onCerrar }: Props) {
   const { user, actualizarPerfil } = useAuth();
   const [nombre, setNombre] = useState('');
-  const [email, setEmail]   = useState('');
+  const [emailFirma, setEmailFirma] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!abierto || !user) return;
     setNombre(user.nombre ?? '');
-    setEmail(user.email ?? '');
+    setEmailFirma(user.email_firma ?? '');
   }, [abierto, user]);
 
   const guardar = async () => {
     if (!nombre.trim()) { notify.error('El nombre es obligatorio'); return; }
     setSaving(true);
     try {
-      await actualizarPerfil({ nombre: nombre.trim(), email: email.trim() });
+      // No tocamos email de login: solo nombre y email_firma. El login sigue
+      // siendo user.email (admin@loga.es) para todos los usuarios que comparten
+      // cuenta admin pero firman con datos distintos.
+      await actualizarPerfil({ nombre: nombre.trim(), email_firma: emailFirma.trim() || null });
       notify.success('Perfil actualizado', { description: `Firmarás como "${nombre.trim()}"` });
       onCerrar();
     } catch (e: any) {
@@ -52,28 +55,37 @@ export default function PerfilModal({ abierto, onCerrar }: Props) {
             <button onClick={onCerrar} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100"><X size={16} /></button>
           </div>
           <div className="px-5 py-4 space-y-3">
-            <p className="text-xs text-gray-500">El nombre aparece como firmante en pedidos, controles de calidad, recetas y todas las firmas.</p>
+            <div className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-[11px] text-amber-800 leading-relaxed">
+              <b>El login NO cambia.</b> Sigues entrando con tu email y contraseña habituales.
+              Lo que pones aquí es <b>el nombre y email de contacto que aparecerán
+              firmando albaranes, PDFs de trazabilidad, pedidos, controles de
+              calidad y registros de auditoría</b>.
+            </div>
             <label className="block">
-              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Nombre completo</span>
+              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Nombre como firmante</span>
               <input
                 value={nombre}
                 onChange={(e) => setNombre(e.target.value)}
-                placeholder="Ej: Jesús López Alfonso"
+                placeholder="Ej: Jesús López Alonso"
                 className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
                 autoFocus
               />
+              <span className="text-[10px] text-gray-400 mt-1 block">Es el nombre que aparecerá firmando los documentos.</span>
             </label>
             <label className="block">
-              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email</span>
+              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email de firma / contacto</span>
               <input
                 type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                value={emailFirma}
+                onChange={(e) => setEmailFirma(e.target.value)}
+                placeholder="ej: colasloga@gmail.com"
+                className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
               />
+              <span className="text-[10px] text-gray-400 mt-1 block">Email que aparecerá en los documentos firmados. Distinto del email de login.</span>
             </label>
-            <div className="text-[11px] text-gray-400">
-              Rol: <span className="font-semibold text-gray-600">{user?.rol}</span>
+            <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2 text-[11px] text-gray-500">
+              <p>Email de login (sin cambios): <span className="font-mono text-gray-700">{user?.email}</span></p>
+              <p className="mt-0.5">Rol: <span className="font-semibold text-gray-600">{user?.rol}</span></p>
             </div>
           </div>
           <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex justify-end gap-2">

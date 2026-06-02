@@ -10,7 +10,7 @@ router.get('/', async (req, res) => {
     const { producto_id, estado, busqueda } = req.query;
     let sql = `
       SELECT l.*, p.nombre AS producto_nombre, p.codigo AS producto_codigo,
-             p.unidad_medida,
+             p.unidad_medida, p.tipo AS producto_tipo,
              COALESCE(
                (SELECT json_agg(json_build_object(
                   'spec_id', ls.spec_id, 'valor', ls.valor,
@@ -38,9 +38,17 @@ router.get('/', async (req, res) => {
         OR translate(lower(COALESCE(l.lote_proveedor,'')), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
         OR translate(lower(p.nombre), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
         OR translate(lower(p.codigo), 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN') ILIKE $${idx}
+        OR l.id IN (
+          SELECT DISTINCT sm.lote_id FROM stock_moves sm
+          JOIN ordenes_produccion op ON op.id = sm.orden_id
+          WHERE sm.lote_id IS NOT NULL
+            AND op.numero_orden ILIKE $${idx + 1}
+        )
       )`;
       const qNorm = String(busqueda).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
       params.push(`%${qNorm}%`); idx++;
+      // Patr\u00f3n adicional para b\u00fasqueda por n\u00famero de OF (sin normalizaci\u00f3n)
+      params.push(`%${String(busqueda).trim()}%`); idx++;
     }
 
     sql += ` ORDER BY l.fecha_caducidad ASC NULLS LAST, l.fecha_entrada ASC LIMIT 500`;
@@ -72,6 +80,8 @@ router.post('/', async (req, res) => {
       porte,
       // Unidad en la que se introdujo el precio (kg, L, ud…). NULL = unidad del producto.
       unidad_precio,
+      // Tanque físico donde reside el lote (1..4) — NULL si no aplica
+      tanque,
       // Specs dinámicas: array [{spec_id, valor}]
       specs_valores,
     } = req.body;
@@ -108,13 +118,18 @@ router.post('/', async (req, res) => {
       if (!lote_interno) {
         lote_interno = await nextLoteCode(client);
       }
+      const tanqueNum = tanque != null && tanque !== '' ? Number(tanque) : null;
+      if (tanqueNum != null && (!Number.isInteger(tanqueNum) || tanqueNum < 1 || tanqueNum > 4)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'tanque debe ser 1, 2, 3 o 4' });
+      }
       const result = await client.query(
         `INSERT INTO lotes
            (producto_id, lote_interno, lote_proveedor, cantidad_inicial, cantidad_actual,
             fecha_fabricacion, fecha_caducidad, ubicacion, observaciones, estado, precio_compra,
-            solidos, ph, viscosidad, porte, unidad_precio)
+            solidos, ph, viscosidad, porte, unidad_precio, tanque)
          VALUES ($1,$2,$3,$4::NUMERIC,$5::NUMERIC,$6,$7,$8,$9,COALESCE($10::estado_lote,'cuarentena'),$11::NUMERIC,
-                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC,$15::NUMERIC,$16)
+                 $12::NUMERIC,$13::NUMERIC,$14::NUMERIC,$15::NUMERIC,$16,$17::SMALLINT)
          RETURNING *`,
         [
           producto_id,
@@ -133,6 +148,7 @@ router.post('/', async (req, res) => {
           viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
           porte      != null && porte      !== '' ? Number(porte)      : 0,
           unidad_precio != null && String(unidad_precio).trim() !== '' ? String(unidad_precio).trim() : null,
+          tanqueNum,
         ]
       );
       lote = result.rows[0];
@@ -324,15 +340,29 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad, porte, lote_interno } = req.body;
+    const { cantidad_actual, ubicacion, observaciones, precio_compra, solidos, ph, viscosidad, porte, lote_interno, tanque } = req.body;
 
     if (cantidad_actual != null && Number(cantidad_actual) < 0) {
       return res.status(400).json({ error: 'La cantidad no puede ser negativa' });
+    }
+    // tanque: null/'' borra; 0 también borra; 1-4 asigna
+    let tanqueParam: number | null | undefined;
+    if (tanque === undefined) {
+      tanqueParam = undefined; // no tocar
+    } else if (tanque === null || tanque === '' || Number(tanque) === 0) {
+      tanqueParam = null;
+    } else {
+      const t = Number(tanque);
+      if (!Number.isInteger(t) || t < 1 || t > 4) {
+        return res.status(400).json({ error: 'tanque debe ser 1, 2, 3 o 4 (o null)' });
+      }
+      tanqueParam = t;
     }
 
     // Get old quantity before update for stock_move
     const { rows: [antes] } = await pool.query(`SELECT cantidad_actual, producto_id FROM lotes WHERE id = $1`, [req.params.id]);
 
+    const tocaTanque = tanqueParam !== undefined;
     const { rows: [lote] } = await pool.query(
       `UPDATE lotes SET
         cantidad_actual = COALESCE($1::NUMERIC, cantidad_actual),
@@ -344,7 +374,8 @@ router.put('/:id', async (req, res) => {
         ph         = COALESCE($7::NUMERIC, ph),
         viscosidad = COALESCE($8::NUMERIC, viscosidad),
         porte      = COALESCE($9::NUMERIC, porte),
-        lote_interno = COALESCE($10, lote_interno)
+        lote_interno = COALESCE($10, lote_interno),
+        tanque = CASE WHEN $12::BOOLEAN THEN $11::SMALLINT ELSE tanque END
        WHERE id = $5 RETURNING *`,
       [
         cantidad_actual ?? null, ubicacion ?? null, observaciones ?? null, precio_compra ?? null, req.params.id,
@@ -353,6 +384,8 @@ router.put('/:id', async (req, res) => {
         viscosidad != null && viscosidad !== '' ? Number(viscosidad) : null,
         porte      != null && porte      !== '' ? Number(porte)      : null,
         lote_interno != null && String(lote_interno).trim() !== '' ? String(lote_interno).trim().toUpperCase() : null,
+        tanqueParam ?? null,
+        tocaTanque,
       ]
     );
     if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });
@@ -440,8 +473,8 @@ router.get('/:id/historial-estado', async (req, res) => {
 router.get('/:id/trazabilidad', async (req, res) => {
   try {
     const { id } = req.params;
-    const { rows } = await pool.query(
-      `SELECT sm.tipo, sm.cantidad, sm.created_at, sm.motivo,
+    const { rows: moves } = await pool.query(
+      `SELECT sm.id, sm.tipo, sm.cantidad, sm.created_at, sm.motivo, sm.orden_id,
               op.numero_orden, op.estado, op.registro_limpieza,
               p.nombre AS producto_nombre, p.codigo AS producto_codigo
        FROM stock_moves sm
@@ -451,7 +484,53 @@ router.get('/:id/trazabilidad', async (req, res) => {
        ORDER BY sm.created_at DESC`,
       [id]
     );
-    res.json(rows);
+
+    // Enriquecer cada orden mencionada con info completa (ingredientes, QC, operario)
+    const ordenIds = Array.from(new Set(moves.map((m: any) => m.orden_id).filter(Boolean)));
+    const ordenesDetalle: Record<string, any> = {};
+    if (ordenIds.length > 0) {
+      const { rows: ordenes } = await pool.query(
+        `SELECT op.id, op.numero_orden, op.tipo_orden, op.estado,
+                op.cantidad_planificada, op.cantidad_real_producida,
+                op.fecha_inicio, op.fecha_fin, op.fecha_planificada,
+                op.cliente, op.notas, op.ph, op.solidos, op.viscosidad,
+                COALESCE(pe.nombre, p.nombre) AS producto_nombre,
+                COALESCE(pe.codigo, p.codigo) AS producto_codigo,
+                u.nombre AS operario_nombre, u.rol AS operario_rol,
+                r.nombre AS receta_nombre,
+                CASE WHEN op.fecha_inicio IS NOT NULL AND op.fecha_fin IS NOT NULL
+                  THEN EXTRACT(EPOCH FROM (op.fecha_fin - op.fecha_inicio))::INT
+                  ELSE NULL END AS duracion_segundos
+         FROM ordenes_produccion op
+         LEFT JOIN recetas r ON r.id = op.receta_id
+         LEFT JOIN productos p ON p.id = r.producto_id
+         LEFT JOIN productos pe ON pe.id = op.producto_envasado_id
+         LEFT JOIN usuarios u ON u.id = COALESCE(op.operario_id, op.creado_por_id)
+         WHERE op.id = ANY($1::UUID[])`,
+        [ordenIds]
+      );
+      // Consumos de cada orden (ingredientes consumidos)
+      const { rows: consumos } = await pool.query(
+        `SELECT sm.orden_id, sm.cantidad,
+                p.nombre AS producto_nombre, p.codigo AS producto_codigo,
+                p.unidad_medida, p.tipo AS producto_tipo,
+                l.lote_interno, l.fecha_caducidad,
+                COALESCE(NULLIF(l.precio_compra, 0), NULLIF(p.coste_medio_actual, 0), p.precio_unitario, 0) AS precio_unitario
+         FROM stock_moves sm
+         JOIN productos p ON p.id = sm.producto_id
+         LEFT JOIN lotes l ON l.id = sm.lote_id
+         WHERE sm.orden_id = ANY($1::UUID[])
+           AND sm.tipo IN ('produccion_consumo','consumo_externo')
+         ORDER BY p.nombre ASC, sm.created_at ASC`,
+        [ordenIds]
+      );
+      for (const o of ordenes) ordenesDetalle[o.id] = { ...o, consumos: [] };
+      for (const c of consumos) {
+        if (ordenesDetalle[c.orden_id]) ordenesDetalle[c.orden_id].consumos.push(c);
+      }
+    }
+
+    res.json({ moves, ordenes: ordenesDetalle });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error';
     res.status(500).json({ error: msg });
@@ -459,6 +538,7 @@ router.get('/:id/trazabilidad', async (req, res) => {
 });
 
 router.patch('/:id/estado', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
     const { estado, motivo } = req.body;
@@ -467,11 +547,21 @@ router.patch('/:id/estado', async (req, res) => {
     }
     if (!motivo) return res.status(400).json({ error: 'motivo es obligatorio para cambios de estado' });
 
-    // Validate state transition
-    const { rows: [actual] } = await pool.query(`SELECT estado, cantidad_actual FROM lotes WHERE id = $1`, [id]);
-    if (!actual) return res.status(404).json({ error: 'Lote no encontrado' });
+    await client.query('BEGIN');
+
+    // Lock lote + leer estado actual en la misma tx para evitar race entre
+    // UPDATE estado e INSERT stock_move (que antes eran 2 pool.query separadas).
+    const { rows: [actual] } = await client.query<{ estado: string; cantidad_actual: string }>(
+      `SELECT estado, cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!actual) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lote no encontrado' });
+    }
     const TRANS_LOTE: Record<string, string[]> = { cuarentena: ['aprobado', 'rechazado'], aprobado: ['cuarentena', 'rechazado'], rechazado: [] };
     if (!(TRANS_LOTE[actual.estado] ?? []).includes(estado)) {
+      await client.query('ROLLBACK');
       return res.status(422).json({ error: `No se puede cambiar de "${actual.estado}" a "${estado}"` });
     }
 
@@ -485,71 +575,100 @@ router.patch('/:id/estado', async (req, res) => {
     // desviados de QC (riesgo legal + producto fuera de spec a cliente).
     if (esAprobacionDeCuarentena) {
       if (userRol !== 'admin') {
+        await client.query('ROLLBACK');
         return res.status(403).json({
           error: 'Solo un administrador (responsable de calidad) puede aprobar un lote en cuarentena. Esta restricción cumple normativa REACH.',
         });
       }
       const motivoTrim = String(motivo).trim();
       if (motivoTrim.length < 10) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           error: 'Aprobar un lote en cuarentena requiere motivo de al menos 10 caracteres explicando por qué se aprueba pese a la desviación QC.',
         });
       }
       if (!userId) {
+        await client.query('ROLLBACK');
         return res.status(401).json({ error: 'Sesión no identificada — no se puede registrar revisor.' });
       }
     }
 
+    // Leer stock_actual del producto ANTES del UPDATE para registrar antes/después
+    // reales en el stock_move (no usar 0 como placeholder — el timeline del
+    // producto debe ser coherente con el resto de movimientos).
+    const { rows: [productoAntes] } = await client.query<{ producto_id: string; stock_actual: string }>(
+      `SELECT l.producto_id, p.stock_actual
+       FROM lotes l JOIN productos p ON p.id = l.producto_id
+       WHERE l.id = $1 FOR UPDATE`,
+      [id]
+    );
+    const stockAntesProd = productoAntes ? parseFloat(productoAntes.stock_actual) : 0;
+
     const { rows: [lote] } = esAprobacionDeCuarentena
-      ? await pool.query(
+      ? await client.query(
           `UPDATE lotes SET estado = $1,
              revisor_id = $3, revisado_at = NOW(), motivo_revision = $4
            WHERE id = $2 RETURNING *`,
           [estado, id, userId, String(motivo).trim()]
         )
-      : await pool.query(
+      : await client.query(
           `UPDATE lotes SET estado = $1 WHERE id = $2 RETURNING *`,
           [estado, id]
         );
-    if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });
+    if (!lote) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lote no encontrado' });
+    }
 
     // [H2.1 audit v3] Eliminado UPDATE defensivo: trigger 025 ya recalcula stock_actual al cambiar estado del lote.
 
     // Stock move for estado change (aprobado = stock entry, rechazado = stock exit)
     const cantLote = parseFloat(lote.cantidad_actual);
     if (cantLote > 0) {
+      // Releer stock_actual tras el UPDATE (el trigger 025 ya lo recalculó)
+      const { rows: [prodDespues] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1`,
+        [lote.producto_id]
+      );
+      const stockDespuesProd = parseFloat(prodDespues?.stock_actual ?? '0');
+
       if (estado === 'aprobado' && actual.estado === 'cuarentena') {
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'entrada', $3::NUMERIC, 0, $3::NUMERIC, $4, $5)`,
-          [lote.producto_id, lote.id, cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} aprobado: ${motivo}`]
+           VALUES ($1, $2, 'entrada', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, cantLote.toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} aprobado: ${motivo}`]
         );
       } else if (estado === 'rechazado' && actual.estado === 'aprobado') {
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
-          [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} rechazado: ${motivo}`]
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, (-cantLote).toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} rechazado: ${motivo}`]
         );
       } else if (estado === 'cuarentena' && actual.estado === 'aprobado') {
         // Vuelta a cuarentena (revisión post-aprobación) — sale del stock disponible
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
-          [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} devuelto a cuarentena: ${motivo}`]
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, (-cantLote).toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} devuelto a cuarentena: ${motivo}`]
         );
       }
     }
 
-    await pool.query(
+    await client.query(
       `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
        VALUES ($1, 'CAMBIO_ESTADO_LOTE', 'lotes', $2, $3)`,
-      [(req as any).user?.id ?? null, id, motivo]
+      [userId, id, motivo]
     );
+
+    await client.query('COMMIT');
     invalidarCacheFinanzas(); // estado lote afecta inmovilizado (sólo aprobado cuenta)
     return res.json(lote);
   } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => undefined);
     const msg = err instanceof Error ? err.message : 'Error';
     return res.status(500).json({ error: msg });
+  } finally {
+    client.release();
   }
 });
 

@@ -187,31 +187,46 @@ router.put('/me', authMiddleware, async (req, res) => {
   try {
     const userId = (req as any).user?.id;
     if (!userId) return res.status(401).json({ error: 'No autorizado' });
-    const { nombre, email } = req.body ?? {};
+    const { nombre, email, email_firma } = req.body ?? {};
     if (!nombre || !String(nombre).trim()) {
       return res.status(400).json({ error: 'El nombre no puede estar vacío' });
     }
     const emailNorm = email ? String(email).trim().toLowerCase() : null;
+    // email_firma es el email que aparece en albaranes / firmas, separado del
+    // email de login. Puede ser null (no se imprime) o cualquier email.
+    const emailFirmaNorm = email_firma == null ? undefined : (String(email_firma).trim().toLowerCase() || null);
     // Pre-check: si el email cambia, asegúrate de que no lo tenga otro usuario.
     // Más amigable que esperar al unique constraint error de Postgres.
     if (emailNorm) {
+      // Solo bloqueamos si el email lo tiene un usuario ACTIVO. Los inactivos
+      // (soft-deleted) no deben colisionar con cambios de perfil — su email
+      // ya no se usa para login.
       const { rows: dup } = await pool.query(
-        `SELECT id FROM usuarios WHERE LOWER(email) = $1 AND id <> $2 LIMIT 1`,
+        `SELECT id FROM usuarios WHERE LOWER(email) = $1 AND id <> $2 AND activo = TRUE LIMIT 1`,
         [emailNorm, userId]
       );
       if (dup.length > 0) {
         return res.status(409).json({
-          error: `El email "${emailNorm}" ya está en uso por otro usuario. Usa uno distinto.`,
+          error: `El email "${emailNorm}" ya está en uso por otro usuario activo.`,
         });
       }
+      // Si hay un usuario INACTIVO con ese email, renombramos su email para
+      // liberar el slot (el unique constraint es a nivel BD).
+      await pool.query(
+        `UPDATE usuarios
+           SET email = email || '.borrado.' || EXTRACT(EPOCH FROM NOW())::TEXT
+         WHERE LOWER(email) = $1 AND id <> $2 AND activo = FALSE`,
+        [emailNorm, userId]
+      );
     }
     const { rows: [u] } = await pool.query(
       `UPDATE usuarios SET
-         nombre = $1,
-         email  = COALESCE($2, email)
-       WHERE id = $3 AND activo = TRUE
-       RETURNING id, nombre, email, rol`,
-      [String(nombre).trim(), emailNorm, userId]
+         nombre      = $1,
+         email       = COALESCE($2, email),
+         email_firma = CASE WHEN $4::BOOLEAN THEN $3 ELSE email_firma END
+       WHERE id = $5 AND activo = TRUE
+       RETURNING id, nombre, email, email_firma, rol`,
+      [String(nombre).trim(), emailNorm, emailFirmaNorm, emailFirmaNorm !== undefined, userId]
     );
     if (!u) return res.status(404).json({ error: 'Usuario no encontrado' });
     return res.json(u);
@@ -232,7 +247,7 @@ router.get('/me', authMiddleware, async (req, res) => {
     if (!userId) return res.status(401).json({ error: 'No autorizado' });
 
     const { rows: [user] } = await pool.query(
-      `SELECT id, nombre, email, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
+      `SELECT id, nombre, email, email_firma, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
       [userId]
     );
     if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });

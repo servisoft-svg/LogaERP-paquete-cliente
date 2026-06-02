@@ -10,6 +10,7 @@ import { productosApi, proveedoresApi, lotesApi, specsApi, cambioApi, facturasAp
 import type { Producto, Proveedor, TipoProducto, SpecCatalogo, ProductoSpec } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import { TANQUE_COLORES } from '../components/TanqueBadge';
 import Modal from '../components/Modal';
 import ConfirmModal from '../components/ConfirmModal';
 import BarcodeScanner from '../components/BarcodeScanner';
@@ -45,6 +46,7 @@ const TIPOS_FORM: { value: TipoProducto; label: string }[] = [
 
 interface SubcategoriaMP { id: string; nombre: string; orden: number; activo: boolean }
 interface SubcategoriaME { id: string; nombre: string; orden: number; activo: boolean }
+interface TipoMaterial   { id: string; nombre: string; orden: number; activo: boolean }
 
 // Clasifica una sub-categoría ME según su nombre para mostrar el campo correcto
 // en el formulario. Heurística simple — el admin puede crear nuevas sub-categorías
@@ -88,6 +90,9 @@ interface FormData {
   subcategoria_mp: string;
   // Sub-categoría (sólo material embalaje)
   subcategoria_me: string;
+  // Material del embalaje (Plástico, Cartón…) + peso del envase vacío
+  material_embalaje: string;
+  peso_material_vacio_kg: string;
   // Nombre comercial opcional (sólo productos fabricados/envasados)
   nombre_comercial: string;
   // Flag: producto compartido con Alilo (consumible vía API HMAC)
@@ -106,7 +111,7 @@ const EMPTY: FormData = {
   unidad_medida: 'kg', stock_actual: '0', stock_minimo: '0', stock_maximo: '0',
   precio_unitario: '0', precio_venta: '0', proveedor_id: '', caducidad_meses: '', peso_unitario_kg: '', unidades_por_envase: '',
   solidos_min: '', solidos_max: '', ph_min: '', ph_max: '', viscosidad_min: '', viscosidad_max: '',
-  subcategoria_mp: '', subcategoria_me: '', nombre_comercial: '', compartido_alilo: false, codigo_alilo: '', subcategoria_pf: '', confirmacion_msg: '',
+  subcategoria_mp: '', subcategoria_me: '', material_embalaje: '', peso_material_vacio_kg: '', nombre_comercial: '', compartido_alilo: false, codigo_alilo: '', subcategoria_pf: '', confirmacion_msg: '',
 };
 
 const EJEMPLO_IMPORTAR_PRODUCTOS = JSON.stringify({
@@ -161,6 +166,7 @@ export default function Productos() {
   const [filtroSubcategoriaPF, setFiltroSubcategoriaPF] = useState<'' | 'propia' | 'terceros'>('');
   const [subcategoriasMP, setSubcategoriasMP] = useState<SubcategoriaMP[]>([]);
   const [subcategoriasME, setSubcategoriasME] = useState<SubcategoriaME[]>([]);
+  const [tiposMaterial, setTiposMaterial]     = useState<TipoMaterial[]>([]);
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Producto | null>(null);
   const [form, setForm]               = useState<FormData>(EMPTY);
@@ -223,6 +229,8 @@ export default function Productos() {
   const [stockProductoSpecs, setStockProductoSpecs] = useState<ProductoSpec[]>([]);
   const [stockSpecsValores, setStockSpecsValores]   = useState<Record<number, string>>({});
   const [stockPorte, setStockPorte]                 = useState('');
+  // Tanque físico donde se almacena este lote (1..4). NULL = no asignado.
+  const [stockTanque, setStockTanque]               = useState<number | null>(null);
   const [stockSolidos, setStockSolidos]             = useState('');
   const [stockPh, setStockPh]                       = useState('');
   const [stockViscosidad, setStockViscosidad]       = useState('');
@@ -281,6 +289,9 @@ export default function Productos() {
     configuracionApi.listarSubcategoriasME()
       .then(({ data }) => setSubcategoriasME(data as SubcategoriaME[]))
       .catch(() => setSubcategoriasME([]));
+    configuracionApi.listarTiposMaterial()
+      .then(({ data }) => setTiposMaterial(data as TipoMaterial[]))
+      .catch(() => setTiposMaterial([]));
   }, []);
 
   // Tasa de cambio: cuando user elige divisa distinta de EUR, fetch tasa actual.
@@ -365,6 +376,8 @@ export default function Productos() {
       viscosidad_max: (p as any).viscosidad_max != null ? String((p as any).viscosidad_max) : '',
       subcategoria_mp: (p as any).subcategoria_mp ?? '',
       subcategoria_me: (p as any).subcategoria_me ?? '',
+      material_embalaje:      (p as any).material_embalaje ?? '',
+      peso_material_vacio_kg: (p as any).peso_material_vacio_kg != null ? String((p as any).peso_material_vacio_kg) : '',
       nombre_comercial: (p as any).nombre_comercial ?? '',
       compartido_alilo: !!(p as any).compartido_alilo,
       codigo_alilo: (p as any).codigo_alilo ?? '',
@@ -448,6 +461,9 @@ export default function Productos() {
       viscosidad_max: form.viscosidad_max !== '' ? Number(form.viscosidad_max) : null,
       subcategoria_mp: form.tipo === 'materia_prima' && form.subcategoria_mp ? form.subcategoria_mp : null,
       subcategoria_me: form.tipo === 'material_embalaje' && form.subcategoria_me ? form.subcategoria_me : null,
+      material_embalaje: form.tipo === 'material_embalaje' && form.material_embalaje ? form.material_embalaje : null,
+      peso_material_vacio_kg: form.tipo === 'material_embalaje' && form.peso_material_vacio_kg !== ''
+        ? Number(form.peso_material_vacio_kg) : null,
       nombre_comercial: (form.tipo === 'producto_fabricado' || form.tipo === 'producto_envasado')
         ? (form.nombre_comercial.trim() || null) : null,
       compartido_alilo: form.tipo !== 'material_embalaje' ? form.compartido_alilo : false,
@@ -558,6 +574,19 @@ export default function Productos() {
     cadDefault.setFullYear(cadDefault.getFullYear() + 1);
     setStockCaducidad(cadDefault.toISOString().slice(0, 10));
     setStockUbicacion('');
+    // Default del tanque = el más usado en lotes activos de esta MP (si hay).
+    // Si la MP ya está en T2, al añadir stock nuevo proponemos T2.
+    try {
+      const { data: lotesPrev } = await lotesApi.listar({ producto_id: p.id, estado: 'aprobado' });
+      const conteo: Record<number, number> = {};
+      for (const lt of (lotesPrev as any[])) {
+        if (parseFloat(lt.cantidad_actual) > 0 && lt.tanque != null) {
+          conteo[lt.tanque] = (conteo[lt.tanque] ?? 0) + 1;
+        }
+      }
+      const top = Object.entries(conteo).sort((a, b) => b[1] - a[1])[0];
+      setStockTanque(top ? Number(top[0]) : null);
+    } catch { setStockTanque(null); }
     setStockPrecio(p.precio_unitario ?? '');
     setStockUnidadPrecio(p.unidad_medida ?? 'kg');
     setStockDivisa('EUR'); setStockTasaEur(1); setStockTasaAuto(true);
@@ -679,6 +708,7 @@ export default function Productos() {
         unidad_precio:     stockPrecio && stockUnidadPrecio ? stockUnidadPrecio : undefined,
         // Porte también convertido a EUR
         porte:             stockPorte ? Number(stockPorte) * stockPorteTasaEur : 0,
+        tanque:            stockTanque,
         solidos:    stockSolidos    !== '' ? Number(stockSolidos)    : null,
         ph:         stockPh         !== '' ? Number(stockPh)         : null,
         viscosidad: stockViscosidad !== '' ? Number(stockViscosidad) : null,
@@ -1353,6 +1383,7 @@ export default function Productos() {
                             <tr className="text-gray-400">
                               <th className="text-left py-1 font-medium">Lote</th>
                               <th className="text-left py-1 font-medium">Ref. proveedor</th>
+                              <th className="text-center py-1 font-medium" title="Tanque físico donde está el lote (T1-T4)">Tanque</th>
                               <th className="text-right py-1 font-medium">Entrada</th>
                               <th className="text-right py-1 font-medium">Restante</th>
                               {isAdmin && <th className="text-right py-1 font-medium">Precio</th>}
@@ -1378,6 +1409,16 @@ export default function Productos() {
                                 <tr key={li} className={agotado ? 'opacity-25' : 'hover:bg-gray-100/50'}>
                                   <td className={clsx('py-1.5 font-mono', agotado ? 'text-gray-400 line-through' : 'text-gray-700')}>{l.lote_interno}</td>
                                   <td className={clsx('py-1.5 font-mono text-xs', agotado ? 'text-gray-300' : 'text-gray-500')}>{l.lote_proveedor || '—'}</td>
+                                  <td className="py-1.5 text-center">
+                                    {(() => {
+                                      const t = (ll.tanque ?? null) as number | null;
+                                      if (t == null) return <span className="text-gray-300 text-[10px]">—</span>;
+                                      const c = TANQUE_COLORES[t];
+                                      return (
+                                        <span className={clsx('inline-flex items-center justify-center rounded-md w-7 h-6 text-[10px] font-black tabular-nums', c?.bg, c?.text, c?.ring && `ring-1 ${c.ring}`)}>T{t}</span>
+                                      );
+                                    })()}
+                                  </td>
                                   <td className="py-1.5 text-right tabular-nums text-gray-400">{inicial.toLocaleString('es-ES', { maximumFractionDigits: 2 })}</td>
                                   <td className="py-1.5 text-right tabular-nums">
                                     <span className={clsx('font-semibold', agotado ? 'text-gray-300' : gastado ? 'text-amber-600' : 'text-gray-800')}>
@@ -1427,6 +1468,7 @@ export default function Productos() {
                             <tr className="border-t border-gray-200 font-semibold text-gray-800">
                               <td className="py-1.5">En stock</td>
                               <td></td>
+                              <td></td>{/* tanque */}
                               <td></td>
                               <td className="py-1.5 text-right tabular-nums">{expandedLotes.filter(l => parseFloat(l.cantidad_actual) > 0).reduce((s, l) => s + parseFloat(l.cantidad_actual), 0).toLocaleString('es-ES', { maximumFractionDigits: 2 })} {p.unidad_medida}</td>
                               {isAdmin && <td></td>}
@@ -1645,6 +1687,40 @@ export default function Productos() {
                 />
               </FormField>
             </div>
+
+            {/* Tanque físico (sólo MPs líquidas — pero lo mostramos siempre, es opcional). */}
+            <FormField label="Tanque físico" hint="Asigna en qué tanque (1-4) está el lote. Opcional.">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[1, 2, 3, 4].map(n => {
+                  const activo = stockTanque === n;
+                  const c = TANQUE_COLORES[n];
+                  return (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setStockTanque(activo ? null : n)}
+                      title={`Tanque ${n}`}
+                      className={
+                        activo
+                          ? `rounded-lg ${c.bg} ${c.text} ring-2 ${c.ring} w-11 h-11 font-black text-sm shadow-md tabular-nums`
+                          : 'rounded-lg bg-white text-gray-500 border border-gray-200 hover:border-gray-400 w-11 h-11 font-bold text-sm transition-all tabular-nums'
+                      }
+                    >
+                      T{n}
+                    </button>
+                  );
+                })}
+                {stockTanque != null && (
+                  <button
+                    type="button"
+                    onClick={() => setStockTanque(null)}
+                    className="ml-1 text-[10px] text-gray-400 hover:text-loga-red"
+                  >
+                    Sin tanque
+                  </button>
+                )}
+              </div>
+            </FormField>
 
             {/* Precio de compra — solo admin. Operario añade stock sin tocar precio. */}
             {isAdmin && (
@@ -2169,6 +2245,30 @@ export default function Productos() {
                     ⚠ Selecciona el tipo arriba para ver el campo correcto.
                   </p>
                 )}
+
+                {/* ── Material del embalaje + peso vacío ── */}
+                {/* Permite saber cuánto plástico/cartón/madera se consume. */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-amber-200/60">
+                  <FormField label="Material" hint="¿De qué está hecho? Editable en Configuración → Materiales.">
+                    <Select
+                      value={form.material_embalaje}
+                      onChange={(e) => setForm((f) => ({ ...f, material_embalaje: e.target.value }))}
+                    >
+                      <option value="">— Sin definir —</option>
+                      {tiposMaterial.map((t) => (
+                        <option key={t.id} value={t.nombre}>{t.nombre}</option>
+                      ))}
+                    </Select>
+                  </FormField>
+                  <FormField label="Peso del envase vacío (kg)" hint="Tara del envase sin contenido. Suma del consumo total de material.">
+                    <Input
+                      type="number" min="0" step="0.001"
+                      value={form.peso_material_vacio_kg}
+                      onChange={(e) => setForm((f) => ({ ...f, peso_material_vacio_kg: e.target.value }))}
+                      placeholder="Ej: 0.05 (bote 50g vacío)"
+                    />
+                  </FormField>
+                </div>
               </div>
             );
           })()}

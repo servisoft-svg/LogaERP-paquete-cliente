@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  LayoutDashboard, Factory, Layers, Bell, Boxes,
+  LayoutDashboard, Factory, Layers, Bell, Boxes, Beaker,
   Package, ChefHat, Truck, Users, ShoppingBag, BarChart3, Settings, LogOut, MoreHorizontal, X, Zap,
   Moon, Sun, ClipboardCheck,
 } from 'lucide-react';
@@ -17,6 +17,7 @@ const LINKS = [
   { to: '/productos',      label: 'Productos',   icon: Package          },
   { to: '/recetas',        label: 'Fórmulas',     icon: ChefHat          },
   { to: '/produccion',     label: 'Produccion',  icon: Factory          },
+  { to: '/escandallo',     label: 'Escandallo',  icon: Beaker           },
   { to: '/envasado',       label: 'Envasado',    icon: Boxes            },
   { to: '/lotes',          label: 'Lotes',       icon: Layers           },
   { to: '/proveedores',    label: 'Proveedores', icon: Truck            },

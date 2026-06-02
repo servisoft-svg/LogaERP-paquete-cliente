@@ -94,7 +94,14 @@ export default function ControlCalidad() {
       setRegistros([]);
     }
     try { const r = await controlesCalidadApi.lotesEstado(); setLotesEstado(r.data as typeof lotesEstado); } catch { setLotesEstado([]); }
-    try { const r = await productosApi.listar({ tipo: 'materia_prima' }); setProductos(r.data as Producto[]); } catch { setProductos([]); }
+    try {
+      const r = await productosApi.listar({ tipo: 'materia_prima' });
+      // Analítico MP solo aplica a emulsiones (acepta "Emulsion" sin tilde).
+      const emulsionSolo = (r.data as Producto[]).filter(p =>
+        /emulsi[oó]n/i.test((p as any).subcategoria_mp ?? '')
+      );
+      setProductos(emulsionSolo);
+    } catch { setProductos([]); }
     setLoading(false);
   }, [tab]);
 

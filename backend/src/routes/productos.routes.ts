@@ -192,6 +192,7 @@ router.post('/', adminOnly, async (req, res) => {
       peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses,
       numero_cas, subcategoria_mp, subcategoria_me, es_aditivo, confirmacion_msg,
       nombre_comercial, compartido_alilo, subcategoria_pf, codigo_alilo,
+      material_embalaje, peso_material_vacio_kg,
     } = req.body;
     const codigoAliloNorm = (codigo_alilo != null && String(codigo_alilo).trim() !== '')
       ? String(codigo_alilo).trim().toUpperCase().slice(0, 50) : null;
@@ -229,16 +230,22 @@ router.post('/', adminOnly, async (req, res) => {
 
     // Bug previo: el POST omitía peso_unitario_kg, unidades_por_envase, peso_plastico_kg
     // y caducidad_meses → al crear envase nuevo se perdían sus datos. Añadidos aquí.
+    const matEmbNorm = (tipo === 'material_embalaje' && material_embalaje != null && String(material_embalaje).trim() !== '')
+      ? String(material_embalaje).trim().slice(0, 50) : null;
+    const pesoMatNorm = (tipo === 'material_embalaje' && peso_material_vacio_kg != null && peso_material_vacio_kg !== '')
+      ? Number(peso_material_vacio_kg).toFixed(6) : null;
     const { rows: [prod] } = await pool.query(
       `INSERT INTO productos
          (codigo, nombre, descripcion, tipo, unidad_medida,
           stock_minimo, stock_maximo, precio_unitario, precio_venta, proveedor_id,
           peso_unitario_kg, unidades_por_envase, peso_plastico_kg, caducidad_meses, numero_cas,
           subcategoria_mp, es_aditivo, confirmacion_msg, subcategoria_me, nombre_comercial,
-          compartido_alilo, subcategoria_pf, codigo_alilo)
+          compartido_alilo, subcategoria_pf, codigo_alilo,
+          material_embalaje, peso_material_vacio_kg)
        VALUES ($1,$2,$3,$4,$5,$6::NUMERIC,$7::NUMERIC,$8::NUMERIC,$9::NUMERIC,$10,
                $11::NUMERIC,$12::INTEGER,$13::NUMERIC,$14::INTEGER,$15,
-               $16,$17,$18,$19,$20,$21,$22,$23)
+               $16,$17,$18,$19,$20,$21,$22,$23,
+               $24,$25::NUMERIC)
        RETURNING *`,
       [
         codigo.trim().toUpperCase(),
@@ -268,6 +275,8 @@ router.post('/', adminOnly, async (req, res) => {
         compartido_alilo === true || compartido_alilo === 'true',
         subcatPfNorm,
         codigoAliloNorm,
+        matEmbNorm,
+        pesoMatNorm,
       ]
     );
     invalidarCacheFinanzas(); // nuevo producto puede afectar valoración inventario
@@ -307,6 +316,8 @@ router.put('/:id', adminOnly, async (req, res) => {
       confirmacion_msg,
       // Granel asociado al producto envasado (cola que lleva dentro)
       granel_id,
+      // Material del embalaje (Plástico/Cartón/…) + peso vacío del material
+      material_embalaje, peso_material_vacio_kg,
       reset_coste_auto, // <-- nuevo: si true, vuelve a modo auto (recalcula desde receta)
     } = req.body;
 
@@ -399,7 +410,9 @@ router.put('/:id', adminOnly, async (req, res) => {
          nombre_comercial = CASE WHEN $32::BOOLEAN THEN $33::VARCHAR ELSE nombre_comercial END,
          compartido_alilo = COALESCE($34::BOOLEAN, compartido_alilo),
          subcategoria_pf  = CASE WHEN $35::BOOLEAN THEN $36::VARCHAR ELSE subcategoria_pf END,
-         codigo_alilo     = CASE WHEN $37::BOOLEAN THEN $38::VARCHAR ELSE codigo_alilo END
+         codigo_alilo     = CASE WHEN $37::BOOLEAN THEN $38::VARCHAR ELSE codigo_alilo END,
+         material_embalaje      = CASE WHEN $39::BOOLEAN THEN $40::VARCHAR ELSE material_embalaje END,
+         peso_material_vacio_kg = CASE WHEN $41::BOOLEAN THEN $42::NUMERIC ELSE peso_material_vacio_kg END
        WHERE id = $11
        RETURNING *`,
       [
@@ -455,6 +468,13 @@ router.put('/:id', adminOnly, async (req, res) => {
         codigo_alilo != null && String(codigo_alilo).trim() !== ''
           ? String(codigo_alilo).trim().toUpperCase().slice(0, 50)
           : null,
+        material_embalaje !== undefined,
+        material_embalaje != null && String(material_embalaje).trim() !== ''
+          ? String(material_embalaje).trim().slice(0, 50)
+          : null,
+        peso_material_vacio_kg !== undefined,
+        peso_material_vacio_kg != null && peso_material_vacio_kg !== ''
+          ? Number(peso_material_vacio_kg).toFixed(6) : null,
       ]
     );
 

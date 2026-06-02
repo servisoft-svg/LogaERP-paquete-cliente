@@ -887,8 +887,17 @@ class AutomatizacionesService {
         detalle: { accion: 'auto_completar_pedido', pedido: pedidoNumero ?? pedidoId },
       });
 
-      // Enviar albarán automáticamente si toggle ON
+      // Enviar albarán automáticamente al cliente si toggle ON
       await this.autoEmailAlbaran(pedidoId);
+      // Copia de archivo independiente del toggle anterior: si
+      // email_copia_albaranes está configurado, se envía SIEMPRE al pasar a
+      // completado. Idempotente — un solo envío por pedido.
+      try {
+        const { pedidoAlbaranService } = await import('./pedido-albaran.service.js');
+        await pedidoAlbaranService.enviarCopiaArchivoSiProcede(pedidoId);
+      } catch (e) {
+        console.error('[autoCompletarPedido.copia-archivo]', e);
+      }
     } catch (err) {
       console.error('[autoCompletarPedido]', err);
       await this.log({

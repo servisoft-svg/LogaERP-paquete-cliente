@@ -1,6 +1,6 @@
 {
   "name": "loga-erp-frontend",
-  "version": "1.0.13",
+  "version": "1.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

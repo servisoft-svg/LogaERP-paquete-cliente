@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { Plus, Pencil, Trash2, Users, Mail, Phone, MapPin, Search } from 'lucide-react';
+import { Plus, Pencil, Users, Mail, Phone, MapPin, Search, Archive, ArchiveRestore } from 'lucide-react';
+import clsx from 'clsx';
 import { clientesApi } from '../api/client';
 import type { Cliente } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
@@ -9,22 +10,27 @@ import ConfirmModal from '../components/ConfirmModal';
 import { FormField, Input, Textarea } from '../components/FormField';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
+import { cpAProvincia } from '../lib/provincia';
+
+type Tab = 'activos' | 'archivados';
 
 export default function Clientes() {
   const [clientes, setClientes]       = useState<Cliente[]>([]);
   const [loading, setLoading]         = useState(true);
   const [busqueda, setBusqueda]       = useState('');
+  const [tab, setTab]                 = useState<Tab>('activos');
   const [modalOpen, setModalOpen]     = useState(false);
   const [editando, setEditando]       = useState<Cliente | null>(null);
-  const [form, setForm]               = useState({ nombre: '', email: '', telefono: '', direccion: '', nif: '', notas: '' });
+  const [form, setForm]               = useState({ nombre: '', email: '', telefono: '', direccion: '', codigo_postal: '', nif: '', notas: '' });
   const [saving, setSaving]           = useState(false);
   const [error, setError]             = useState('');
-  const [confirmElim, setConfirmElim] = useState<Cliente | null>(null);
-  const [deleting, setDeleting]       = useState(false);
+  const [confirmArchivar, setConfirmArchivar] = useState<Cliente | null>(null);
+  const [archivando, setArchivando]   = useState(false);
 
   const cargar = useCallback(async () => {
     try {
-      const { data } = await clientesApi.listar();
+      // Cargamos TODOS (activos + archivados) en una sola query; filtramos en cliente
+      const { data } = await clientesApi.listar({ archivados: 'all' });
       setClientes(data as Cliente[]);
     } catch { /* silencioso */ }
     finally { setLoading(false); }
@@ -34,7 +40,7 @@ export default function Clientes() {
 
   const abrirNuevo = () => {
     setEditando(null);
-    setForm({ nombre: '', email: '', telefono: '', direccion: '', nif: '', notas: '' });
+    setForm({ nombre: '', email: '', telefono: '', direccion: '', codigo_postal: '', nif: '', notas: '' });
     setError('');
     setModalOpen(true);
   };
@@ -42,20 +48,27 @@ export default function Clientes() {
   const abrirEditar = (c: Cliente) => {
     setEditando(c);
     setForm({
-      nombre:    c.nombre,
-      email:     c.email ?? '',
-      telefono:  c.telefono ?? '',
-      direccion: c.direccion ?? '',
-      nif:       c.nif ?? '',
-      notas:     c.notas ?? '',
+      nombre:        c.nombre,
+      email:         c.email ?? '',
+      telefono:      c.telefono ?? '',
+      direccion:     c.direccion ?? '',
+      codigo_postal: c.codigo_postal ?? '',
+      nif:           c.nif ?? '',
+      notas:         c.notas ?? '',
     });
     setError('');
     setModalOpen(true);
   };
 
+  const provinciaForm = cpAProvincia(form.codigo_postal);
+
   const handleGuardar = async () => {
     if (!form.nombre.trim()) {
       setError('El nombre es obligatorio');
+      return;
+    }
+    if (form.codigo_postal.trim() && !/^\d{5}$/.test(form.codigo_postal.trim())) {
+      setError('El código postal debe tener 5 dígitos');
       return;
     }
     setSaving(true);
@@ -81,7 +94,8 @@ export default function Clientes() {
             <ToastField label="Nivel" value={d.nivel ? String(d.nivel).toUpperCase() : undefined} />
             <ToastField label="Email" value={d.email} span={2} />
             <ToastField label="Teléfono" value={d.telefono} />
-            <ToastField label="Dirección" value={d.direccion} />
+            <ToastField label="CP" value={d.codigo_postal ? `${d.codigo_postal} · ${cpAProvincia(d.codigo_postal) ?? '—'}` : undefined} />
+            <ToastField label="Dirección" value={d.direccion} span={2} />
           </ToastBlock>
         ),
         error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
@@ -96,30 +110,55 @@ export default function Clientes() {
     }
   };
 
-  const handleEliminar = async () => {
-    if (!confirmElim) return;
-    setDeleting(true);
-    const c = confirmElim;
+  const handleArchivar = async () => {
+    if (!confirmArchivar) return;
+    setArchivando(true);
+    const c = confirmArchivar;
     try {
-      await notify.promise(clientesApi.eliminar(confirmElim.id), {
-        loading: 'Desactivando…',
-        success: 'Cliente desactivado',
+      await notify.promise(clientesApi.archivar(c.id), {
+        loading: 'Archivando…',
+        success: 'Cliente archivado',
         successDesc: (
           <ToastBlock title={c.nombre}>
             <ToastField label="NIF/CIF" value={c.nif} />
-            <ToastField label="Teléfono" value={c.telefono} />
             <ToastField label="Email" value={c.email} span={2} />
+            <ToastField
+              label="Disponible en"
+              value="Pestaña Archivados (se puede recuperar)"
+              span={2}
+            />
           </ToastBlock>
         ),
-        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo desactivar',
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo archivar',
       });
-      setConfirmElim(null);
+      setConfirmArchivar(null);
       cargar();
     } catch { /* notificado */ }
-    finally { setDeleting(false); }
+    finally { setArchivando(false); }
   };
 
-  const filtrados = clientes.filter((c) => {
+  const handleRecuperar = async (c: Cliente) => {
+    try {
+      await notify.promise(clientesApi.recuperar(c.id), {
+        loading: 'Recuperando…',
+        success: 'Cliente recuperado',
+        successDesc: (
+          <ToastBlock title={c.nombre}>
+            <ToastField label="NIF/CIF" value={c.nif} />
+            <ToastField label="Estado" value="Activo · disponible para nuevos pedidos" span={2} />
+          </ToastBlock>
+        ),
+        error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'No se pudo recuperar',
+      });
+      cargar();
+    } catch { /* notificado */ }
+  };
+
+  const activos = clientes.filter(c => !c.archivado_at);
+  const archivados = clientes.filter(c => !!c.archivado_at);
+  const tabClientes = tab === 'activos' ? activos : archivados;
+
+  const filtrados = tabClientes.filter((c) => {
     if (!busqueda.trim()) return true;
     const q = busqueda.toLowerCase();
     return (
@@ -127,7 +166,13 @@ export default function Clientes() {
       (c.email?.toLowerCase().includes(q)) ||
       (c.nif?.toLowerCase().includes(q))
     );
-  }).sort((a, b) => parseFloat(b.consumo_total ?? '0') - parseFloat(a.consumo_total ?? '0'));
+  }).sort((a, b) => {
+    if (tab === 'archivados') {
+      // ordenar por archivado_at DESC (los más recientemente archivados arriba)
+      return (b.archivado_at ?? '').localeCompare(a.archivado_at ?? '');
+    }
+    return parseFloat(b.consumo_total ?? '0') - parseFloat(a.consumo_total ?? '0');
+  });
 
   if (loading) {
     return (
@@ -139,10 +184,15 @@ export default function Clientes() {
 
   return (
     <div className="animate-fade-in space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-lg font-bold text-gray-900">Clientes</h1>
-          <p className="text-xs text-gray-400 mt-0.5">{clientes.length} cliente{clientes.length !== 1 ? 's' : ''}</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {activos.length} activo{activos.length !== 1 ? 's' : ''}
+            {archivados.length > 0 && (
+              <span className="ml-1.5 text-gray-300">· {archivados.length} archivado{archivados.length !== 1 ? 's' : ''}</span>
+            )}
+          </p>
         </div>
         <button
           onClick={abrirNuevo}
@@ -152,16 +202,55 @@ export default function Clientes() {
         </button>
       </div>
 
-      {/* Barra de busqueda */}
-      <div className="relative">
-        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-        <Input
-          value={busqueda}
-          onChange={(e) => setBusqueda(e.target.value)}
-          placeholder="Buscar por nombre, email o NIF..."
-          className="pl-9 w-full sm:w-80"
-        />
+      {/* Tabs + búsqueda */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+          <button
+            onClick={() => setTab('activos')}
+            className={clsx(
+              'rounded-md px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 transition-colors',
+              tab === 'activos' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <Users size={12} /> Activos
+            <span className={clsx('inline-flex min-w-[20px] items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-mono',
+              tab === 'activos' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-200 text-gray-500')}>
+              {activos.length}
+            </span>
+          </button>
+          <button
+            onClick={() => setTab('archivados')}
+            className={clsx(
+              'rounded-md px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 transition-colors',
+              tab === 'archivados' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <Archive size={12} /> Archivados
+            <span className={clsx('inline-flex min-w-[20px] items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-mono',
+              tab === 'archivados' ? 'bg-amber-100 text-amber-700' : 'bg-gray-200 text-gray-500')}>
+              {archivados.length}
+            </span>
+          </button>
+        </div>
+        <div className="relative flex-1 max-w-md">
+          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <Input
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder={tab === 'archivados' ? 'Buscar en archivados…' : 'Buscar por nombre, email o NIF…'}
+            className="pl-9 w-full"
+          />
+        </div>
       </div>
+
+      {tab === 'archivados' && (
+        <div className="rounded-lg bg-amber-50/60 border border-amber-200 px-3 py-2 text-[11px] text-amber-800 flex items-start gap-2">
+          <Archive size={12} className="shrink-0 mt-0.5" />
+          <span>
+            <b>Clientes archivados:</b> no aparecen al crear pedidos. Se archivan automáticamente tras <b>24 meses sin pedido</b>, o manualmente desde la pestaña Activos. Vuelven solos a la lista activa cuando les creas un pedido nuevo, o usa el botón <b>Recuperar</b>.
+          </span>
+        </div>
+      )}
 
       {/* Cards mobile + desktop table */}
       {/* Mobile cards */}
@@ -199,16 +288,28 @@ export default function Clientes() {
               <div className="flex gap-1 shrink-0">
                 <button
                   onClick={() => abrirEditar(c)}
+                  title="Editar"
                   className="rounded-lg p-1.5 text-gray-400 hover:bg-blue-50 hover:text-blue-600 transition-colors"
                 >
                   <Pencil size={14} />
                 </button>
-                <button
-                  onClick={() => setConfirmElim(c)}
-                  className="rounded-lg p-1.5 text-gray-400 hover:bg-red-50 hover:text-loga-red transition-colors"
-                >
-                  <Trash2 size={14} />
-                </button>
+                {c.archivado_at ? (
+                  <button
+                    onClick={() => handleRecuperar(c)}
+                    title="Recuperar (volver a activos)"
+                    className="rounded-lg p-1.5 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 transition-colors"
+                  >
+                    <ArchiveRestore size={14} />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setConfirmArchivar(c)}
+                    title="Archivar (no se borra, se puede recuperar)"
+                    className="rounded-lg p-1.5 text-gray-400 hover:bg-amber-50 hover:text-amber-700 transition-colors"
+                  >
+                    <Archive size={14} />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -227,10 +328,18 @@ export default function Clientes() {
                   <span>{c.telefono}</span>
                 </div>
               )}
-              {c.direccion && (
+              {(c.direccion || c.codigo_postal) && (
                 <div className="flex items-start gap-2">
                   <MapPin size={12} className="text-gray-400 shrink-0 mt-0.5" />
-                  <span className="line-clamp-2">{c.direccion}</span>
+                  <span className="line-clamp-2">
+                    {c.codigo_postal && (
+                      <span className="font-mono text-gray-700">{c.codigo_postal}</span>
+                    )}
+                    {c.codigo_postal && cpAProvincia(c.codigo_postal) && (
+                      <span className="ml-1 text-indigo-600 font-semibold">{cpAProvincia(c.codigo_postal)}</span>
+                    )}
+                    {c.direccion && <span className="ml-1">{c.codigo_postal ? '· ' : ''}{c.direccion}</span>}
+                  </span>
                 </div>
               )}
             </div>
@@ -243,7 +352,7 @@ export default function Clientes() {
         <table className="min-w-full divide-y divide-gray-100 text-sm">
           <thead className="bg-gray-50">
             <tr>
-              {['Nombre', 'Consumo', 'Email', 'Telefono', 'NIF', 'Acciones'].map((h) => (
+              {['Nombre', 'Consumo', 'Email', 'Telefono', 'CP / Provincia', 'NIF', 'Acciones'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
                   {h}
                 </th>
@@ -285,28 +394,50 @@ export default function Clientes() {
                   )}
                 </td>
                 <td className="px-4 py-3 text-xs text-gray-600">{c.telefono || <span className="text-gray-300">--</span>}</td>
+                <td className="px-4 py-3 text-xs">
+                  {c.codigo_postal ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-gray-700">{c.codigo_postal}</span>
+                      {cpAProvincia(c.codigo_postal) && (
+                        <span className="rounded bg-indigo-50 text-indigo-700 px-1.5 py-0.5 text-[10px] font-semibold">{cpAProvincia(c.codigo_postal)}</span>
+                      )}
+                    </div>
+                  ) : <span className="text-gray-300">--</span>}
+                </td>
                 <td className="px-4 py-3 text-xs text-gray-600 font-mono">{c.nif || <span className="text-gray-300">--</span>}</td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1.5">
                     <button
                       onClick={() => abrirEditar(c)}
+                      title="Editar"
                       className="rounded-lg p-1.5 text-gray-400 hover:bg-blue-50 hover:text-blue-600 transition-colors"
                     >
                       <Pencil size={14} />
                     </button>
-                    <button
-                      onClick={() => setConfirmElim(c)}
-                      className="rounded-lg p-1.5 text-gray-400 hover:bg-red-50 hover:text-loga-red transition-colors"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    {c.archivado_at ? (
+                      <button
+                        onClick={() => handleRecuperar(c)}
+                        title="Recuperar (volver a activos)"
+                        className="rounded-lg p-1.5 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                      >
+                        <ArchiveRestore size={14} /> Recuperar
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmArchivar(c)}
+                        title="Archivar (no se borra, se puede recuperar)"
+                        className="rounded-lg p-1.5 text-gray-400 hover:bg-amber-50 hover:text-amber-700 transition-colors"
+                      >
+                        <Archive size={14} />
+                      </button>
+                    )}
                   </div>
                 </td>
               </motion.tr>
             ))}
             {filtrados.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-12 text-center">
+                <td colSpan={7} className="px-4 py-12 text-center">
                   <Users size={32} className="mx-auto mb-2 text-gray-200" />
                   <p className="text-sm text-gray-400">
                     {busqueda.trim() ? 'Sin resultados para la busqueda' : 'No hay clientes. Crea el primero.'}
@@ -371,14 +502,32 @@ export default function Clientes() {
             </FormField>
           </div>
 
-          <FormField label="Direccion">
-            <Textarea
-              rows={2}
-              value={form.direccion}
-              onChange={(e) => setForm((f) => ({ ...f, direccion: e.target.value }))}
-              placeholder="Calle, ciudad..."
-            />
-          </FormField>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <FormField label="Código postal">
+              <Input
+                value={form.codigo_postal}
+                onChange={(e) => setForm((f) => ({ ...f, codigo_postal: e.target.value.replace(/\D/g, '').slice(0, 5) }))}
+                placeholder="28001"
+                inputMode="numeric"
+                maxLength={5}
+              />
+              {form.codigo_postal.length === 5 && (
+                <p className={`mt-1 text-[10px] font-medium ${provinciaForm ? 'text-emerald-600' : 'text-loga-red'}`}>
+                  {provinciaForm ? `→ ${provinciaForm}` : 'CP no reconocido'}
+                </p>
+              )}
+            </FormField>
+            <div className="sm:col-span-2">
+              <FormField label="Dirección">
+                <Textarea
+                  rows={2}
+                  value={form.direccion}
+                  onChange={(e) => setForm((f) => ({ ...f, direccion: e.target.value }))}
+                  placeholder="Calle, ciudad..."
+                />
+              </FormField>
+            </div>
+          </div>
 
           <FormField label="Notas">
             <Textarea
@@ -413,15 +562,15 @@ export default function Clientes() {
         </div>
       </Modal>
 
-      {/* Confirm delete */}
+      {/* Confirm archivar */}
       <ConfirmModal
-        open={!!confirmElim}
-        title="Desactivar cliente"
-        message={`Se desactivara el cliente "${confirmElim?.nombre}". Podra reactivarlo mas adelante.`}
-        confirmText="Desactivar"
-        loading={deleting}
-        onConfirm={handleEliminar}
-        onCancel={() => setConfirmElim(null)}
+        open={!!confirmArchivar}
+        title="Archivar cliente"
+        message={`Se archivará "${confirmArchivar?.nombre}". Dejará de aparecer al crear pedidos, pero el histórico se conserva y podrás recuperarlo en cualquier momento desde la pestaña Archivados.`}
+        confirmText="Archivar"
+        loading={archivando}
+        onConfirm={handleArchivar}
+        onCancel={() => setConfirmArchivar(null)}
       />
     </div>
   );

@@ -8,11 +8,15 @@ export interface Cliente {
   email?: string;
   telefono?: string;
   direccion?: string;
+  codigo_postal?: string | null;
   nif?: string;
   notas?: string;
   activo: boolean;
   consumo_total?: string;
   nivel?: 'oro' | 'plata' | 'bronce' | null;
+  archivado_at?: string | null;
+  archivado_motivo?: string | null;
+  archivado_por_id?: string | null;
   created_at: string;
 }
 
@@ -74,6 +78,8 @@ export interface Producto {
   viscosidad_max?: string | null;
   // Sub-categoría libre para materias primas (resina, agua, otros…)
   subcategoria_mp?: string | null;
+  // Origen del producto (solo producto_fabricado / producto_envasado)
+  subcategoria_pf?: 'propia' | 'terceros' | null;
   // Flag: materia prima usada como aditivo
   es_aditivo?: boolean;
   // Mensaje opcional de confirmación en fabricación (ej: "verifica viscosidad")
@@ -118,6 +124,9 @@ export interface Lote {
   unidad_medida: string;
   observaciones?: string;
   precio_compra?: string | null;
+  porte?: string | null;
+  // Tanque físico donde reside el lote (1..4). NULL = no aplica (sólidos, embalaje).
+  tanque?: number | null;
   created_at?: string;
   // Valores físico-químicos medidos del lote
   solidos?: string | null;
@@ -193,6 +202,7 @@ export interface OrdenProduccion {
   receta_id: string;
   receta_nombre?: string;
   producto_nombre?: string;
+  lote_producido_codigo?: string | null;
   cantidad_planificada: string;
   cantidad_producida: string;
   cantidad_real_producida?: string;

@@ -56,7 +56,7 @@ class ProduccionService {
   async confirmarOrden(
     ordenId: string,
     usuarioId?: string,
-    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string; ingredientes_ajustados?: { materia_prima_id: string; cantidad: number }[] }
+    extra?: { ph?: number; foto_url?: string; foto_urls?: string[]; solidos?: number; viscosidad?: number; fecha_fabricacion?: string; cantidad_real_producida?: number; qc_fuera_de_rango?: boolean; registro_limpieza?: string; nota_qc?: string; fecha_inicio_cliente?: string; ingredientes_ajustados?: { materia_prima_id: string; cantidad: number }[]; lotes_override?: { materia_prima_id: string; lotes: { lote_id: string; cantidad: number }[] }[] }
   ): Promise<ResultadoConfirmacion> {
     // Closure variables para disparar automatizaciones tras COMMIT
     let prodFinalId: string | null = null;
@@ -179,6 +179,12 @@ class ProduccionService {
       for (const o of (extra?.ingredientes_ajustados ?? [])) {
         overrideMap.set(o.materia_prima_id, o.cantidad);
       }
+      // Mapa de override por lote: materia_prima_id → [{lote_id, cantidad}].
+      // Si existe, se usan esos lotes en lugar del FIFO automático.
+      const lotesOverrideMap = new Map<string, { lote_id: string; cantidad: number }[]>();
+      for (const o of (extra?.lotes_override ?? [])) {
+        lotesOverrideMap.set(o.materia_prima_id, o.lotes);
+      }
 
       // Dosificaciones parciales ya efectuadas (descontaron stock al instante
       // vía /produccion/:id/dosificar). Para evitar doble descuento, se resta
@@ -205,21 +211,49 @@ class ProduccionService {
           continue;
         }
 
-        // Lotes disponibles FIFO (excluir cantidades reservadas)
-        const { rows: lotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(
-          `SELECT l.id, l.cantidad_actual, l.precio_compra,
-             l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS cantidad_disponible,
-             l.fecha_caducidad, l.fecha_entrada
-           FROM lotes l
-           WHERE l.producto_id = $1
-             AND l.estado = 'aprobado'
-             AND l.cantidad_actual > 0
-           ORDER BY
-             l.fecha_caducidad ASC NULLS LAST,
-             l.fecha_entrada   ASC
-           FOR UPDATE`,
-          [ing.materia_prima_id]
-        );
+        // Lotes a usar: si hay override manual, respeta el orden y cantidades
+        // exactas; si no, FIFO (FEFO) automático sobre lotes aprobados.
+        const override = lotesOverrideMap.get(ing.materia_prima_id);
+        let lotes: Array<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>;
+        if (override && override.length > 0) {
+          const overrideLoteIds = override.map(o => o.lote_id);
+          const { rows: rawLotes } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(
+            `SELECT l.id, l.cantidad_actual, l.precio_compra,
+               l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS cantidad_disponible,
+               l.fecha_caducidad, l.fecha_entrada
+             FROM lotes l
+             WHERE l.id = ANY($1::UUID[])
+               AND l.producto_id = $2
+               AND l.estado = 'aprobado'
+               AND l.cantidad_actual > 0
+             FOR UPDATE`,
+            [overrideLoteIds, ing.materia_prima_id]
+          );
+          // Mantener orden + cantidad solicitada del override
+          lotes = override
+            .map(o => {
+              const raw = rawLotes.find(r => r.id === o.lote_id);
+              if (!raw) return null;
+              return { ...raw, cantidad_disponible: String(Math.min(toNum(raw.cantidad_disponible ?? raw.cantidad_actual), o.cantidad)) };
+            })
+            .filter((x): x is LoteFIFO & { precio_compra: string; cantidad_disponible: string } => x !== null);
+        } else {
+          const { rows } = await client.query<LoteFIFO & { precio_compra: string; cantidad_disponible: string }>(
+            `SELECT l.id, l.cantidad_actual, l.precio_compra,
+               l.cantidad_actual - COALESCE((SELECT SUM(r.cantidad) FROM reservas_stock r WHERE r.lote_id = l.id AND r.estado = 'activa'), 0) AS cantidad_disponible,
+               l.fecha_caducidad, l.fecha_entrada
+             FROM lotes l
+             WHERE l.producto_id = $1
+               AND l.estado = 'aprobado'
+               AND l.cantidad_actual > 0
+             ORDER BY
+               l.fecha_caducidad ASC NULLS LAST,
+               l.fecha_entrada   ASC
+             FOR UPDATE`,
+            [ing.materia_prima_id]
+          );
+          lotes = rows;
+        }
 
         const totalDisponible = lotes.reduce((s, l) => s + Math.max(0, toNum(l.cantidad_disponible ?? l.cantidad_actual)), 0);
         if (totalDisponible < cantidadReal) {
@@ -278,12 +312,10 @@ class ProduccionService {
           );
         }
 
-        // Single stock update per ingredient (instead of per-lote)
-        const finalStock = stockMap.get(ing.materia_prima_id) ?? 0;
-        await client.query(
-          `UPDATE productos SET stock_actual = $1::NUMERIC WHERE id = $2`,
-          [finalStock.toFixed(6), ing.materia_prima_id]
-        );
+        // No UPDATE manual a productos.stock_actual: cada UPDATE lotes de
+        // arriba ya disparó trigger 025 que recalcula stock_actual = SUM(lotes).
+        // El UPDATE manual previo era redundante y podía generar inconsistencia
+        // momentánea bajo concurrencia (BUG A — auditoría 2026-05-30).
 
         consumosLog.push({
           producto: ing.nombre_mp,
@@ -291,6 +323,15 @@ class ProduccionService {
           lotes_usados: lotesUsados,
         });
         consumedProductIds.push(ing.materia_prima_id);
+
+        // Auditoría · echada en bulk (cada ingrediente queda registrado por
+        // separado en el timeline). Detalle: nº OF · ingrediente → cantidad · unidad.
+        await client.query(
+          `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+           VALUES ($1, 'ECHAR_INGREDIENTE', 'ordenes_produccion', $2, $3)`,
+          [usuarioId ?? null, ordenId,
+           `${orden.numero_orden} · ${ing.nombre_mp} → ${cantidadReal.toFixed(3)} ${ing.unidad_medida ?? 'kg'} (al confirmar)`]
+        );
       }
 
       // ── 5. Crear lote de producto terminado (usa cantidad_real si disponible) ──
@@ -525,13 +566,15 @@ class ProduccionService {
       SELECT op.*, r.nombre AS receta_nombre, p.nombre AS producto_nombre,
              re.nombre AS receta_envasado_nombre,
              COALESCE(pe_dir.nombre, pe_rec.nombre) AS pe_nombre,
-             COALESCE(pe_dir.codigo, pe_rec.codigo) AS pe_codigo
+             COALESCE(pe_dir.codigo, pe_rec.codigo) AS pe_codigo,
+             lp.lote_interno AS lote_producido_codigo
       FROM ordenes_produccion op
       JOIN recetas r ON r.id = op.receta_id
       JOIN productos p ON p.id = r.producto_id
       LEFT JOIN recetas_envasado re ON re.id = op.receta_envasado_id
       LEFT JOIN productos pe_dir ON pe_dir.id = op.producto_envasado_id
       LEFT JOIN productos pe_rec ON pe_rec.id = re.producto_envasado_id
+      LEFT JOIN lotes lp ON lp.id = op.lote_producido_id
       ${where}
       ORDER BY op.created_at DESC
       LIMIT $${paramIdx++} OFFSET $${paramIdx++}

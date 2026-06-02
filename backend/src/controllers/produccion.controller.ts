@@ -192,11 +192,31 @@ export const produccionController = {
         }
       } catch { /* JSON malformado → ignorar ajustes, no romper */ }
 
+      // Parse lotes_override: por materia prima, lista de {lote_id, cantidad}
+      let lotes_override: { materia_prima_id: string; lotes: { lote_id: string; cantidad: number }[] }[] | undefined;
+      try {
+        const raw = req.body.lotes_override;
+        const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(arr)) {
+          lotes_override = arr
+            .filter((x: any) => x && typeof x === 'object' && x.materia_prima_id && Array.isArray(x.lotes))
+            .map((x: any) => ({
+              materia_prima_id: String(x.materia_prima_id),
+              lotes: x.lotes
+                .filter((l: any) => l && l.lote_id && Number(l.cantidad) > 0)
+                .map((l: any) => ({ lote_id: String(l.lote_id), cantidad: Number(l.cantidad) })),
+            }))
+            .filter((x: any) => x.lotes.length > 0);
+          if (lotes_override && lotes_override.length === 0) lotes_override = undefined;
+        }
+      } catch { /* ignorar */ }
+
       // ── Everything passed to service runs inside a single SERIALIZABLE transaction ──
       const resultado = await produccionService.confirmarOrden(id, usuario_id, {
         ph, foto_url, foto_urls, solidos, viscosidad, fecha_fabricacion, cantidad_real_producida,
         qc_fuera_de_rango, registro_limpieza, nota_qc, fecha_inicio_cliente,
         ingredientes_ajustados,
+        lotes_override,
       });
 
       // Post-transaction: only non-critical operations (cache + async alerts)
@@ -1230,7 +1250,7 @@ export const produccionController = {
 
     const client = await pool.connect();
     try {
-      await client.query('BEGIN');
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
 
       const { rows: [orden] } = await client.query(
         `SELECT * FROM ordenes_produccion WHERE id = $1 FOR UPDATE`,

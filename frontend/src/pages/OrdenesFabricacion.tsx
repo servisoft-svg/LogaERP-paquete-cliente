@@ -497,10 +497,9 @@ export default function OrdenesFabricacion() {
   const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
   const ordenesFiltradas = ordenes.filter(o => {
-    // Filtrar por tab usando tipo_orden
+    // Producción solo muestra fabricación; envasado tiene su propia pestaña.
     const tipoOrden = o.tipo_orden ?? 'fabricacion';
-    if (tabProd === 'fabricacion' && tipoOrden !== 'fabricacion') return false;
-    if (tabProd === 'envasado' && tipoOrden !== 'envasado') return false;
+    if (tipoOrden !== 'fabricacion') return false;
     if (!busqueda.trim()) return true;
     const q = norm(busqueda.trim());
     const qDigits = q.replace(/\D/g, '');
@@ -576,39 +575,7 @@ export default function OrdenesFabricacion() {
         </div>
       </div>
 
-      {/* Tabs Fabricación / Envasado — touch-friendly for tablet */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => { setTabProd('fabricacion'); setPaginaProd(1); }}
-          className={clsx(
-            'flex items-center gap-2 rounded-xl px-5 py-3 text-base font-bold transition-all',
-            tabProd === 'fabricacion'
-              ? 'bg-loga-red text-white shadow-md'
-              : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'
-          )}
-        >
-          <Factory size={18} />
-          Fabricación
-          <span className={clsx('rounded-full px-2 py-0.5 text-xs font-bold', tabProd === 'fabricacion' ? 'bg-white/20' : 'bg-gray-100')}>
-            {ordenes.filter(o => (o.tipo_orden ?? 'fabricacion') === 'fabricacion').length}
-          </span>
-        </button>
-        <button
-          onClick={() => { setTabProd('envasado'); setPaginaProd(1); }}
-          className={clsx(
-            'flex items-center gap-2 rounded-xl px-5 py-3 text-base font-bold transition-all',
-            tabProd === 'envasado'
-              ? 'bg-emerald-600 text-white shadow-md'
-              : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'
-          )}
-        >
-          <ClipboardList size={18} />
-          Envasado
-          <span className={clsx('rounded-full px-2 py-0.5 text-xs font-bold', tabProd === 'envasado' ? 'bg-white/20' : 'bg-gray-100')}>
-            {ordenes.filter(o => o.tipo_orden === 'envasado').length}
-          </span>
-        </button>
-      </div>
+      {/* Tab Envasado eliminada — Envasado tiene su propia pestaña en el navbar. */}
 
       {/* Modal formulario paso a paso */}
       <AnimatePresence>
@@ -1190,7 +1157,12 @@ export default function OrdenesFabricacion() {
             <div key={o.id} className={clsx('rounded-xl border bg-white shadow-sm p-4 space-y-3', isEnv ? 'border-emerald-100' : 'border-gray-100')}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="text-[11px] font-mono text-gray-400">{o.numero_orden}</p>
+                  <p className="text-[11px] font-mono text-gray-400">
+                    {o.numero_orden}
+                    {o.lote_producido_codigo && (
+                      <span className="text-emerald-700 font-semibold"> / {o.lote_producido_codigo}</span>
+                    )}
+                  </p>
                   <p className="text-sm font-semibold text-gray-900 leading-tight">
                     {isEnv ? (o.formato_label ? `Envasado ${o.formato_label}` : 'Envasado') : (o.receta_nombre ?? '—')}
                   </p>
@@ -1300,7 +1272,12 @@ export default function OrdenesFabricacion() {
               const unidadRow = isEnvRow ? 'ud' : (recetas.find((r) => r.id === o.receta_id)?.unidad_medida ?? 'kg');
               return (
               <tr key={o.id} className="hover:bg-gray-50 transition-colors">
-                <td className="px-4 py-3 font-mono text-xs text-gray-600">{o.numero_orden}</td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {o.numero_orden}
+                  {o.lote_producido_codigo && (
+                    <span className="text-emerald-700 font-semibold"> / {o.lote_producido_codigo}</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   {isEnvRow ? (
                     <>

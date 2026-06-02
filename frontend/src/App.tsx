@@ -11,12 +11,14 @@ import { useAutomatizacionesLive } from './hooks/useAutomatizacionesLive';
 import { useCronHealth } from './hooks/useCronHealth';
 import { useAlertas } from './hooks/useAlertas';
 import AlertaModal from './components/AlertaModal';
+import AyudaFlotante from './components/AyudaFlotante';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Productos = lazy(() => import('./pages/Productos'));
 const Recetas = lazy(() => import('./pages/Recetas'));
 const OrdenesFabricacion = lazy(() => import('./pages/OrdenesFabricacion'));
 const Envasado = lazy(() => import('./pages/Envasado'));
+const Escandallo = lazy(() => import('./pages/Escandallo'));
 const Lotes = lazy(() => import('./pages/Lotes'));
 const Proveedores = lazy(() => import('./pages/Proveedores'));
 const Clientes = lazy(() => import('./pages/Clientes'));
@@ -58,6 +60,7 @@ function AppContent() {
             <Route path="/recetas" element={<Recetas />} />
             <Route path="/produccion" element={<OrdenesFabricacion />} />
             <Route path="/envasado" element={<Envasado />} />
+            <Route path="/escandallo" element={<Escandallo />} />
             <Route path="/lotes" element={<Lotes />} />
             <Route path="/proveedores" element={isAdmin ? <Proveedores /> : <Navigate to="/" replace />} />
             <Route path="/clientes" element={isAdmin ? <Clientes /> : <Navigate to="/" replace />} />
@@ -72,6 +75,7 @@ function AppContent() {
         </Suspense>
       </main>
       <AlertaModal alerta={cola[0] ?? null} onCerrar={marcarVista} />
+      <AyudaFlotante />
     </div>
   );
 }

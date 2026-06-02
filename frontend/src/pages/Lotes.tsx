@@ -1,15 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Filter, Plus, Layers, Calendar, MapPin, GitBranch, X } from 'lucide-react';
+import { Search, Filter, Layers, Calendar, MapPin, GitBranch, X } from 'lucide-react';
 import Paginacion from '../components/Paginacion';
 import { lotesApi, productosApi } from '../api/client';
 import type { Lote, EstadoLote, Producto } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import { TANQUE_COLORES } from '../components/TanqueBadge';
 import Modal from '../components/Modal';
 import { FormField, Input, Select, Textarea } from '../components/FormField';
 import clsx from 'clsx';
-import { notify } from '../lib/notify';
-import { ToastBlock, ToastField } from '../components/ToastFields';
 
 const ESTADO_CFG: Record<EstadoLote, { label: string; cls: string }> = {
   aprobado:   { label: 'Aprobado',   cls: 'bg-emerald-100 text-emerald-700' },
@@ -25,6 +24,7 @@ interface FormLote {
   fecha_caducidad: string;
   ubicacion:       string;
   observaciones:   string;
+  tanque:          number | null;
   // Valores físico-químicos medidos del lote
   solidos:    string;
   ph:         string;
@@ -44,6 +44,7 @@ interface TrazabilidadItem {
 const EMPTY_FORM: FormLote = {
   producto_id: '', lote_proveedor: '', cantidad: '',
   fecha_fabricacion: '', fecha_caducidad: '', ubicacion: '', observaciones: '',
+  tanque: null,
   solidos: '', ph: '', viscosidad: '',
 };
 
@@ -52,8 +53,8 @@ export default function Lotes() {
   const [productos, setProductos] = useState<Producto[]>([]);
   const [loading, setLoading]     = useState(true);
   const [busqueda, setBusqueda]   = useState('');
-  const [filtroEstado, setFiltro] = useState<EstadoLote | ''>('');
-  const [cambiandoId, setCambiandoId] = useState<string | null>(null);
+  const [filtroEstado] = useState<EstadoLote | ''>('');
+  const [filtroTipoProd, setFiltroTipoProd] = useState<'' | 'materia_prima' | 'producto_fabricado' | 'producto_terminado' | 'producto_envasado' | 'material_embalaje'>('');
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm]           = useState<FormLote>(EMPTY_FORM);
   const [saving, setSaving]       = useState(false);
@@ -62,6 +63,13 @@ export default function Lotes() {
   const POR_PAGINA_LOTE = 50;
   const [trazaLote, setTrazaLote]         = useState<Lote | null>(null);
   const [trazaData, setTrazaData]         = useState<TrazabilidadItem[]>([]);
+  const [trazaOrdenes, setTrazaOrdenes]   = useState<Record<string, any>>({});
+  const [ordenesExpandidas, setOrdenesExpandidas] = useState<Set<string>>(new Set());
+  const toggleOrden = (id: string) => setOrdenesExpandidas(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const [trazaLoading, setTrazaLoading]   = useState(false);
   const [historialEstado, setHistorialEstado] = useState<{
     revisor: { nombre: string; rol: string; revisado_at: string; motivo: string } | null;
@@ -93,11 +101,7 @@ export default function Lotes() {
     return () => clearTimeout(t);
   }, [cargar]);
 
-  const abrirNuevo = () => {
-    setForm(EMPTY_FORM);
-    setErrorForm('');
-    setModalOpen(true);
-  };
+  // abrirNuevo eliminado — los lotes se crean automáticamente al recibir stock.
 
   const handleCrear = async () => {
     if (!form.producto_id || !form.cantidad || Number(form.cantidad) <= 0) {
@@ -115,6 +119,7 @@ export default function Lotes() {
         fecha_caducidad:   form.fecha_caducidad   || null,
         ubicacion:         form.ubicacion          || null,
         observaciones:     form.observaciones      || null,
+        tanque:            form.tanque,
         solidos:    form.solidos    !== '' ? Number(form.solidos)    : null,
         ph:         form.ph         !== '' ? Number(form.ph)         : null,
         viscosidad: form.viscosidad !== '' ? Number(form.viscosidad) : null,
@@ -129,32 +134,7 @@ export default function Lotes() {
     }
   };
 
-  const cambiarEstado = async (id: string, estado: EstadoLote) => {
-    const motivo = window.prompt(`Motivo del cambio a "${ESTADO_CFG[estado].label}":`);
-    if (!motivo?.trim()) return;
-    const lote = lotes.find(l => l.id === id);
-    setCambiandoId(id);
-    try {
-      await notify.promise(
-        lotesApi.cambiarEstado(id, estado, motivo.trim()),
-        {
-          loading: 'Cambiando estado…',
-          success: `Lote → ${ESTADO_CFG[estado].label}`,
-          successDesc: (
-            <ToastBlock title={lote?.lote_interno}>
-              <ToastField label="Producto" value={lote?.producto_nombre} span={2} />
-              <ToastField label="Cantidad" value={lote ? `${parseFloat(lote.cantidad_actual).toLocaleString('es-ES', { maximumFractionDigits: 2 })} ${lote.unidad_medida}` : ''} />
-              <ToastField label="Estado" value={ESTADO_CFG[estado].label} />
-              <ToastField label="Motivo" value={motivo.trim()} span={2} />
-            </ToastBlock>
-          ),
-          error: 'Error al cambiar estado',
-        }
-      );
-      cargar();
-    } catch { /* notificado */ }
-    finally { setCambiandoId(null); }
-  };
+  // cambiarEstado eliminado — flujo de cuarentena/rechazo no se usa.
 
   const verTrazabilidad = async (lote: Lote) => {
     setTrazaLote(lote);
@@ -165,7 +145,16 @@ export default function Lotes() {
         lotesApi.trazabilidad(lote.id),
         lotesApi.historialEstado(lote.id).catch(() => null),
       ]);
-      setTrazaData(trazaRes.data as TrazabilidadItem[]);
+      // Backend ahora devuelve {moves, ordenes}. Compatibilidad con respuesta legacy (array).
+      const raw = trazaRes.data as any;
+      const moves = Array.isArray(raw) ? raw : (raw?.moves ?? []);
+      const ords = Array.isArray(raw) ? {} : (raw?.ordenes ?? {});
+      setTrazaData(moves as TrazabilidadItem[]);
+      setTrazaOrdenes(ords);
+      // Por defecto, expandir todas las órdenes mencionadas
+      const ids = new Set<string>();
+      for (const m of moves) if ((m as any).orden_id && ords[(m as any).orden_id]) ids.add((m as any).orden_id);
+      setOrdenesExpandidas(ids);
       if (histRes) {
         setHistorialEstado(histRes.data as typeof historialEstado);
       }
@@ -216,31 +205,27 @@ export default function Lotes() {
             />
           </div>
 
-          {/* Filtro estado */}
-          <div className="flex items-center gap-1">
+          {/* Filtro por tipo de producto */}
+          <div className="flex items-center gap-1 flex-wrap">
             <Filter size={13} className="text-gray-400" />
-            {(['', 'aprobado', 'cuarentena', 'rechazado'] as (EstadoLote | '')[]).map((e) => (
-              <button
-                key={e}
-                onClick={() => setFiltro(e)}
-                className={clsx(
-                  'rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
-                  filtroEstado === e
+            {([
+              { v: '',                    label: 'Todos' },
+              { v: 'materia_prima',       label: 'MP' },
+              { v: 'producto_fabricado',  label: 'Fabricado' },
+              { v: 'producto_envasado',   label: 'Envasado' },
+              { v: 'material_embalaje',   label: 'Embalaje' },
+            ] as const).map(({ v, label }) => (
+              <button key={v} onClick={() => setFiltroTipoProd(v as typeof filtroTipoProd)}
+                className={clsx('rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
+                  filtroTipoProd === v
                     ? 'bg-loga-red text-white'
-                    : 'border border-gray-200 text-gray-600 hover:border-gray-300 bg-white'
-                )}
-              >
-                {e === '' ? 'Todos' : ESTADO_CFG[e].label}
+                    : 'border border-gray-200 text-gray-600 hover:border-gray-300 bg-white')}>
+                {label}
               </button>
             ))}
           </div>
 
-          <button
-            onClick={abrirNuevo}
-            className="flex items-center gap-1.5 rounded-lg bg-loga-red px-3 py-2 text-xs font-semibold text-white hover:bg-loga-red-dark transition-colors"
-          >
-            <Plus size={13} /> Nuevo Lote
-          </button>
+          {/* Botón "Nuevo lote" eliminado — los lotes se crean automáticamente al recibir stock. */}
         </div>
       </div>
 
@@ -252,7 +237,9 @@ export default function Lotes() {
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {lotes.slice((paginaLote - 1) * POR_PAGINA_LOTE, paginaLote * POR_PAGINA_LOTE).map((lote, i) => {
+          {lotes
+            .filter(lote => !filtroTipoProd || (lote as any).producto_tipo === filtroTipoProd)
+            .slice((paginaLote - 1) * POR_PAGINA_LOTE, paginaLote * POR_PAGINA_LOTE).map((lote, i) => {
             const caducaCerca = esProximoCaducar(lote.fecha_caducidad);
             const cfg = ESTADO_CFG[lote.estado];
             const cantActual  = parseFloat(lote.cantidad_actual);
@@ -328,36 +315,77 @@ export default function Lotes() {
                   )}
                 </div>
 
-                {/* Acciones */}
-                {lote.estado !== 'rechazado' && (
-                  <div className="flex gap-2 pt-1 border-t border-gray-50">
-                    {lote.estado === 'cuarentena' && (
-                      <button
-                        onClick={() => cambiarEstado(lote.id, 'aprobado')}
-                        disabled={cambiandoId === lote.id}
-                        className="flex-1 rounded-lg border border-emerald-200 py-1.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 transition-colors disabled:opacity-50"
-                      >
-                        Aprobar
-                      </button>
-                    )}
-                    {lote.estado === 'aprobado' && (
-                      <button
-                        onClick={() => cambiarEstado(lote.id, 'cuarentena')}
-                        disabled={cambiandoId === lote.id}
-                        className="flex-1 rounded-lg border border-amber-200 py-1.5 text-[11px] font-medium text-amber-700 hover:bg-amber-50 transition-colors disabled:opacity-50"
-                      >
-                        Cuarentena
-                      </button>
-                    )}
-                    <button
-                      onClick={() => cambiarEstado(lote.id, 'rechazado')}
-                      disabled={cambiandoId === lote.id}
-                      className="flex-1 rounded-lg border border-red-100 py-1.5 text-[11px] font-medium text-loga-red hover:bg-red-50 transition-colors disabled:opacity-50"
-                    >
-                      Rechazar
-                    </button>
-                  </div>
-                )}
+                {/* Tanque físico — solo muestra el chip del tanque asignado. Click
+                    abre selector inline. Antes mostrábamos los 4 (T1/T2/T3/T4)
+                    siempre, lo cual era ruidoso y confuso: cada lote solo está en
+                    uno (o en ninguno). */}
+                <div className="flex items-center flex-wrap gap-1">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">Tanque:</span>
+                  {lote.tanque == null ? (
+                    <details className="relative">
+                      <summary className="list-none cursor-pointer rounded-md border border-dashed border-gray-300 px-2 py-1 text-[10px] font-medium text-gray-500 hover:border-gray-500 hover:bg-gray-50">
+                        Asignar tanque…
+                      </summary>
+                      <div className="absolute z-20 mt-1 flex gap-1 rounded-lg border border-gray-200 bg-white p-1.5 shadow-lg">
+                        {[1, 2, 3, 4].map(n => {
+                          const c = TANQUE_COLORES[n];
+                          return (
+                            <button
+                              key={n}
+                              onClick={async () => {
+                                try {
+                                  await lotesApi.actualizar(lote.id, { tanque: n });
+                                  setLotes(prev => prev.map(l => l.id === lote.id ? { ...l, tanque: n } : l));
+                                } catch { /* */ }
+                              }}
+                              title={`Asignar a tanque ${n}`}
+                              className={clsx('rounded-md w-8 h-8 text-[11px] font-black tabular-nums transition-all', c.bg, c.text, `hover:ring-2 hover:${c.ring}`)}
+                            >T{n}</button>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  ) : (() => {
+                    const c = TANQUE_COLORES[lote.tanque];
+                    return (
+                      <details className="relative">
+                        <summary className={clsx('list-none cursor-pointer rounded-md w-8 h-8 flex items-center justify-center text-[11px] font-black tabular-nums shadow-sm ring-2', c.bg, c.text, c.ring)}>
+                          T{lote.tanque}
+                        </summary>
+                        <div className="absolute z-20 mt-1 flex items-center gap-1 rounded-lg border border-gray-200 bg-white p-1.5 shadow-lg">
+                          {[1, 2, 3, 4].filter(n => n !== lote.tanque).map(n => {
+                            const cc = TANQUE_COLORES[n];
+                            return (
+                              <button
+                                key={n}
+                                onClick={async () => {
+                                  try {
+                                    await lotesApi.actualizar(lote.id, { tanque: n });
+                                    setLotes(prev => prev.map(l => l.id === lote.id ? { ...l, tanque: n } : l));
+                                  } catch { /* */ }
+                                }}
+                                title={`Mover a tanque ${n}`}
+                                className={clsx('rounded-md w-8 h-8 text-[11px] font-black tabular-nums transition-all', cc.bg, cc.text, `hover:ring-2 hover:${cc.ring}`)}
+                              >T{n}</button>
+                            );
+                          })}
+                          <button
+                            onClick={async () => {
+                              try {
+                                await lotesApi.actualizar(lote.id, { tanque: null });
+                                setLotes(prev => prev.map(l => l.id === lote.id ? { ...l, tanque: null } : l));
+                              } catch { /* */ }
+                            }}
+                            title="Quitar del tanque"
+                            className="rounded-md w-8 h-8 text-[11px] font-bold text-gray-500 border border-gray-200 hover:border-loga-red hover:text-loga-red transition-colors"
+                          >×</button>
+                        </div>
+                      </details>
+                    );
+                  })()}
+                </div>
+
+                {/* Acciones de cambio de estado quitadas — el flujo no usa cuarentena/rechazo */}
 
                 {/* Trazabilidad */}
                 <button
@@ -372,7 +400,10 @@ export default function Lotes() {
         </div>
       )}
 
-      <Paginacion pagina={paginaLote} totalPaginas={Math.ceil(lotes.length / POR_PAGINA_LOTE)} onChange={setPaginaLote} totalItems={lotes.length} porPagina={POR_PAGINA_LOTE} />
+      {(() => {
+        const lotesVisibles = lotes.filter(l => !filtroTipoProd || (l as any).producto_tipo === filtroTipoProd);
+        return <Paginacion pagina={paginaLote} totalPaginas={Math.ceil(lotesVisibles.length / POR_PAGINA_LOTE)} onChange={setPaginaLote} totalItems={lotesVisibles.length} porPagina={POR_PAGINA_LOTE} />;
+      })()}
 
       {/* Panel trazabilidad */}
       {trazaLote && (
@@ -491,35 +522,119 @@ export default function Lotes() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {trazaData.map((mov, idx) => (
-                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-3 py-2">
-                        <span className={clsx(
-                          'inline-block rounded px-1.5 py-0.5 text-[10px] font-medium',
-                          mov.tipo === 'consumo' ? 'bg-red-50 text-loga-red' :
-                          mov.tipo === 'produccion' ? 'bg-emerald-50 text-emerald-700' :
-                          'bg-gray-100 text-gray-600'
-                        )}>
-                          {mov.tipo}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 tabular-nums font-medium text-gray-900">
-                        {parseFloat(mov.cantidad).toLocaleString('es-ES', { maximumFractionDigits: 2 })}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {mov.producto_codigo} — {mov.producto_nombre}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-gray-500">
-                        {mov.numero_orden ?? '—'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-500">
-                        {mov.estado ?? '—'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-400">
-                        {new Date(mov.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                      </td>
-                    </tr>
-                  ))}
+                  {trazaData.map((mov, idx) => {
+                    const ordenId = (mov as any).orden_id;
+                    const orden = ordenId ? trazaOrdenes[ordenId] : null;
+                    const isExpanded = ordenId ? ordenesExpandidas.has(ordenId) : false;
+                    return (
+                      <React.Fragment key={idx}>
+                        <tr className={clsx('transition-colors',
+                          orden ? 'cursor-pointer hover:bg-blue-50/40' : 'hover:bg-gray-50')}
+                          onClick={() => { if (orden && ordenId) toggleOrden(ordenId); }}>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center gap-1.5">
+                              {/* Chevron a la izquierda */}
+                              {orden && (
+                                <span className="text-[10px] text-blue-600 w-3 inline-block shrink-0">{isExpanded ? '▼' : '▶'}</span>
+                              )}
+                              {!orden && <span className="w-3 inline-block shrink-0" />}
+                              <span className={clsx(
+                                'inline-block rounded px-1.5 py-0.5 text-[10px] font-medium',
+                                mov.tipo === 'consumo' ? 'bg-red-50 text-loga-red' :
+                                mov.tipo === 'produccion' ? 'bg-emerald-50 text-emerald-700' :
+                                'bg-gray-100 text-gray-600'
+                              )}>
+                                {mov.tipo}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 tabular-nums font-medium text-gray-900">
+                            {parseFloat(mov.cantidad).toLocaleString('es-ES', { maximumFractionDigits: 2 })}
+                          </td>
+                          <td className="px-3 py-2 text-gray-700">
+                            {mov.producto_codigo} — {mov.producto_nombre}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-gray-500">
+                            {mov.numero_orden ?? '—'}
+                          </td>
+                          <td className="px-3 py-2 text-gray-500">{mov.estado ?? '—'}</td>
+                          <td className="px-3 py-2 text-gray-400">
+                            {new Date(mov.created_at).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                        </tr>
+                        {isExpanded && orden && (
+                          <tr className="bg-blue-50/30">
+                            <td colSpan={6} className="px-4 py-3">
+                              <div className="space-y-2.5">
+                                <div className="flex items-center justify-between flex-wrap gap-2 border-b border-blue-100 pb-1.5">
+                                  <div>
+                                    <p className="font-mono text-xs font-bold text-gray-900">{orden.numero_orden}</p>
+                                    <p className="text-[10px] text-gray-500">
+                                      {orden.producto_codigo} — {orden.producto_nombre}
+                                    </p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-[10px] text-gray-500">Operario</p>
+                                    <p className="text-xs font-bold text-gray-900">{orden.operario_nombre ?? '—'}
+                                      {orden.operario_rol && <span className="text-[10px] text-gray-400 font-normal"> ({orden.operario_rol})</span>}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
+                                  <Stat label="Cantidad real" value={orden.cantidad_real_producida ? `${parseFloat(orden.cantidad_real_producida).toLocaleString('es-ES', { maximumFractionDigits: 2 })}` : '—'} />
+                                  <Stat label="Cantidad plan" value={orden.cantidad_planificada ? `${parseFloat(orden.cantidad_planificada).toLocaleString('es-ES', { maximumFractionDigits: 2 })}` : '—'} />
+                                  <Stat label="Duración" value={orden.duracion_segundos ? formatDur(orden.duracion_segundos) : '—'} />
+                                  <Stat label="Fecha fin" value={orden.fecha_fin ? new Date(orden.fecha_fin).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'} />
+                                </div>
+                                {(orden.ph || orden.solidos || orden.viscosidad) && (
+                                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                                    {orden.ph && <Stat label="pH" value={orden.ph} accent="purple" />}
+                                    {orden.solidos && <Stat label="Sólidos %" value={orden.solidos} accent="amber" />}
+                                    {orden.viscosidad && <Stat label="Viscosidad" value={orden.viscosidad} accent="cyan" />}
+                                  </div>
+                                )}
+                                {(orden.consumos ?? []).length > 0 && (
+                                  <div>
+                                    <p className="text-[9px] uppercase tracking-wider font-bold text-blue-700 mb-1">
+                                      Ingredientes consumidos ({orden.consumos.length})
+                                    </p>
+                                    <div className="rounded-md border border-blue-100 overflow-hidden">
+                                      <table className="w-full text-[10px]">
+                                        <thead className="bg-blue-50/50 text-gray-500">
+                                          <tr>
+                                            <th className="text-left py-1 px-2 font-medium">Producto</th>
+                                            <th className="text-left py-1 px-2 font-medium">Lote</th>
+                                            <th className="text-right py-1 px-2 font-medium">Cantidad</th>
+                                            <th className="text-right py-1 px-2 font-medium">Precio</th>
+                                            <th className="text-right py-1 px-2 font-medium">Coste</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-blue-50">
+                                          {orden.consumos.map((c: any, ci: number) => {
+                                            const qty = Math.abs(parseFloat(c.cantidad));
+                                            const pre = parseFloat(c.precio_unitario ?? '0');
+                                            return (
+                                              <tr key={ci} className="hover:bg-white">
+                                                <td className="py-0.5 px-2 text-gray-900">{c.producto_nombre} <span className="text-gray-400 font-mono">{c.producto_codigo}</span></td>
+                                                <td className="py-0.5 px-2 font-mono text-gray-600">{c.lote_interno ?? '—'}</td>
+                                                <td className="py-0.5 px-2 text-right tabular-nums">{qty.toLocaleString('es-ES', { maximumFractionDigits: 3 })} <span className="text-gray-400">{c.unidad_medida}</span></td>
+                                                <td className="py-0.5 px-2 text-right tabular-nums text-gray-500">{pre > 0 ? `${pre.toFixed(4)} €` : '—'}</td>
+                                                <td className="py-0.5 px-2 text-right tabular-nums font-semibold text-gray-900">{pre > 0 ? `${(qty * pre).toFixed(2)} €` : '—'}</td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -600,6 +715,31 @@ export default function Lotes() {
               onChange={(e) => setForm((f) => ({ ...f, ubicacion: e.target.value }))}
               placeholder="Estante A-03, Cámara 2…"
             />
+          </FormField>
+
+          <FormField label="Tanque físico" hint="Asigna tanque 1–4 si el lote ocupa uno. Opcional.">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[1, 2, 3, 4].map(n => {
+                const activo = form.tanque === n;
+                const c = TANQUE_COLORES[n];
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setForm(f => ({ ...f, tanque: activo ? null : n }))}
+                    className={
+                      activo
+                        ? `rounded-lg ${c.bg} ${c.text} ring-2 ${c.ring} w-11 h-11 font-black text-sm shadow-md tabular-nums`
+                        : 'rounded-lg bg-white text-gray-500 border border-gray-200 hover:border-gray-400 w-11 h-11 font-bold text-sm transition-all tabular-nums'
+                    }
+                  >T{n}</button>
+                );
+              })}
+              {form.tanque != null && (
+                <button type="button" onClick={() => setForm(f => ({ ...f, tanque: null }))}
+                  className="ml-1 text-[10px] text-gray-400 hover:text-loga-red">Sin tanque</button>
+              )}
+            </div>
           </FormField>
 
           {/* ── Valores físico-químicos medidos del lote ── */}
@@ -713,4 +853,25 @@ export default function Lotes() {
       </Modal>
     </div>
   );
+}
+
+function Stat({ label, value, accent }: { label: string; value: string | number; accent?: 'purple' | 'amber' | 'cyan' }) {
+  const accentCls = accent === 'purple' ? 'text-purple-700 bg-purple-50'
+    : accent === 'amber' ? 'text-amber-700 bg-amber-50'
+    : accent === 'cyan' ? 'text-cyan-700 bg-cyan-50'
+    : 'text-gray-700 bg-white';
+  return (
+    <div className={clsx('rounded border px-1.5 py-1', accentCls, accent ? 'border-transparent' : 'border-gray-100')}>
+      <p className="text-[9px] uppercase tracking-wider font-bold text-gray-500">{label}</p>
+      <p className="text-[11px] font-bold tabular-nums">{value}</p>
+    </div>
+  );
+}
+
+function formatDur(seg: number): string {
+  if (seg < 60) return `${seg}s`;
+  const min = Math.floor(seg / 60);
+  if (min < 60) return `${min}m ${seg % 60}s`;
+  const h = Math.floor(min / 60);
+  return `${h}h ${min % 60}m`;
 }

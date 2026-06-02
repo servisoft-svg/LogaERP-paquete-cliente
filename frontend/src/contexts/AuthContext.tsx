@@ -6,6 +6,10 @@ interface User {
   id: string;
   nombre: string;
   email: string;
+  // Email para firma/contacto (impreso en albaranes, PDFs, firmas). Separado
+  // del email de login para que el operario pueda firmar como sí mismo aunque
+  // comparta cuenta admin con otros.
+  email_firma?: string | null;
   rol: 'admin' | 'trabajador';
 }
 
@@ -16,7 +20,7 @@ interface AuthContextType {
   completeLogin: (usuario: User) => void;
   logout: () => Promise<void>;
   isAdmin: boolean;
-  actualizarPerfil: (data: { nombre: string; email?: string }) => Promise<void>;
+  actualizarPerfil: (data: { nombre: string; email?: string; email_firma?: string | null }) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({

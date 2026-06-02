@@ -29,6 +29,8 @@ const SELECT_FULL = `
   pc.codigo  AS caja_codigo, pc.nombre AS caja_nombre,
   pc.unidades_por_envase AS caja_uds,
   pc.stock_actual AS caja_stock,
+  re.peso_envase_vacio_kg, re.unidades_por_caja,
+  re.peso_caja_vacia_kg, re.cajas_por_pale, re.peso_pale_vacio_kg,
   re.extras,
   re.activa, re.created_at, re.updated_at
 `;
@@ -122,6 +124,11 @@ router.get('/', async (_req, res) => {
              caj.prod_nombre AS caja_nombre,
              caj.prod_uds    AS caja_uds,
              caj.prod_stock  AS caja_stock,
+             0::NUMERIC AS peso_envase_vacio_kg,
+             1::INT     AS unidades_por_caja,
+             0::NUMERIC AS peso_caja_vacia_kg,
+             0::INT     AS cajas_por_pale,
+             0::NUMERIC AS peso_pale_vacio_kg,
              COALESCE((
                SELECT json_agg(json_build_object('producto_id', materia_prima_id, 'cantidad_por_bote', cantidad))
                FROM ings WHERE receta_id = re.id AND rol = 'ext'
@@ -181,6 +188,11 @@ router.post('/', adminOnly, async (req, res) => {
       envase_id, envases_por_bote = 1,
       etiqueta_id, etiquetas_por_bote = 1,
       lleva_caja = false, caja_id,
+      peso_envase_vacio_kg = 0,
+      unidades_por_caja    = 1,
+      peso_caja_vacia_kg   = 0,
+      cajas_por_pale       = 0,
+      peso_pale_vacio_kg   = 0,
       extras = [],
     } = req.body;
     const extrasNorm = Array.isArray(extras)
@@ -193,14 +205,21 @@ router.post('/', adminOnly, async (req, res) => {
          liquido_id, liquido_cantidad, liquido_unidad,
          envase_id, envases_por_bote,
          etiqueta_id, etiquetas_por_bote,
-         lleva_caja, caja_id, extras
-       ) VALUES ($1,$2,$3,$4,$5::NUMERIC,$6,$7,$8::INT,$9,$10::INT,$11,$12,$13::JSONB)
+         lleva_caja, caja_id,
+         peso_envase_vacio_kg, unidades_por_caja,
+         peso_caja_vacia_kg, cajas_por_pale, peso_pale_vacio_kg,
+         extras
+       ) VALUES ($1,$2,$3,$4,$5::NUMERIC,$6,$7,$8::INT,$9,$10::INT,$11,$12,
+                 $13::NUMERIC,$14::INT,$15::NUMERIC,$16::INT,$17::NUMERIC,
+                 $18::JSONB)
        RETURNING id`,
       [String(nombre).trim(), codigo ?? null, producto_envasado_id,
        liquido_id, liquido_cantidad, liquido_unidad,
        envase_id, envases_por_bote,
        etiqueta_id ?? null, etiquetas_por_bote,
        !!lleva_caja, lleva_caja ? caja_id : null,
+       Number(peso_envase_vacio_kg) || 0, Number(unidades_por_caja) || 1,
+       Number(peso_caja_vacia_kg) || 0, Number(cajas_por_pale) || 0, Number(peso_pale_vacio_kg) || 0,
        JSON.stringify(extrasNorm)]
     );
     const { rows: [full] } = await pool.query(`SELECT ${SELECT_FULL} ${FROM_FULL} WHERE re.id = $1`, [r.id]);
@@ -224,6 +243,11 @@ router.put('/:id', adminOnly, async (req, res) => {
       envase_id, envases_por_bote,
       etiqueta_id, etiquetas_por_bote,
       lleva_caja, caja_id, activa,
+      peso_envase_vacio_kg,
+      unidades_por_caja,
+      peso_caja_vacia_kg,
+      cajas_por_pale,
+      peso_pale_vacio_kg,
       extras = [],
     } = req.body;
     const extrasNorm = Array.isArray(extras)
@@ -238,6 +262,11 @@ router.put('/:id', adminOnly, async (req, res) => {
          envase_id  = $7, envases_por_bote = $8::INT,
          etiqueta_id = $9, etiquetas_por_bote = $10::INT,
          lleva_caja = $11, caja_id = $12,
+         peso_envase_vacio_kg = COALESCE($16::NUMERIC, peso_envase_vacio_kg),
+         unidades_por_caja    = COALESCE($17::INT,     unidades_por_caja),
+         peso_caja_vacia_kg   = COALESCE($18::NUMERIC, peso_caja_vacia_kg),
+         cajas_por_pale       = COALESCE($19::INT,     cajas_por_pale),
+         peso_pale_vacio_kg   = COALESCE($20::NUMERIC, peso_pale_vacio_kg),
          extras = $15::JSONB,
          activa = COALESCE($13, activa),
          updated_at = now()
@@ -249,9 +278,44 @@ router.put('/:id', adminOnly, async (req, res) => {
        etiqueta_id ?? null, etiquetas_por_bote ?? 1,
        !!lleva_caja, lleva_caja ? caja_id : null,
        activa, req.params.id,
-       JSON.stringify(extrasNorm)]
+       JSON.stringify(extrasNorm),
+       peso_envase_vacio_kg != null ? Number(peso_envase_vacio_kg) : null,
+       unidades_por_caja    != null ? Number(unidades_por_caja)    : null,
+       peso_caja_vacia_kg   != null ? Number(peso_caja_vacia_kg)   : null,
+       cajas_por_pale       != null ? Number(cajas_por_pale)       : null,
+       peso_pale_vacio_kg   != null ? Number(peso_pale_vacio_kg)   : null]
     );
-    if (!r) return res.status(404).json({ error: 'No encontrada' });
+    if (!r) {
+      // Fallback: si el id es de una receta legacy (recetas tipo='envasado'),
+      // creamos una nueva fila en recetas_envasado con los datos editados y
+      // desactivamos la receta legacy. La sustitución es transparente para el
+      // usuario.
+      const { rows: [legacy] } = await pool.query(
+        `SELECT id, nombre FROM recetas WHERE id = $1 AND tipo_receta = 'envasado'`,
+        [req.params.id]
+      );
+      if (!legacy) return res.status(404).json({ error: 'No encontrada' });
+      const { rows: [nueva] } = await pool.query(
+        `INSERT INTO recetas_envasado (
+           nombre, producto_envasado_id,
+           liquido_id, liquido_cantidad, liquido_unidad,
+           envase_id, envases_por_bote,
+           etiqueta_id, etiquetas_por_bote,
+           lleva_caja, caja_id, extras
+         ) VALUES ($1,$2,$3,$4::NUMERIC,$5,$6,$7::INT,$8,$9::INT,$10,$11,$12::JSONB)
+         RETURNING id`,
+        [String(nombre).trim(), producto_envasado_id,
+         liquido_id, liquido_cantidad, liquido_unidad ?? 'kg',
+         envase_id, envases_por_bote ?? 1,
+         etiqueta_id ?? null, etiquetas_por_bote ?? 1,
+         !!lleva_caja, lleva_caja ? caja_id : null,
+         JSON.stringify(extrasNorm)]
+      );
+      // Desactivar la legacy
+      await pool.query(`UPDATE recetas SET activa = FALSE WHERE id = $1`, [legacy.id]);
+      const { rows: [full] } = await pool.query(`SELECT ${SELECT_FULL} ${FROM_FULL} WHERE re.id = $1`, [nueva.id]);
+      return res.json(full);
+    }
     const { rows: [full] } = await pool.query(`SELECT ${SELECT_FULL} ${FROM_FULL} WHERE re.id = $1`, [r.id]);
     res.json(full);
   } catch (err) {
@@ -261,10 +325,20 @@ router.put('/:id', adminOnly, async (req, res) => {
 });
 
 // ── DELETE /api/recetas-envasado/:id — soft delete ──────
+// Soporta IDs de recetas_envasado (nuevas) y recetas (legacy tipo='envasado').
 router.delete('/:id', adminOnly, async (req, res) => {
   try {
-    await pool.query(`UPDATE recetas_envasado SET activa = FALSE WHERE id = $1`, [req.params.id]);
-    res.json({ ok: true });
+    const { rowCount: rcNew } = await pool.query(
+      `UPDATE recetas_envasado SET activa = FALSE WHERE id = $1`, [req.params.id]
+    );
+    if (rcNew && rcNew > 0) return res.json({ ok: true });
+    // Fallback: receta legacy
+    const { rowCount: rcLegacy } = await pool.query(
+      `UPDATE recetas SET activa = FALSE WHERE id = $1 AND tipo_receta = 'envasado'`,
+      [req.params.id]
+    );
+    if (rcLegacy && rcLegacy > 0) return res.json({ ok: true });
+    res.status(404).json({ error: 'No encontrada' });
   } catch (err) {
     res.status(500).json({ error: 'Error desactivando receta' });
   }
@@ -629,6 +703,13 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
     }
 
     await client.query('COMMIT');
+    // Auditoría · envasado ejecutado
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'ENVASADO_EJECUTADO', 'ordenes_produccion', $2, $3)`,
+      [userId, orden.id,
+       `${orden.numero_orden} · ${botes} botes envasados · Lote PE: ${loteInterno}${recetaCreadaId ? ' · receta guardada' : ''}`]
+    ).catch(() => undefined);
     res.json({
       ok: true,
       orden_id: orden.id,

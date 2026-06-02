@@ -983,6 +983,134 @@ router.get('/:id/dosificaciones', async (req, res) => {
 });
 
 // POST /api/produccion/:id/dosificar — registra una echada parcial + descuenta stock
+// POST /api/produccion/:id/revisar-lotes — admin firma la revisión pre-fabricación.
+// Persiste el override de lotes elegido por el admin para que cualquier operario
+// que abra después la OF entre directo a producción con los mismos lotes.
+router.post('/:id/revisar-lotes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = (req as any).user;
+    if (!user) return res.status(401).json({ error: 'No autenticado' });
+    if (user.rol !== 'admin') return res.status(403).json({ error: 'Solo un administrador puede firmar la revisión' });
+
+    const override = req.body?.lotes_override ?? null;
+    if (override !== null && !Array.isArray(override)) {
+      return res.status(400).json({ error: 'lotes_override debe ser un array' });
+    }
+
+    const { rowCount, rows: [orden] } = await pool.query(
+      `UPDATE ordenes_produccion
+          SET lotes_revisados_at = NOW(),
+              lotes_revisados_por_id = $2,
+              lotes_override = $3::jsonb
+        WHERE id = $1
+        RETURNING id, lotes_revisados_at, lotes_revisados_por_id, lotes_override`,
+      [id, user.id, override ? JSON.stringify(override) : null]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Orden no encontrada' });
+    // Auditoría · firma de revisión pre-fabricación
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'FIRMA_REVISION_OF', 'ordenes_produccion', $2, $3)`,
+      [user.id, id, `Revisión pre-fabricación firmada${override ? ` · ${override.length} ingrediente(s) con lote forzado` : ''}`]
+    ).catch(() => undefined);
+    return res.json(orden);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// ── Confirmaciones manuales de ingredientes (source-of-truth en BD) ────────
+// El estado de "ingrediente confirmado" sobrevive a recargas, cambios de
+// operario y restarts del servidor. Reemplaza el localStorage volátil.
+
+// GET /api/produccion/:id/confirmaciones
+// Devuelve array con { ingrediente_receta_id, paso_index, confirmado_at, … }.
+// El paso_index hace que el checklist de cada paso sea independiente: el mismo
+// ingrediente puede aparecer en paso 1 y paso 2 sin compartir estado.
+router.get('/:id/confirmaciones', async (req, res) => {
+  try {
+    const { rows } = await pool.query<{ ingrediente_receta_id: string; paso_index: number; confirmado_at: string; confirmado_por_nombre: string | null }>(
+      `SELECT c.ingrediente_receta_id, c.paso_index, c.confirmado_at, u.nombre AS confirmado_por_nombre
+       FROM confirmaciones_ingrediente c
+       LEFT JOIN usuarios u ON u.id = c.confirmado_por_id
+       WHERE c.orden_id = $1
+       ORDER BY c.confirmado_at ASC`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// POST /api/produccion/:id/confirmaciones
+// Body: { ingrediente_receta_id, paso_index }. paso_index obligatorio para que
+// cada paso tenga su propio estado (req. usuario explícito: confirmar paso 1
+// no debe marcar el mismo ingrediente en paso 2).
+router.post('/:id/confirmaciones', async (req, res) => {
+  try {
+    const { ingrediente_receta_id, paso_index } = req.body ?? {};
+    if (!ingrediente_receta_id) return res.status(400).json({ error: 'ingrediente_receta_id obligatorio' });
+    const pasoIdx = Number.isFinite(Number(paso_index)) ? Number(paso_index) : -1;
+
+    const userId = (req as any).user?.id ?? null;
+    const { rows: [c] } = await pool.query<{
+      orden_id: string; ingrediente_receta_id: string; paso_index: number; confirmado_at: string;
+    }>(
+      `INSERT INTO confirmaciones_ingrediente (orden_id, ingrediente_receta_id, paso_index, confirmado_por_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (orden_id, ingrediente_receta_id, paso_index) DO UPDATE
+         SET confirmado_por_id = COALESCE(confirmaciones_ingrediente.confirmado_por_id, EXCLUDED.confirmado_por_id),
+             confirmado_at = confirmaciones_ingrediente.confirmado_at
+       RETURNING orden_id, ingrediente_receta_id, paso_index, confirmado_at`,
+      [req.params.id, ingrediente_receta_id, pasoIdx, userId]
+    );
+    return res.json(c);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Error';
+    return res.status(500).json({ error: msg });
+  }
+});
+
+// DELETE /api/produccion/:id/confirmaciones — wipe TODAS las confirmaciones
+// de la orden (todos los pasos). Útil para reiniciar tras marcar por error.
+router.delete('/:id/confirmaciones', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `DELETE FROM confirmaciones_ingrediente WHERE orden_id = $1`,
+      [req.params.id]
+    );
+    return res.json({ ok: true, eliminadas: r.rowCount ?? 0 });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// DELETE /api/produccion/:id/confirmaciones/:ingId?paso=N
+// Deshace una confirmación específica. Si se pasa ?paso=N, borra solo esa
+// combinación; si no, borra todas las del ingrediente en cualquier paso.
+router.delete('/:id/confirmaciones/:ingId', async (req, res) => {
+  try {
+    const pasoQ = req.query.paso;
+    if (pasoQ != null && pasoQ !== '') {
+      const pasoIdx = Number(pasoQ);
+      await pool.query(
+        `DELETE FROM confirmaciones_ingrediente WHERE orden_id = $1 AND ingrediente_receta_id = $2 AND paso_index = $3`,
+        [req.params.id, req.params.ingId, pasoIdx]
+      );
+    } else {
+      await pool.query(
+        `DELETE FROM confirmaciones_ingrediente WHERE orden_id = $1 AND ingrediente_receta_id = $2`,
+        [req.params.id, req.params.ingId]
+      );
+    }
+    return res.json({ ok: true });
+  } catch (err: unknown) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 router.post('/:id/dosificar', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1023,9 +1151,14 @@ router.post('/:id/dosificar', async (req, res) => {
     let loteUsado: string | null = null;
     let antes = 0, despues = 0;
     if (lote_id) {
-      const { rows: [lote] } = await client.query(
-        `SELECT id, cantidad_actual FROM lotes
-         WHERE id = $1 AND producto_id = $2 AND estado = 'aprobado'
+      const { rows: [lote] } = await client.query<{
+        id: string; cantidad_actual: string; reservado: string;
+      }>(
+        `SELECT l.id, l.cantidad_actual,
+           COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs
+                     WHERE rs.lote_id = l.id AND rs.estado = 'activa'), 0) AS reservado
+         FROM lotes l
+         WHERE l.id = $1 AND l.producto_id = $2 AND l.estado = 'aprobado'
          FOR UPDATE`,
         [lote_id, producto_id]
       );
@@ -1034,9 +1167,13 @@ router.post('/:id/dosificar', async (req, res) => {
         return res.status(404).json({ error: 'Lote no encontrado o no aprobado para este producto.' });
       }
       antes = parseFloat(lote.cantidad_actual);
-      if (antes < cant - 1e-6) {
+      const reservado = parseFloat(lote.reservado);
+      const disponibleReal = antes - reservado;
+      if (disponibleReal < cant - 1e-6) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: `Stock insuficiente en lote: disponible ${antes.toFixed(3)} ${prod.unidad_medida}, pedido ${cant.toFixed(3)}.` });
+        return res.status(409).json({
+          error: `Stock insuficiente en lote: disponible ${disponibleReal.toFixed(3)} ${prod.unidad_medida} (lote tiene ${antes.toFixed(3)} pero ${reservado.toFixed(3)} están reservados para pedidos), pedido ${cant.toFixed(3)}.`,
+        });
       }
       despues = antes - cant;
       await client.query(`UPDATE lotes SET cantidad_actual = $1 WHERE id = $2`, [despues.toFixed(6), lote.id]);
@@ -1093,6 +1230,13 @@ router.post('/:id/dosificar', async (req, res) => {
 
     await client.query('COMMIT');
     invalidarCacheFinanzas();
+    // Auditoría · echada (dosificación parcial)
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'ECHAR_INGREDIENTE', 'ordenes_produccion', $2, $3)`,
+      [userId, ordenId,
+       `${orden.numero_orden} · ${prod.nombre} → ${cant.toFixed(3)} ${prod.unidad_medida ?? 'kg'}${pasoIdx != null ? ` (paso ${pasoIdx + 1})` : ''}${notas?.trim() ? ` · ${notas.trim().slice(0, 80)}` : ''}`]
+    ).catch(() => undefined);
     return res.status(201).json({ ok: true, dosificacion: dosif });
   } catch (err: unknown) {
     await client.query('ROLLBACK').catch(() => {});
@@ -1108,6 +1252,25 @@ router.delete('/:id/dosificar/:dosifId', async (req, res) => {
   try {
     const { id: ordenId, dosifId } = req.params;
     await client.query('BEGIN');
+
+    // Si la orden ya está completada/cancelada, el consumo final ya descontó
+    // el resto y devolver el stock parcial al lote crea kilos fantasma.
+    // Solo se puede revertir mientras la orden está en estado mutable.
+    const { rows: [orden] } = await client.query<{ estado: string }>(
+      `SELECT estado FROM ordenes_produccion WHERE id = $1 FOR UPDATE`,
+      [ordenId]
+    );
+    if (!orden) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+    if (!['borrador', 'confirmada', 'en_proceso'].includes(orden.estado)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `No se puede revertir una echada en una orden "${orden.estado}". Para devolver stock, cancela la orden (revierte todo el consumo de forma coherente).`,
+      });
+    }
+
     const { rows: [d] } = await client.query(
       `SELECT id, producto_id, lote_id, cantidad FROM dosificaciones_orden
        WHERE id = $1 AND orden_id = $2 FOR UPDATE`,
@@ -1134,6 +1297,12 @@ router.delete('/:id/dosificar/:dosifId', async (req, res) => {
     await client.query(`DELETE FROM dosificaciones_orden WHERE id = $1`, [dosifId]);
     await client.query('COMMIT');
     invalidarCacheFinanzas();
+    // Auditoría · reversión echada
+    pool.query(
+      `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+       VALUES ($1, 'REVERTIR_ECHADA', 'ordenes_produccion', $2, $3)`,
+      [(req as any).user?.id ?? null, ordenId, `Reversión de echada · ${cant.toFixed(3)} unidades devueltas al lote`]
+    ).catch(() => undefined);
     return res.json({ ok: true });
   } catch (err: unknown) {
     await client.query('ROLLBACK').catch(() => {});

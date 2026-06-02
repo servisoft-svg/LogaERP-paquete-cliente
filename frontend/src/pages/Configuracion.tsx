@@ -1,13 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Settings, Save, Percent, Mail, Bell, Eye, EyeOff, SendHorizontal, HardDrive, Building,
   ShieldCheck, History, Award, CheckCircle2, AlertCircle, Info, Database, ChevronRight, Beaker, Package,
+  Search, X,
 } from 'lucide-react';
+import clsx from 'clsx';
 import { configuracionApi } from '../api/client';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import CatalogoSpecs from '../components/CatalogoSpecs';
 import CatalogoSubcategorias from '../components/CatalogoSubcategorias';
 import IntegracionAlilo from '../components/IntegracionAlilo';
+import HistorialActividad from '../components/HistorialActividad';
 import { FormField, Input, Textarea } from '../components/FormField';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
@@ -35,20 +38,58 @@ interface Config {
   nivel_plata:       string;
   nivel_oro:         string;
   datos_bancarios?:  string;
+  email_copia_albaranes?: string;
 }
 
-const TOC = [
-  { id: 'empresa',  label: 'Empresa',     icon: Building },
-  { id: 'alertas',  label: 'Alertas',     icon: Percent },
-  { id: 'email',    label: 'Email',       icon: Mail },
-  { id: 'niveles',  label: 'Niveles',     icon: Award },
-  { id: 'specs',    label: 'Specs',       icon: Beaker },
-  { id: 'subcategorias-mp', label: 'Sub-cat MP', icon: Beaker },
-  { id: 'subcategorias-me', label: 'Sub-cat ME', icon: Package },
-  { id: 'integracion-alilo', label: 'Alilo', icon: ShieldCheck },
-  { id: 'backup',   label: 'Backup',      icon: Database },
-  { id: 'historial',label: 'Historial',   icon: History },
+// Estructura semántica del sidebar — agrupada por dominio.
+// Cada grupo se renderiza con un header pequeño en uppercase y sus secciones
+// debajo. Los IDs deben coincidir con los `<section id="...">` del contenido.
+interface TocItem { id: string; label: string; icon: typeof Building; desc?: string }
+interface TocGroup { titulo: string; items: TocItem[] }
+const TOC_GROUPS: TocGroup[] = [
+  {
+    titulo: 'Esenciales',
+    items: [
+      { id: 'empresa', label: 'Datos de empresa', icon: Building, desc: 'Razón social, CIF, dirección, banco' },
+      { id: 'alertas', label: 'Alertas de stock', icon: Percent,  desc: 'Umbral relativo al mínimo' },
+    ],
+  },
+  {
+    titulo: 'Comunicación',
+    items: [
+      { id: 'email', label: 'Email de pedidos', icon: Mail, desc: 'SMTP, plantilla, copia de archivo' },
+    ],
+  },
+  {
+    titulo: 'Catálogos editables',
+    items: [
+      { id: 'specs',            label: 'Specs físico-químicas', icon: Beaker,  desc: 'pH, sólidos, viscosidad…' },
+      { id: 'subcategorias-mp', label: 'Sub-categorías MP',     icon: Beaker,  desc: 'Familias químicas' },
+      { id: 'subcategorias-me', label: 'Sub-categorías ME',     icon: Package, desc: 'Bote, caja, etiqueta…' },
+      { id: 'tipos-material',   label: 'Materiales embalaje',   icon: Package, desc: 'Plástico, cartón, madera…' },
+    ],
+  },
+  {
+    titulo: 'Comercial',
+    items: [
+      { id: 'niveles', label: 'Niveles de clientes', icon: Award, desc: 'Umbrales Oro, Plata, Bronce' },
+    ],
+  },
+  {
+    titulo: 'Integraciones',
+    items: [
+      { id: 'integracion-alilo', label: 'Alilo', icon: ShieldCheck, desc: 'API HMAC con Alilo' },
+    ],
+  },
+  {
+    titulo: 'Sistema',
+    items: [
+      { id: 'backup',    label: 'Backup',    icon: Database, desc: 'Copia cifrada + Google Drive' },
+      { id: 'historial', label: 'Historial', icon: History,  desc: 'Auditoría de cambios' },
+    ],
+  },
 ];
+const TOC_FLAT = TOC_GROUPS.flatMap(g => g.items);
 
 export default function Configuracion() {
   const [config, setConfig]       = useState<Config | null>(null);
@@ -76,7 +117,61 @@ export default function Configuracion() {
   const [gdriveClientSecret, setGdriveClientSecret] = useState('');
   const [gdriveFolderId, setGdriveFolderId] = useState('');
   const [gdriveSaving, setGdriveSaving] = useState(false);
-  const [auditoria, setAuditoria]         = useState<{ id: string; accion: string; tabla_afectada: string; registro_id: string; motivo: string; created_at: string; usuario_nombre?: string }[]>([]);
+  // auditoria queda gestionada por <HistorialActividad/>; ya no se necesita aquí.
+  // Snapshot inicial para detectar cambios sin guardar (save bar sticky)
+  const [configInicial, setConfigInicial] = useState<Config | null>(null);
+  // Sidebar: búsqueda + scroll-spy
+  const [tocBuscar, setTocBuscar] = useState('');
+  const [seccionActiva, setSeccionActiva] = useState<string>('empresa');
+
+  // Scroll-spy: detecta qué sección está visible en el viewport
+  useEffect(() => {
+    const obs = new IntersectionObserver(
+      entries => {
+        const visibles = entries
+          .filter(e => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        if (visibles[0]?.target.id) setSeccionActiva(visibles[0].target.id);
+      },
+      { rootMargin: '-15% 0px -60% 0px', threshold: [0, 0.2, 0.5, 1] }
+    );
+    TOC_FLAT.forEach(({ id }) => {
+      const el = document.getElementById(id);
+      if (el) obs.observe(el);
+    });
+    return () => obs.disconnect();
+  }, [loading]);
+
+  // ¿Hay cambios sin guardar respecto al snapshot inicial?
+  const hayCambios = useMemo(() => {
+    if (!config || !configInicial) return false;
+    if (smtpPass) return true;
+    const claves: (keyof Config)[] = [
+      'porcentaje_alerta', 'plantilla_email', 'email_remitente', 'smtp_user',
+      'empresa_nombre', 'empresa_cif', 'empresa_direccion', 'empresa_telefono', 'empresa_web',
+      'nivel_bronce', 'nivel_plata', 'nivel_oro', 'datos_bancarios', 'email_copia_albaranes',
+    ];
+    return claves.some(k => (config[k] ?? '') !== (configInicial[k] ?? ''));
+  }, [config, configInicial, smtpPass]);
+
+  // Aviso si intenta salir con cambios sin guardar
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (hayCambios) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hayCambios]);
+
+  // TOC filtrado por búsqueda (acento-insensible)
+  const toc = useMemo(() => {
+    if (!tocBuscar.trim()) return TOC_GROUPS;
+    const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    const q = norm(tocBuscar);
+    return TOC_GROUPS
+      .map(g => ({ ...g, items: g.items.filter(it => norm(it.label).includes(q) || norm(it.desc ?? '').includes(q)) }))
+      .filter(g => g.items.length > 0);
+  }, [tocBuscar]);
 
   // Audit log
   // auditLog removed — using auditoria state below
@@ -85,13 +180,10 @@ export default function Configuracion() {
 
   const cargar = useCallback(async () => {
     try {
-      const [cfgRes, auditRes] = await Promise.all([
-        configuracionApi.obtener(),
-        configuracionApi.auditoria().catch(() => ({ data: [] })),
-      ]);
+      const cfgRes = await configuracionApi.obtener();
       const cfg = cfgRes.data as Config;
       setConfig(cfg);
-      setAuditoria(auditRes.data as typeof auditoria);
+      setConfigInicial(cfg);
     } catch {
       setErrorConfig('Error al cargar la configuración');
     } finally { setLoading(false); }
@@ -157,6 +249,7 @@ export default function Configuracion() {
       nivel_plata:       config.nivel_plata ? Number(config.nivel_plata) : undefined,
       nivel_oro:         config.nivel_oro ? Number(config.nivel_oro) : undefined,
       datos_bancarios:   config.datos_bancarios ?? '',
+      email_copia_albaranes: config.email_copia_albaranes ?? '',
     };
     try {
       const res = await notify.promise(configuracionApi.editar(payload), {
@@ -173,6 +266,7 @@ export default function Configuracion() {
         error: (err) => (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? 'Error al guardar',
       });
       setConfig(res.data as Config);
+      setConfigInicial(res.data as Config);
       setSmtpPass('');
       setSavedConfig(true);
       setTimeout(() => setSavedConfig(false), 3000);
@@ -194,36 +288,90 @@ export default function Configuracion() {
   }
 
   return (
-    <div className="animate-fade-in pb-28">
-      {/* Hero */}
-      <div className="relative mb-8 overflow-hidden rounded-2xl border border-gray-100 bg-gradient-to-br from-white via-gray-50 to-red-50/40 px-6 py-6 shadow-sm">
-        <div className="absolute -right-10 -top-10 h-40 w-40 rounded-full bg-loga-red/5 blur-3xl" />
-        <div className="relative flex items-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-loga-red to-loga-red-dark text-white shadow-md shadow-red-200">
-            <Settings size={22} />
+    <div className="animate-fade-in pb-32">
+      {/* Hero · compacto */}
+      <div className="mb-6 flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-loga-red to-loga-red-dark text-white shadow-md shadow-red-100">
+            <Settings size={20} />
           </div>
           <div>
             <h1 className="text-xl font-bold tracking-tight text-gray-900">Configuración</h1>
-            <p className="text-xs text-gray-500">Parámetros globales del ERP — empresa, alertas, email, niveles y respaldos</p>
+            <p className="text-xs text-gray-500">Parámetros globales del ERP · empresa, comunicación, catálogos, integraciones, sistema</p>
           </div>
         </div>
+        {hayCambios && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 px-3 py-1.5 text-[11px] font-semibold text-amber-800">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+            Cambios sin guardar
+          </span>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[200px_minmax(0,1fr)] gap-8 max-w-6xl">
-        {/* TOC sticky */}
+      <div className="grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)] gap-8 max-w-7xl">
+        {/* TOC sticky · agrupado + scroll-spy + búsqueda */}
         <aside className="hidden lg:block">
-          <nav className="sticky top-6 space-y-1 rounded-xl border border-gray-100 bg-white p-2 shadow-sm">
-            {TOC.map(({ id, label, icon: Icon }) => (
-              <a
-                key={id}
-                href={`#${id}`}
-                className="group flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-50 hover:text-loga-red transition-colors"
-              >
-                <Icon size={13} className="text-gray-400 group-hover:text-loga-red" />
-                <span className="flex-1">{label}</span>
-                <ChevronRight size={12} className="text-gray-300 group-hover:text-loga-red" />
-              </a>
+          <nav className="sticky top-6 space-y-3 rounded-xl border border-gray-100 bg-white p-3 shadow-sm">
+            {/* Buscador */}
+            <div className="relative">
+              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300" />
+              <input
+                value={tocBuscar}
+                onChange={e => setTocBuscar(e.target.value)}
+                placeholder="Buscar configuración…"
+                className="w-full rounded-lg border border-gray-200 bg-gray-50/50 pl-7 pr-7 py-1.5 text-[11px] outline-none focus:border-loga-red focus:bg-white transition-colors"
+              />
+              {tocBuscar && (
+                <button
+                  type="button"
+                  onClick={() => setTocBuscar('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-loga-red"
+                  aria-label="Limpiar búsqueda"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+
+            {/* Grupos */}
+            {toc.length === 0 && (
+              <p className="text-[10px] text-gray-400 italic px-2 py-3 text-center">Sin coincidencias</p>
+            )}
+            {toc.map(grupo => (
+              <div key={grupo.titulo} className="space-y-0.5">
+                <p className="px-2 pt-2 pb-1 text-[9px] font-bold text-gray-400 uppercase tracking-wider">{grupo.titulo}</p>
+                {grupo.items.map(({ id, label, icon: Icon, desc }) => {
+                  const activa = seccionActiva === id;
+                  return (
+                    <a
+                      key={id}
+                      href={`#${id}`}
+                      title={desc}
+                      className={clsx(
+                        'group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[11px] transition-colors',
+                        activa
+                          ? 'bg-loga-red/10 text-loga-red font-bold shadow-sm border border-loga-red/20'
+                          : 'text-gray-600 hover:bg-gray-50 hover:text-loga-red font-medium'
+                      )}
+                      aria-current={activa ? 'true' : undefined}
+                    >
+                      <Icon size={12} className={activa ? 'text-loga-red' : 'text-gray-400 group-hover:text-loga-red'} />
+                      <span className="flex-1 truncate">{label}</span>
+                      {activa && <ChevronRight size={11} className="text-loga-red" />}
+                    </a>
+                  );
+                })}
+              </div>
             ))}
+
+            {/* Atajo: ir arriba */}
+            <button
+              type="button"
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+              className="w-full text-[10px] text-gray-400 hover:text-gray-700 px-2 py-1 transition-colors text-center border-t border-gray-100 pt-2 mt-2"
+            >
+              ↑ Volver arriba
+            </button>
           </nav>
         </aside>
 
@@ -364,6 +512,18 @@ export default function Configuracion() {
               </div>
 
               <FormField
+                label="Email de archivo de albaranes"
+                hint="Cada albarán generado o enviado se enviará también (BCC) a esta dirección. Dejar vacío para desactivar."
+              >
+                <Input
+                  type="email"
+                  value={config?.email_copia_albaranes ?? ''}
+                  onChange={(e) => setConfig((c) => c ? { ...c, email_copia_albaranes: e.target.value } : c)}
+                  placeholder="archivo@loga.es"
+                />
+              </FormField>
+
+              <FormField
                 label="Contraseña de aplicación SMTP"
                 hint={config?.smtp_pass_set ? 'Ya configurada — escribe aquí para cambiarla' : 'Genera una en Google → Seguridad → Contraseñas de aplicaciones'}
               >
@@ -445,9 +605,19 @@ export default function Configuracion() {
                   </p>
                   <p className="text-[11px] text-gray-400">
                     Variables disponibles:{' '}
-                    {['{​{producto}}', '{​{cantidad}}', '{​{unidad}}', '{​{proveedor}}'].map((v) => (
-                      <code key={v} className="mx-0.5 rounded bg-gray-100 px-1 text-gray-600">{v}</code>
+                    {['producto', 'cantidad', 'unidad', 'proveedor', 'saludo', 'hola'].map((v) => (
+                      <code
+                        key={v}
+                        title="Click para copiar"
+                        onClick={() => navigator.clipboard.writeText(`{{${v}}}`)}
+                        className="mx-0.5 rounded bg-gray-100 px-1 text-gray-600 cursor-pointer hover:bg-indigo-100 hover:text-indigo-700 transition-colors"
+                      >{`{{${v}}}`}</code>
                     ))}
+                  </p>
+                  <p className="text-[10px] text-gray-400">
+                    <code className="rounded bg-gray-100 px-1 text-gray-600">{`{{saludo}}`}</code> → <span className="text-gray-600">"Buenos días"</span> (6:00-13:59), <span className="text-gray-600">"Buenas tardes"</span> (14:00-20:59) o <span className="text-gray-600">"Buenas noches"</span> (21:00-5:59).
+                    <br/>
+                    <code className="rounded bg-gray-100 px-1 text-gray-600">{`{{hola}}`}</code> → <span className="text-gray-600">"Hola, buenos días"</span> (etc.). Hora de Madrid en el momento del envío. <span className="italic">Haz click en una variable para copiarla.</span>
                   </p>
                   <Textarea
                     rows={10}
@@ -482,12 +652,23 @@ export default function Configuracion() {
                     <div>
                       <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Cuerpo</span>
                       <pre className="mt-0.5 text-xs text-gray-700 bg-white rounded-lg px-3 py-2.5 border border-gray-100 whitespace-pre-wrap font-sans leading-relaxed min-h-[80px] shadow-sm">
-                        {(config?.plantilla_email ?? '')
-                          .replace(/\{\{producto\}\}/g, EJEMPLO.producto)
-                          .replace(/\{\{cantidad\}\}/g, EJEMPLO.cantidad)
-                          .replace(/\{\{unidad\}\}/g, EJEMPLO.unidad)
-                          .replace(/\{\{proveedor\}\}/g, EJEMPLO.proveedor)
-                          || '(escribe la plantilla a la izquierda)'}
+                        {(() => {
+                          const horaMadrid = parseInt(
+                            new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hour12: false }),
+                            10
+                          );
+                          let saludo = 'Buenos días';
+                          if (horaMadrid >= 14 && horaMadrid < 21) saludo = 'Buenas tardes';
+                          else if (horaMadrid >= 21 || horaMadrid < 6) saludo = 'Buenas noches';
+                          return (config?.plantilla_email ?? '')
+                            .replace(/\{\{producto\}\}/g, EJEMPLO.producto)
+                            .replace(/\{\{cantidad\}\}/g, EJEMPLO.cantidad)
+                            .replace(/\{\{unidad\}\}/g, EJEMPLO.unidad)
+                            .replace(/\{\{proveedor\}\}/g, EJEMPLO.proveedor)
+                            .replace(/\{\{saludo\}\}/g, saludo)
+                            .replace(/\{\{hola\}\}/g, `Hola, ${saludo.toLowerCase()}`)
+                            || '(escribe la plantilla a la izquierda)';
+                        })()}
                       </pre>
                     </div>
                   </div>
@@ -640,6 +821,30 @@ export default function Configuracion() {
               }}
               descripcion="Clasifica los embalajes por rol: Bote/Garrafa (contienen cola, indica kg dentro), Caja (multiplica botes), Etiqueta/Tapón/Otro (consumibles). El modal de Producto mostrará solo el campo relevante."
               placeholderNueva="Nueva sub-categoría (ej. Bolsa)"
+            />
+          </section>
+
+          {/* Sección: tipos de material de embalaje (Plástico, Cartón…) */}
+          <section id="tipos-material" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-orange-50/60 to-transparent">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-100/70 text-orange-600">
+                <Package size={15} />
+              </div>
+              <div className="flex-1">
+                <h2 className="text-sm font-semibold text-gray-800">Materiales de embalaje</h2>
+                <p className="text-[11px] text-gray-400">Plástico, Cartón, Madera, Vidrio… Permite saber cuánto material gasta cada fabricación.</p>
+              </div>
+            </div>
+            <CatalogoSubcategorias
+              color="amber"
+              api={{
+                listar:   configuracionApi.listarTiposMaterial,
+                crear:    configuracionApi.crearTipoMaterial,
+                editar:   configuracionApi.editarTipoMaterial,
+                eliminar: configuracionApi.eliminarTipoMaterial,
+              }}
+              descripcion="Cada embalaje (bote, caja, palé…) puede llevar asignado un material y su peso vacío en la ficha del producto. Al renombrar aquí se propaga a los productos que lo tengan."
+              placeholderNueva="Nuevo material (ej. PET, Aluminio)"
             />
           </section>
 
@@ -972,80 +1177,75 @@ export default function Configuracion() {
             </div>
           </section>
 
-          {/* Historial de actividad */}
-          <section id="historial" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">
-            <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-gray-100/60 to-transparent">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-gray-600">
-                <History size={15} />
-              </div>
-              <div className="flex-1">
-                <h2 className="text-sm font-semibold text-gray-800">Historial de actividad</h2>
-                <p className="text-[11px] text-gray-400">Últimas 50 entradas de auditoría</p>
-              </div>
-              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600">{auditoria.length}</span>
-            </div>
-            <div className="overflow-x-auto">
-              {auditoria.length === 0 ? (
-                <div className="px-5 py-12 text-center">
-                  <History size={24} className="mx-auto text-gray-300 mb-2" />
-                  <p className="text-xs text-gray-400">No hay entradas de auditoría.</p>
-                </div>
-              ) : (
-                <table className="min-w-full divide-y divide-gray-100 text-xs">
-                  <thead className="bg-gray-50/60">
-                    <tr>
-                      {['Fecha', 'Usuario', 'Accion', 'Detalle'].map(h => (
-                        <th key={h} className="px-4 py-2.5 text-left font-semibold text-gray-500 uppercase tracking-wide text-[10px]">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {auditoria.map((a: any, i: number) => (
-                      <tr key={i} className="hover:bg-gray-50/70 transition-colors">
-                        <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap font-mono text-[11px]">{new Date(a.fecha).toLocaleString('es-ES')}</td>
-                        <td className="px-4 py-2.5 font-medium text-gray-700">{a.usuario_nombre ?? 'Sistema'}</td>
-                        <td className="px-4 py-2.5">
-                          <span className="rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-600">{a.accion}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-gray-600 max-w-xs truncate">{a.motivo}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </section>
+          {/* Historial de actividad · con buscador y filtros */}
+          <HistorialActividad />
+          {/* (sección renderizada por componente externo abajo) */}
 
         </div>
       </div>
 
-      {/* Sticky bottom action bar */}
-      <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-gray-100 bg-white/85 backdrop-blur-md shadow-[0_-4px_20px_rgba(0,0,0,0.04)]">
-        <div className="mx-auto max-w-6xl px-6 py-3 flex items-center gap-3 flex-wrap">
-          {savedConfig && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-100 px-3 py-1 text-[11px] font-semibold text-emerald-700">
-              <CheckCircle2 size={12} /> Guardado
-            </span>
-          )}
-          <div className="flex-1" />
+      {/* Sticky save bar · contextual: solo si hay cambios o se está guardando.
+          Indica claramente qué pasa, ofrece descartar, y mantiene el botón
+          guardar siempre accesible. */}
+      {(hayCambios || savedConfig || savingConfig) && (
+        <div className={clsx(
+          'fixed bottom-0 left-0 right-0 z-30 border-t backdrop-blur-md transition-colors',
+          hayCambios
+            ? 'border-amber-200 bg-amber-50/95 shadow-[0_-6px_24px_rgba(245,158,11,0.15)]'
+            : 'border-gray-100 bg-white/95 shadow-[0_-4px_20px_rgba(0,0,0,0.04)]'
+        )}>
+          <div className="mx-auto max-w-7xl px-6 py-3 flex items-center gap-3 flex-wrap">
+            {hayCambios && (
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span className="text-xs font-bold text-amber-900">Cambios sin guardar</span>
+                <button
+                  onClick={() => { if (configInicial) setConfig(configInicial); setSmtpPass(''); }}
+                  className="text-[11px] text-gray-500 hover:text-loga-red underline decoration-dotted ml-2"
+                >
+                  Descartar
+                </button>
+              </div>
+            )}
+            {savedConfig && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 border border-emerald-200 px-3 py-1 text-[11px] font-bold text-emerald-700">
+                <CheckCircle2 size={12} /> Guardado correctamente
+              </span>
+            )}
+            <div className="flex-1" />
+            <button
+              onClick={handleRecheck}
+              disabled={recheckLoading}
+              className="hidden sm:flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm"
+            >
+              <Bell size={13} />
+              {recheckLoading ? 'Evaluando…' : 'Re-evaluar alertas'}
+            </button>
+            <button
+              onClick={guardarConfig}
+              disabled={savingConfig || !hayCambios}
+              className="flex items-center gap-2 rounded-lg bg-gradient-to-br from-loga-red to-loga-red-dark px-5 py-2 text-xs font-bold text-white hover:shadow-lg hover:shadow-red-200 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md shadow-red-100"
+            >
+              <Save size={13} />
+              {savingConfig ? 'Guardando…' : 'Guardar configuración'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Botón "Re-evaluar alertas" siempre visible cuando no hay cambios pendientes. */}
+      {!hayCambios && !savedConfig && !savingConfig && (
+        <div className="fixed bottom-6 right-6 z-20">
           <button
             onClick={handleRecheck}
             disabled={recheckLoading}
-            className="flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-all shadow-sm"
+            className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-all shadow-lg"
           >
             <Bell size={13} />
             {recheckLoading ? 'Evaluando…' : 'Re-evaluar alertas'}
           </button>
-          <button
-            onClick={guardarConfig}
-            disabled={savingConfig}
-            className="flex items-center gap-2 rounded-lg bg-gradient-to-br from-loga-red to-loga-red-dark px-5 py-2 text-xs font-semibold text-white hover:shadow-lg hover:shadow-red-200 disabled:opacity-60 disabled:hover:shadow-none transition-all shadow-md shadow-red-100"
-          >
-            <Save size={13} />
-            {savingConfig ? 'Guardando…' : 'Guardar configuración'}
-          </button>
         </div>
-      </div>
+      )}
 
     </div>
   );

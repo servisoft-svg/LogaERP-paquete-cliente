@@ -220,12 +220,15 @@ router.get('/resumen', async (req, res) => {
         AND p.activo = TRUE AND p.precio_venta > 0
     `);
 
-    // Pre-fetch historical prices (PVP + cost basis) for margin variation
+    // Pre-fetch historical prices (PVP + cost basis) for margin variation.
+    // Tomamos el cambio MÁS RECIENTE con precio_anterior > 0 (ignoramos
+    // entradas de "creación" donde el precio anterior es 0).
     const { rows: histPvpRows } = await pool.query(`
       SELECT DISTINCT ON (producto_id) producto_id, precio_anterior
       FROM historial_precios
       WHERE tipo = 'venta' AND created_at >= NOW() - INTERVAL '90 days'
-      ORDER BY producto_id, created_at ASC
+        AND precio_anterior > 0
+      ORDER BY producto_id, created_at DESC
     `);
     const pvpAnteriorMap: Record<string, number> = {};
     for (const r of histPvpRows) pvpAnteriorMap[r.producto_id] = parseFloat(r.precio_anterior);
@@ -234,7 +237,8 @@ router.get('/resumen', async (req, res) => {
       SELECT DISTINCT ON (producto_id) producto_id, precio_anterior
       FROM historial_precios
       WHERE tipo = 'compra' AND created_at >= NOW() - INTERVAL '90 days'
-      ORDER BY producto_id, created_at ASC
+        AND precio_anterior > 0
+      ORDER BY producto_id, created_at DESC
     `);
     const costAnteriorMap: Record<string, number> = {};
     for (const r of histCostRows) costAnteriorMap[r.producto_id] = parseFloat(r.precio_anterior);
@@ -606,7 +610,8 @@ router.get('/impacto-costes', async (_req, res) => {
                (SELECT hp.precio_anterior FROM historial_precios hp
                 WHERE hp.producto_id = ir.materia_prima_id AND hp.tipo = 'compra'
                 AND hp.created_at >= NOW() - INTERVAL '90 days'
-                ORDER BY hp.created_at ASC LIMIT 1) AS precio_anterior
+                AND hp.precio_anterior > 0
+                ORDER BY hp.created_at DESC LIMIT 1) AS precio_anterior
         FROM ingredientes_receta ir
         JOIN productos mp ON mp.id = ir.materia_prima_id
         WHERE ir.receta_id = $1
@@ -617,7 +622,8 @@ router.get('/impacto-costes', async (_req, res) => {
         FROM historial_precios hp
         WHERE hp.producto_id = $1 AND hp.tipo = 'venta'
           AND hp.created_at >= NOW() - INTERVAL '90 days'
-        ORDER BY hp.created_at ASC LIMIT 1
+          AND hp.precio_anterior > 0
+        ORDER BY hp.created_at DESC LIMIT 1
       `, [receta.producto_id]);
 
       // Coste actual = futuro proyectado por unidad (recursivo, ya divide por rendimiento)
@@ -800,12 +806,17 @@ router.get('/impacto-costes', async (_req, res) => {
     }
 
     // 2. Materias primas con cambio de precio
+    // Tomamos el PRECIO INMEDIATAMENTE ANTERIOR al actual (entrada más reciente
+    // del historial con precio_anterior > 0), no el más antiguo. Si hubo varias
+    // subidas (0→3→5), queremos mostrar 3→5, no 0→5.
     const { rows: materiasPrimas } = await pool.query(`
       WITH precio_anterior AS (
         SELECT DISTINCT ON (hp.producto_id) hp.producto_id, hp.precio_anterior
         FROM historial_precios hp
-        WHERE hp.tipo = 'compra' AND hp.created_at >= NOW() - INTERVAL '90 days'
-        ORDER BY hp.producto_id, hp.created_at ASC
+        WHERE hp.tipo = 'compra'
+          AND hp.created_at >= NOW() - INTERVAL '90 days'
+          AND hp.precio_anterior > 0
+        ORDER BY hp.producto_id, hp.created_at DESC
       )
       SELECT p.id, p.codigo, p.nombre, p.unidad_medida,
         p.precio_unitario AS precio_actual,

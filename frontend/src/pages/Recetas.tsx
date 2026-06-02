@@ -17,9 +17,22 @@ import { ToastBlock, ToastField } from '../components/ToastFields';
 
 import clsx from 'clsx';
 
+interface FormIngrediente {
+  materia_prima_id: string;
+  // Si el operario escribe un nombre que no existe, lo guardamos aquí. Al
+  // submitir, creamos la MP primero y usamos su id en ingredientes_receta.
+  materia_prima_nueva_nombre?: string;
+  cantidad: string;
+  porcentaje_merma: string;
+  unidad_medida: string;
+}
+
 interface FormReceta {
   nombre: string;
   producto_id: string;
+  // Si el operario teclea un nombre que no existe, lo guardamos aquí. Al
+  // submitir, creamos el producto fabricado con auto-código y usamos su id.
+  producto_nuevo_nombre?: string;
   rendimiento: string;
   notas: string;
   ph_min: string;
@@ -30,6 +43,9 @@ interface FormReceta {
   viscosidad_max: string;
   pasos: PasoReceta[];
   tipo_receta: 'fabricacion' | 'envasado';
+  // Ingredientes a crear inline al guardar (solo se usa al CREAR — al editar
+  // se gestionan vía endpoints separados desde el panel de "ingredientes").
+  ingredientes?: FormIngrediente[];
 }
 
 interface FormIng {
@@ -41,9 +57,11 @@ interface FormIng {
 }
 
 const EMPTY_RECETA: FormReceta = {
-  nombre: '', producto_id: '', rendimiento: '', notas: '',
+  nombre: '', producto_id: '', producto_nuevo_nombre: '',
+  rendimiento: '', notas: '',
   ph_min: '', ph_max: '', solidos_min: '', solidos_max: '',
   viscosidad_min: '', viscosidad_max: '', pasos: [], tipo_receta: 'fabricacion',
+  ingredientes: [],
 };
 
 const EMPTY_PASO: PasoReceta = {
@@ -86,7 +104,7 @@ export default function Recetas() {
   const [productos, setProductos]           = useState<Producto[]>([]);
   const [loading, setLoading]               = useState(true);
   const [busqueda, setBusqueda]             = useState('');
-  const [tabActivo, setTabActivo] = useState<'fabricacion' | 'envasado'>('fabricacion');
+  const [tabActivo] = useState<'fabricacion' | 'envasado'>('fabricacion');
   const [expandida, setExpandida]           = useState<string | null>(null);
   const [recetaDetalle, setRecetaDetalle]   = useState<Receta | null>(null);
 
@@ -268,7 +286,8 @@ export default function Recetas() {
     if (!peId) return;
     const cola = searchParams.get('cola') ?? '';
     const envase = searchParams.get('envase') ?? '';
-    setTabActivo('envasado');
+    // Envasado vive ahora en /envasado (Escandallo). Si llega un deep link aquí,
+    // redirigimos. La lógica de pre-rellenar se ejecuta en /envasado por su parte.
     setEditandoEnv(null);
     setEnvRecForm({
       nombre: '',
@@ -410,15 +429,51 @@ export default function Recetas() {
           ...qcFields,
         });
       } else {
+        // Si el usuario escribió un nombre NUEVO en el combo, creamos primero
+        // el producto_fabricado y usamos su id para la receta.
+        let productoIdFinal = formReceta.producto_id;
+        if (!productoIdFinal && formReceta.producto_nuevo_nombre?.trim() && formReceta.tipo_receta === 'fabricacion') {
+          const created = await productosApi.crear({
+            nombre: formReceta.producto_nuevo_nombre.trim(),
+            tipo: 'producto_fabricado',
+            unidad_medida: 'kg',
+          } as never);
+          productoIdFinal = (created.data as { id: string }).id;
+        }
+        // Ingredientes añadidos inline en la creación. Para los que el operario
+        // tecleó un nombre nuevo (materia_prima_nueva_nombre), creamos la MP
+        // primero y luego usamos su id. Filtramos incompletos.
+        const rawIngs = (formReceta.ingredientes ?? []).filter(i =>
+          (i.materia_prima_id || i.materia_prima_nueva_nombre?.trim()) && i.cantidad && Number(i.cantidad) > 0
+        );
+        const ingredientesInline: Array<{ materia_prima_id: string; cantidad: number; porcentaje_merma: number; unidad_medida: string }> = [];
+        for (const i of rawIngs) {
+          let mpId = i.materia_prima_id;
+          if (!mpId && i.materia_prima_nueva_nombre?.trim()) {
+            const created = await productosApi.crear({
+              nombre: i.materia_prima_nueva_nombre.trim(),
+              tipo: 'materia_prima',
+              unidad_medida: i.unidad_medida || 'kg',
+            } as never);
+            mpId = (created.data as { id: string }).id;
+          }
+          ingredientesInline.push({
+            materia_prima_id: mpId,
+            cantidad: Number(i.cantidad),
+            porcentaje_merma: Number(i.porcentaje_merma || 0),
+            unidad_medida: i.unidad_medida || 'kg',
+          });
+        }
         const res = await recetasApi.crear({
           nombre: formReceta.nombre.trim(),
-          producto_id: formReceta.producto_id || undefined,
+          producto_id: productoIdFinal || undefined,
           rendimiento: formReceta.tipo_receta === 'envasado' ? 1 : (formReceta.rendimiento ? Number(formReceta.rendimiento) : undefined),
           notas: formReceta.notas || undefined,
           pasos: formReceta.pasos,
           tipo_receta: formReceta.tipo_receta,
+          ingredientes: ingredientesInline.length > 0 ? ingredientesInline : undefined,
           ...qcFields,
-        });
+        } as never);
         id = (res.data as { id?: string })?.id;
       }
       return { id, nombre: formReceta.nombre.trim() };
@@ -639,9 +694,9 @@ export default function Recetas() {
       {/* Cabecera */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-lg font-bold text-gray-900">Recetas</h1>
+          <h1 className="text-lg font-bold text-gray-900">Fórmulas</h1>
           <p className="text-xs text-gray-400 mt-0.5">
-            {recetas.length} receta{recetas.length !== 1 ? 's' : ''} activa{recetas.length !== 1 ? 's' : ''}
+            {recetas.length} fórmula{recetas.length !== 1 ? 's' : ''} activa{recetas.length !== 1 ? 's' : ''}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -655,27 +710,12 @@ export default function Recetas() {
             onClick={abrirNuevaReceta}
             className="flex items-center gap-2 rounded-lg bg-loga-red px-4 py-2.5 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors shadow-sm"
           >
-            <Plus size={16} /> Nueva Receta
+            <Plus size={16} /> Nueva Fórmula
           </button>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-2">
-        <button onClick={() => setTabActivo('fabricacion')}
-          className={clsx('flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all',
-            tabActivo === 'fabricacion' ? 'bg-loga-red text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300')}>
-          <FlaskConical size={15} /> Fabricación
-          <span className={clsx('rounded-full px-1.5 py-0.5 text-[10px] font-bold', tabActivo === 'fabricacion' ? 'bg-white/20' : 'bg-gray-100')}>
-            {recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === 'fabricacion').length}
-          </span>
-        </button>
-        <button onClick={() => setTabActivo('envasado')}
-          className={clsx('flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all',
-            tabActivo === 'envasado' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300')}>
-          <Beaker size={15} /> Envasado
-        </button>
-      </div>
+      {/* Tab Envasado eliminada — Envasado tiene su propia pestaña "Escandallo" en el navbar. */}
 
       {/* Busqueda + filtro stock */}
       {tabActivo === 'fabricacion' && <div className="flex items-center gap-2">
@@ -1257,33 +1297,73 @@ export default function Recetas() {
           )}
 
           <FormField
-            label={formReceta.tipo_receta === 'fabricacion' ? 'Producto que produce esta receta (granel)' : 'Producto envasado'}
+            label={formReceta.tipo_receta === 'fabricacion' ? 'Producto fabricado' : 'Producto envasado'}
             hint={editandoReceta
               ? 'No editable: cambiar el producto de una receta rompe trazabilidad.'
               : (formReceta.tipo_receta === 'fabricacion'
-                ? 'Selecciona el producto fabricado/granel que va a producirse al ejecutar esta receta.'
+                ? 'Busca uno existente o escribe un nombre nuevo para crearlo.'
                 : 'Selecciona el producto envasado final.')}
             required
           >
-            <Select
-              value={formReceta.producto_id}
-              disabled={!!editandoReceta}
-              onChange={e => setFormReceta(f => ({ ...f, producto_id: e.target.value }))}
-            >
-              <option value="">— Selecciona producto —</option>
-              {(formReceta.tipo_receta === 'fabricacion'
-                ? productos.filter(p => p.tipo === 'producto_fabricado' && p.activo)
-                : productos.filter(p => p.tipo === 'producto_envasado' && p.activo)
-              ).map(p => (
-                <option key={p.id} value={p.id}>{p.codigo} — {p.nombre}</option>
-              ))}
-            </Select>
+            {/* Edición: nombre fijo del producto actual */}
+            {editandoReceta ? (
+              <div className="rounded-xl border-2 border-gray-200 bg-gray-50 px-3 py-2.5 text-sm text-gray-700">
+                {productos.find(p => p.id === formReceta.producto_id)?.nombre ?? '—'}
+              </div>
+            ) : formReceta.tipo_receta === 'fabricacion' ? (
+              // Combo con búsqueda + creación inline para producto_fabricado
+              !formReceta.producto_id && formReceta.producto_nuevo_nombre ? (
+                <div className="rounded-xl border-2 border-loga-red bg-red-50 px-3 py-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-bold text-loga-red uppercase">Nuevo producto fabricado</p>
+                    <p className="text-sm font-semibold text-gray-900 truncate">{formReceta.producto_nuevo_nombre}</p>
+                    <p className="text-[10px] text-gray-500">Se creará con código auto al guardar la receta</p>
+                  </div>
+                  <button type="button"
+                    onClick={() => setFormReceta(f => ({ ...f, producto_nuevo_nombre: '' }))}
+                    className="rounded-lg p-1.5 text-gray-400 hover:bg-red-100 hover:text-loga-red shrink-0">
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : formReceta.producto_id ? (
+                <div className="rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">
+                      {productos.find(p => p.id === formReceta.producto_id)?.nombre}
+                    </p>
+                    <p className="text-[10px] font-mono text-gray-400">
+                      {productos.find(p => p.id === formReceta.producto_id)?.codigo}
+                    </p>
+                  </div>
+                  <button type="button"
+                    onClick={() => setFormReceta(f => ({ ...f, producto_id: '' }))}
+                    className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-loga-red shrink-0">
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <ProductoFinalCombo
+                  productos={productos.filter(p => p.tipo === 'producto_fabricado' && p.activo)}
+                  onSelectExistente={(p) => setFormReceta(f => ({ ...f, producto_id: p.id, producto_nuevo_nombre: '' }))}
+                  onCrearNuevo={(nombre) => setFormReceta(f => ({ ...f, producto_id: '', producto_nuevo_nombre: nombre }))}
+                  placeholder="Buscar producto fabricado o escribir nombre nuevo..."
+                  crearLabel="Se creará como producto fabricado con código auto al guardar"
+                  stockUnit="kg"
+                  focusBorderColor="red"
+                />
+              )
+            ) : (
+              <Select
+                value={formReceta.producto_id}
+                onChange={e => setFormReceta(f => ({ ...f, producto_id: e.target.value }))}
+              >
+                <option value="">— Selecciona producto —</option>
+                {productos.filter(p => p.tipo === 'producto_envasado' && p.activo).map(p => (
+                  <option key={p.id} value={p.id}>{p.codigo} — {p.nombre}</option>
+                ))}
+              </Select>
+            )}
           </FormField>
-          {!editandoReceta && formReceta.tipo_receta === 'fabricacion' && productos.filter(p => p.tipo === 'producto_fabricado' && p.activo).length === 0 && (
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
-              No tienes productos de tipo «producto fabricado» (granel). Crea uno primero en Productos para asociarlo aquí.
-            </p>
-          )}
 
           {/* QC Section — solo fabricación */}
           {formReceta.tipo_receta === 'fabricacion' && <div className="rounded-xl border border-blue-100 bg-blue-50/30 p-4 space-y-3">
@@ -1343,6 +1423,132 @@ export default function Recetas() {
               </FormField>
             </div>
           </div>}
+
+          {/* Ingredientes (solo al crear; al editar se gestiona desde el panel
+              de ingredientes existente abajo). Permite añadir MP + cantidad + merma
+              al crear la receta sin tener que abrir otra pantalla. */}
+          {!editandoReceta && formReceta.tipo_receta === 'fabricacion' && (
+            <div className="rounded-xl border border-amber-100 bg-amber-50/30 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">
+                  Ingredientes / Materias primas ({(formReceta.ingredientes ?? []).length})
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setFormReceta(f => ({ ...f, ingredientes: [...(f.ingredientes ?? []), { materia_prima_id: '', cantidad: '', porcentaje_merma: '0', unidad_medida: 'kg' }] }))}
+                  className="flex items-center gap-1 rounded-md bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-200 transition-colors"
+                >
+                  <Plus size={11} /> Añadir MP
+                </button>
+              </div>
+              {(formReceta.ingredientes ?? []).length === 0 && (
+                <p className="text-[11px] text-amber-600 italic">Sin ingredientes. Pulsa "Añadir MP" para empezar.</p>
+              )}
+              {(formReceta.ingredientes ?? []).map((ing, idx) => {
+                const mpList = productos.filter(p => p.tipo === 'materia_prima' && p.activo);
+                const updateRow = (patch: Partial<FormIngrediente>) => setFormReceta(f => {
+                  const arr = [...(f.ingredientes ?? [])];
+                  arr[idx] = { ...arr[idx], ...patch };
+                  return { ...f, ingredientes: arr };
+                });
+                return (
+                  <div key={idx} className="rounded-lg border border-amber-200 bg-white p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] font-bold text-amber-600">MP #{idx + 1}</p>
+                      <button
+                        type="button"
+                        onClick={() => setFormReceta(f => ({ ...f, ingredientes: (f.ingredientes ?? []).filter((_, i) => i !== idx) }))}
+                        className="text-loga-red hover:bg-red-50 rounded p-1"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                    {/* Selector de MP: existente, nueva, o combo */}
+                    <div>
+                      <label className="text-[10px] text-gray-500 font-medium block mb-1">Materia prima</label>
+                      {ing.materia_prima_nueva_nombre && !ing.materia_prima_id ? (
+                        <div className="rounded-lg border-2 border-amber-300 bg-amber-50 px-3 py-2 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-bold text-amber-700 uppercase">Nueva materia prima</p>
+                            <p className="text-sm font-semibold text-gray-900 truncate">{ing.materia_prima_nueva_nombre}</p>
+                            <p className="text-[10px] text-gray-500">Se creará con código auto MP-XXX al guardar</p>
+                          </div>
+                          <button type="button"
+                            onClick={() => updateRow({ materia_prima_nueva_nombre: '' })}
+                            className="rounded-lg p-1.5 text-gray-400 hover:bg-amber-100 hover:text-loga-red shrink-0">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : ing.materia_prima_id ? (
+                        <div className="rounded-lg border-2 border-gray-200 bg-white px-3 py-2 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-gray-900 truncate">
+                              {mpList.find(p => p.id === ing.materia_prima_id)?.nombre ?? '—'}
+                            </p>
+                            <p className="text-[10px] font-mono text-gray-400">
+                              {mpList.find(p => p.id === ing.materia_prima_id)?.codigo}
+                            </p>
+                          </div>
+                          <button type="button"
+                            onClick={() => updateRow({ materia_prima_id: '' })}
+                            className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-loga-red shrink-0">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ) : (
+                        <ProductoFinalCombo
+                          productos={mpList}
+                          onSelectExistente={(p) => updateRow({ materia_prima_id: p.id, materia_prima_nueva_nombre: '' })}
+                          onCrearNuevo={(nombre) => updateRow({ materia_prima_id: '', materia_prima_nueva_nombre: nombre })}
+                          placeholder="Buscar MP o escribir nombre nuevo..."
+                          crearLabel="Se creará como materia prima con código auto MP-XXX al guardar"
+                          stockUnit="kg"
+                        />
+                      )}
+                    </div>
+                    {/* Cantidad / Unidad / Merma — más ancho en merma para que se vea */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="text-[10px] text-gray-500 font-medium">Cantidad</label>
+                        <Input
+                          type="number" min="0" step="0.001"
+                          value={ing.cantidad}
+                          onChange={e => updateRow({ cantidad: e.target.value })}
+                          placeholder="0"
+                          className="!text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-gray-500 font-medium">Unidad</label>
+                        <Select
+                          value={ing.unidad_medida}
+                          onChange={e => updateRow({ unidad_medida: e.target.value })}
+                          className="!text-xs"
+                        >
+                          <option value="kg">kg</option>
+                          <option value="L">L</option>
+                          <option value="ud">ud</option>
+                        </Select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-gray-500 font-medium">Merma %</label>
+                        <Input
+                          type="number" min="0" step="0.01"
+                          value={ing.porcentaje_merma}
+                          onChange={e => updateRow({ porcentaje_merma: e.target.value })}
+                          placeholder="0"
+                          className="!text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {(formReceta.ingredientes ?? []).length > 0 && (
+                <p className="text-[10px] text-gray-500 italic">Tras guardar podrás reordenarlos o asignarlos a pasos en el editor.</p>
+              )}
+            </div>
+          )}
 
           <FormField label="Notas">
             <Textarea
@@ -1486,16 +1692,44 @@ export default function Recetas() {
                       </div>
                     );
                   })()}
-                  {/* Ingredient selector for this step */}
-                  {editandoReceta && recetaDetalle && (recetaDetalle.ingredientes ?? []).length > 0 && (
+                  {/* Ingredient selector for this step.
+                      Fuente unificada: en edición usamos recetaDetalle.ingredientes
+                      (datos en BD); al crear usamos formReceta.ingredientes (form
+                      state) y enriquecemos con nombre/unidad desde productos. */}
+                  {(() => {
+                    type IngFuente = { id: string; materia_prima_id: string; nombre_mp: string; cantidad: string; unidad_medida: string };
+                    const fuente: IngFuente[] = editandoReceta && recetaDetalle
+                      ? ((recetaDetalle.ingredientes ?? []) as IngFuente[])
+                      : (formReceta.ingredientes ?? [])
+                          .filter(i => i.materia_prima_id && i.cantidad)
+                          .map(i => {
+                            const p = productos.find(pp => pp.id === i.materia_prima_id);
+                            return {
+                              id: i.materia_prima_id, // pseudo id para key
+                              materia_prima_id: i.materia_prima_id,
+                              nombre_mp: p?.nombre ?? '—',
+                              cantidad: String(i.cantidad),
+                              unidad_medida: i.unidad_medida || 'kg',
+                            };
+                          });
+                    if (fuente.length === 0) return null;
+                    return (
                     <div>
                       <label className="text-[10px] text-gray-500 font-medium">Ingredientes en este paso (orden = orden de echado)</label>
                       {/* Lista ordenada de seleccionados, con flechas para reordenar */}
                       {(paso.ingredientes_ids ?? []).length > 0 && (
                         <div className="mt-1 space-y-1 rounded-md border border-indigo-100 bg-indigo-50/40 p-1.5">
                           {(paso.ingredientes_ids ?? []).map((mpId, idx, arr) => {
-                            const ing = (recetaDetalle.ingredientes ?? []).find(i => i.materia_prima_id === mpId);
+                            const ing = fuente.find(i => i.materia_prima_id === mpId);
                             if (!ing) return null;
+                            // Si es agua y este paso tiene cantidad_agua, mostramos la
+                            // porción del paso (30, no 60). Permite ver el reparto real.
+                            const esAg = esAguaMP(ing.nombre_mp);
+                            const cantidadPasoAgua = Number(paso.cantidad_agua) > 0
+                              ? Number(paso.cantidad_agua) : null;
+                            const cantidadShown = esAg && cantidadPasoAgua != null
+                              ? cantidadPasoAgua
+                              : parseFloat(ing.cantidad);
                             const moverArr = (a: string[], from: number, to: number) => {
                               const cp = [...a];
                               const [el] = cp.splice(from, 1);
@@ -1511,7 +1745,7 @@ export default function Recetas() {
                               <div key={mpId} className="flex items-center gap-1.5 bg-white rounded px-2 py-1 border border-indigo-100">
                                 <span className="text-[10px] font-bold tabular-nums text-indigo-600 w-4">{idx + 1}.</span>
                                 <span className="flex-1 text-[11px] font-medium text-indigo-900 truncate">
-                                  {ing.nombre_mp} <span className="text-indigo-500 font-mono">({parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida})</span>
+                                  {ing.nombre_mp} <span className="text-indigo-500 font-mono">({cantidadShown.toLocaleString('es-ES')} {ing.unidad_medida})</span>
                                 </span>
                                 <button
                                   type="button"
@@ -1538,28 +1772,60 @@ export default function Recetas() {
                           })}
                         </div>
                       )}
-                      {/* Disponibles para añadir (no seleccionados) */}
+                      {/* Disponibles para añadir — excluye los YA seleccionados en
+                          este paso Y los usados en pasos anteriores (para no repetir).
+                          Excepción para agua: muestra el restante (total − sumado en
+                          pasos previos); si no queda, no se muestra. */}
                       <div className="mt-1 flex flex-wrap gap-1">
-                        {(recetaDetalle.ingredientes ?? [])
-                          .filter(ing => !(paso.ingredientes_ids ?? []).includes(ing.materia_prima_id))
-                          .map(ing => (
-                            <button
-                              key={ing.id}
-                              type="button"
-                              onClick={() => {
-                                const p = [...formReceta.pasos];
-                                const ids = p[pi].ingredientes_ids ?? [];
-                                p[pi] = { ...p[pi], ingredientes_ids: [...ids, ing.materia_prima_id] };
-                                setFormReceta(f => ({ ...f, pasos: p }));
-                              }}
-                              className="rounded-md px-2 py-0.5 text-[10px] font-medium border border-gray-200 bg-white text-gray-500 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
-                            >
-                              + {ing.nombre_mp} <span className="text-gray-400 font-mono">({parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida})</span>
-                            </button>
-                          ))}
+                        {(() => {
+                          // Ingredientes usados en pasos PREVIOS (no agua).
+                          const usadosPrevios = new Set<string>();
+                          for (let j = 0; j < pi; j++) {
+                            for (const mpId of (formReceta.pasos[j]?.ingredientes_ids ?? [])) {
+                              usadosPrevios.add(mpId);
+                            }
+                          }
+                          // Agua consumida en pasos previos (sumada).
+                          const aguaPrevios = formReceta.pasos.slice(0, pi)
+                            .reduce((s, pp) => s + (Number(pp.cantidad_agua) || 0), 0);
+                          // Total agua de la receta (sobre fuente unificada).
+                          const totalAguaReceta = fuente
+                            .filter(i => esAguaMP(i.nombre_mp))
+                            .reduce((s, i) => s + parseFloat(i.cantidad), 0);
+                          const aguaRestante = Math.max(0, totalAguaReceta - aguaPrevios);
+
+                          return fuente
+                            .filter(ing => !(paso.ingredientes_ids ?? []).includes(ing.materia_prima_id))
+                            .filter(ing => {
+                              const esAg = esAguaMP(ing.nombre_mp);
+                              if (esAg) return aguaRestante > 0.001;
+                              // No-agua: ocultar si ya está en pasos previos.
+                              return !usadosPrevios.has(ing.materia_prima_id);
+                            })
+                            .map(ing => {
+                              const esAg = esAguaMP(ing.nombre_mp);
+                              const cantidadMostrar = esAg ? aguaRestante : parseFloat(ing.cantidad);
+                              return (
+                                <button
+                                  key={ing.id}
+                                  type="button"
+                                  onClick={() => {
+                                    const p = [...formReceta.pasos];
+                                    const ids = p[pi].ingredientes_ids ?? [];
+                                    p[pi] = { ...p[pi], ingredientes_ids: [...ids, ing.materia_prima_id] };
+                                    setFormReceta(f => ({ ...f, pasos: p }));
+                                  }}
+                                  className="rounded-md px-2 py-0.5 text-[10px] font-medium border border-gray-200 bg-white text-gray-500 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
+                                >
+                                  + {ing.nombre_mp} <span className="text-gray-400 font-mono">({cantidadMostrar.toLocaleString('es-ES')} {ing.unidad_medida})</span>
+                                </button>
+                              );
+                            });
+                        })()}
                       </div>
                     </div>
-                  )}
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -2102,10 +2368,14 @@ function EnvaseCombo({ materiales, onSelectExistente, onCrearNuevo }: {
 
 // ProductoFinalCombo: selector híbrido — elige existente o crea nuevo
 // ───────────────────────────────────────────────────────────────
-function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo }: {
+function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo, placeholder = 'Buscar existente o escribir nombre nuevo...', crearLabel = 'Se creará como producto envasado con código auto PE-XXX', stockUnit = 'ud', focusBorderColor = 'emerald' }: {
   productos: Producto[];
   onSelectExistente: (p: Producto) => void;
   onCrearNuevo: (nombre: string) => void;
+  placeholder?: string;
+  crearLabel?: string;
+  stockUnit?: string;
+  focusBorderColor?: 'emerald' | 'red';
 }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
@@ -2123,8 +2393,13 @@ function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo }: {
         onChange={e => { setText(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
         onBlur={() => setTimeout(() => setOpen(false), 200)}
-        placeholder="Buscar existente o escribir nombre nuevo..."
-        className="w-full rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none"
+        placeholder={placeholder}
+        className={clsx(
+          "w-full rounded-xl border-2 border-gray-200 bg-white px-3 py-2.5 text-sm outline-none",
+          focusBorderColor === 'red'
+            ? "focus:border-loga-red focus:ring-2 focus:ring-red-100"
+            : "focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+        )}
       />
       {open && (
         <div className="absolute z-[200] mt-1 w-full rounded-xl border border-gray-200 bg-white shadow-2xl overflow-hidden max-h-72 overflow-y-auto">
@@ -2138,18 +2413,18 @@ function ProductoFinalCombo({ productos, onSelectExistente, onCrearNuevo }: {
                     <p className="text-sm font-semibold text-gray-800 truncate">{p.nombre}</p>
                     <p className="text-[10px] font-mono text-gray-400">{p.codigo}</p>
                   </div>
-                  <span className="text-[10px] text-gray-400">{parseFloat(p.stock_actual).toLocaleString('es-ES')} ud</span>
+                  <span className="text-[10px] text-gray-400">{parseFloat(p.stock_actual).toLocaleString('es-ES')} {stockUnit}</span>
                 </button>
               ))}
             </div>
           )}
           {q && !exact && (
-            <div className="border-t border-gray-100 bg-emerald-50/50">
+            <div className={clsx("border-t border-gray-100", focusBorderColor === 'red' ? 'bg-red-50/50' : 'bg-emerald-50/50')}>
               <button type="button" onMouseDown={() => onCrearNuevo(text.trim())}
-                className="w-full text-left px-3 py-3 hover:bg-emerald-100 transition-colors">
-                <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">+ Crear nuevo</p>
+                className={clsx("w-full text-left px-3 py-3 transition-colors", focusBorderColor === 'red' ? 'hover:bg-red-100' : 'hover:bg-emerald-100')}>
+                <p className={clsx("text-[10px] font-bold uppercase tracking-wider", focusBorderColor === 'red' ? 'text-loga-red' : 'text-emerald-600')}>+ Crear nuevo</p>
                 <p className="text-sm font-semibold text-gray-900">«{text.trim()}»</p>
-                <p className="text-[10px] text-gray-500">Se creará como producto envasado con código auto PE-XXX</p>
+                <p className="text-[10px] text-gray-500">{crearLabel}</p>
               </button>
             </div>
           )}
