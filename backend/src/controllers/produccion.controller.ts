@@ -1224,7 +1224,7 @@ export const produccionController = {
 
     const client = await pool.connect();
     try {
-      await client.query('BEGIN');
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
 
       const { rows: [orden] } = await client.query(
         `SELECT * FROM ordenes_produccion WHERE id = $1 FOR UPDATE`,

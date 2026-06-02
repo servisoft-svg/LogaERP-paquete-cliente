@@ -1020,9 +1020,14 @@ router.post('/:id/dosificar', async (req, res) => {
     let loteUsado: string | null = null;
     let antes = 0, despues = 0;
     if (lote_id) {
-      const { rows: [lote] } = await client.query(
-        `SELECT id, cantidad_actual FROM lotes
-         WHERE id = $1 AND producto_id = $2 AND estado = 'aprobado'
+      const { rows: [lote] } = await client.query<{
+        id: string; cantidad_actual: string; reservado: string;
+      }>(
+        `SELECT l.id, l.cantidad_actual,
+           COALESCE((SELECT SUM(rs.cantidad) FROM reservas_stock rs
+                     WHERE rs.lote_id = l.id AND rs.estado = 'activa'), 0) AS reservado
+         FROM lotes l
+         WHERE l.id = $1 AND l.producto_id = $2 AND l.estado = 'aprobado'
          FOR UPDATE`,
         [lote_id, producto_id]
       );
@@ -1031,9 +1036,13 @@ router.post('/:id/dosificar', async (req, res) => {
         return res.status(404).json({ error: 'Lote no encontrado o no aprobado para este producto.' });
       }
       antes = parseFloat(lote.cantidad_actual);
-      if (antes < cant - 1e-6) {
+      const reservado = parseFloat(lote.reservado);
+      const disponibleReal = antes - reservado;
+      if (disponibleReal < cant - 1e-6) {
         await client.query('ROLLBACK');
-        return res.status(409).json({ error: `Stock insuficiente en lote: disponible ${antes.toFixed(3)} ${prod.unidad_medida}, pedido ${cant.toFixed(3)}.` });
+        return res.status(409).json({
+          error: `Stock insuficiente en lote: disponible ${disponibleReal.toFixed(3)} ${prod.unidad_medida} (lote tiene ${antes.toFixed(3)} pero ${reservado.toFixed(3)} están reservados para pedidos), pedido ${cant.toFixed(3)}.`,
+        });
       }
       despues = antes - cant;
       await client.query(`UPDATE lotes SET cantidad_actual = $1 WHERE id = $2`, [despues.toFixed(6), lote.id]);
@@ -1105,6 +1114,25 @@ router.delete('/:id/dosificar/:dosifId', async (req, res) => {
   try {
     const { id: ordenId, dosifId } = req.params;
     await client.query('BEGIN');
+
+    // Si la orden ya está completada/cancelada, el consumo final ya descontó
+    // el resto y devolver el stock parcial al lote crea kilos fantasma.
+    // Solo se puede revertir mientras la orden está en estado mutable.
+    const { rows: [orden] } = await client.query<{ estado: string }>(
+      `SELECT estado FROM ordenes_produccion WHERE id = $1 FOR UPDATE`,
+      [ordenId]
+    );
+    if (!orden) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
+    if (!['borrador', 'confirmada', 'en_proceso'].includes(orden.estado)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `No se puede revertir una echada en una orden "${orden.estado}". Para devolver stock, cancela la orden (revierte todo el consumo de forma coherente).`,
+      });
+    }
+
     const { rows: [d] } = await client.query(
       `SELECT id, producto_id, lote_id, cantidad FROM dosificaciones_orden
        WHERE id = $1 AND orden_id = $2 FOR UPDATE`,

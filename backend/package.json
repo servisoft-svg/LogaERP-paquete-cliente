@@ -1,6 +1,6 @@
 {
   "name": "loga-erp-backend",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "description": "ERP Loga — Backend Node.js + TypeScript",
   "main": "dist/index.js",
   "scripts": {

@@ -55,6 +55,26 @@ async function snapshotReceta(recetaId: string, motivo: string, usuarioId?: stri
   } catch { /* snapshot fail-soft — no bloquea la operación principal */ }
 }
 
+// Valida que la unidad del ingrediente coincida con la unidad base del producto
+// (la misma que usan los lotes). Si no, la fabricación restaría en escala
+// errónea (ej. receta='gr' + producto='kg' → resta 100kg en vez de 0.1kg).
+// Devuelve null si OK, o un string con el error si hay mismatch.
+async function validarUnidadIngrediente(
+  materia_prima_id: string,
+  unidad_medida: string | undefined | null,
+): Promise<string | null> {
+  if (!unidad_medida) return null;
+  const { rows: [prod] } = await pool.query<{ unidad_medida: string; nombre: string }>(
+    `SELECT unidad_medida, nombre FROM productos WHERE id = $1`,
+    [materia_prima_id]
+  );
+  if (!prod) return `Materia prima ${materia_prima_id} no encontrada`;
+  if (String(unidad_medida).trim().toLowerCase() !== String(prod.unidad_medida).trim().toLowerCase()) {
+    return `Unidad inconsistente para "${prod.nombre}": receta usa "${unidad_medida}" pero el producto está en "${prod.unidad_medida}". La fabricación restaría en escala incorrecta.`;
+  }
+  return null;
+}
+
 // POST /api/recetas/importar
 router.post('/importar', adminOnly, async (req, res) => {
   try {
@@ -102,6 +122,9 @@ router.post('/importar', adminOnly, async (req, res) => {
           }
           if (!mp_id) continue;
           if (!ing.cantidad || Number(ing.cantidad) <= 0) continue;
+
+          const errUnidad = await validarUnidadIngrediente(mp_id, ing.unidad_medida);
+          if (errUnidad) return res.status(400).json({ error: errUnidad });
 
           await pool.query(
             `INSERT INTO ingredientes_receta (receta_id, materia_prima_id, cantidad, porcentaje_merma, unidad_medida)
@@ -254,6 +277,8 @@ router.post('/', adminOnly, async (req, res) => {
     if (Array.isArray(ingredientes) && ingredientes.length > 0) {
       for (const ing of ingredientes) {
         if (!ing.materia_prima_id || !ing.cantidad) continue;
+        const errUnidad = await validarUnidadIngrediente(ing.materia_prima_id, ing.unidad_medida);
+        if (errUnidad) return res.status(400).json({ error: errUnidad });
         await pool.query(
           `INSERT INTO ingredientes_receta
              (receta_id, materia_prima_id, cantidad, porcentaje_merma, unidad_medida)
@@ -345,6 +370,8 @@ router.post('/:id/ingredientes', adminOnly, async (req, res) => {
     if (!materia_prima_id || !cantidad) {
       return res.status(400).json({ error: 'materia_prima_id y cantidad son obligatorios' });
     }
+    const errUnidad = await validarUnidadIngrediente(materia_prima_id, unidad_medida);
+    if (errUnidad) return res.status(400).json({ error: errUnidad });
     const recetaId = req.params.id;
     await snapshotReceta(recetaId, 'Antes de añadir ingrediente', (req as any).user?.id);
     const pasoIdx = paso_index != null && !isNaN(Number(paso_index)) ? Number(paso_index) : null;
@@ -402,6 +429,16 @@ router.post('/:id/ingredientes', adminOnly, async (req, res) => {
 router.put('/:id/ingredientes/:ingId', adminOnly, async (req, res) => {
   try {
     const { cantidad, porcentaje_merma, unidad_medida, paso_index } = req.body;
+    if (unidad_medida) {
+      const { rows: [ingActual] } = await pool.query<{ materia_prima_id: string }>(
+        `SELECT materia_prima_id FROM ingredientes_receta WHERE id = $1 AND receta_id = $2`,
+        [req.params.ingId, req.params.id]
+      );
+      if (ingActual) {
+        const errUnidad = await validarUnidadIngrediente(ingActual.materia_prima_id, unidad_medida);
+        if (errUnidad) return res.status(400).json({ error: errUnidad });
+      }
+    }
     await snapshotReceta(req.params.id, 'Antes de editar ingrediente', (req as any).user?.id);
     // paso_index sólo se modifica si la clave está presente en el body
     // (permite limpiarlo enviando null, conservarlo omitiéndolo).

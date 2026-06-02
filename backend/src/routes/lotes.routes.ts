@@ -459,6 +459,7 @@ router.get('/:id/trazabilidad', async (req, res) => {
 });
 
 router.patch('/:id/estado', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
     const { estado, motivo } = req.body;
@@ -467,11 +468,21 @@ router.patch('/:id/estado', async (req, res) => {
     }
     if (!motivo) return res.status(400).json({ error: 'motivo es obligatorio para cambios de estado' });
 
-    // Validate state transition
-    const { rows: [actual] } = await pool.query(`SELECT estado, cantidad_actual FROM lotes WHERE id = $1`, [id]);
-    if (!actual) return res.status(404).json({ error: 'Lote no encontrado' });
+    await client.query('BEGIN');
+
+    // Lock lote + leer estado actual en la misma tx para evitar race entre
+    // UPDATE estado e INSERT stock_move (antes eran 2 pool.query separadas).
+    const { rows: [actual] } = await client.query<{ estado: string; cantidad_actual: string }>(
+      `SELECT estado, cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (!actual) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lote no encontrado' });
+    }
     const TRANS_LOTE: Record<string, string[]> = { cuarentena: ['aprobado', 'rechazado'], aprobado: ['cuarentena', 'rechazado'], rechazado: [] };
     if (!(TRANS_LOTE[actual.estado] ?? []).includes(estado)) {
+      await client.query('ROLLBACK');
       return res.status(422).json({ error: `No se puede cambiar de "${actual.estado}" a "${estado}"` });
     }
 
@@ -481,75 +492,99 @@ router.patch('/:id/estado', async (req, res) => {
 
     // Aprobación cuarentena → aprobado: SOLO ADMIN puede ejecutarla.
     // Normativa REACH exige firma de responsable de calidad autorizado.
-    // Un operario aunque escriba un motivo válido no puede aprobar lotes
-    // desviados de QC (riesgo legal + producto fuera de spec a cliente).
     if (esAprobacionDeCuarentena) {
       if (userRol !== 'admin') {
+        await client.query('ROLLBACK');
         return res.status(403).json({
           error: 'Solo un administrador (responsable de calidad) puede aprobar un lote en cuarentena. Esta restricción cumple normativa REACH.',
         });
       }
       const motivoTrim = String(motivo).trim();
       if (motivoTrim.length < 10) {
+        await client.query('ROLLBACK');
         return res.status(400).json({
           error: 'Aprobar un lote en cuarentena requiere motivo de al menos 10 caracteres explicando por qué se aprueba pese a la desviación QC.',
         });
       }
       if (!userId) {
+        await client.query('ROLLBACK');
         return res.status(401).json({ error: 'Sesión no identificada — no se puede registrar revisor.' });
       }
     }
 
+    // Leer stock_actual del producto ANTES del UPDATE para registrar antes/después
+    // reales en el stock_move (no usar 0 como placeholder — el timeline del
+    // producto debe ser coherente con el resto de movimientos).
+    const { rows: [productoAntes] } = await client.query<{ producto_id: string; stock_actual: string }>(
+      `SELECT l.producto_id, p.stock_actual
+       FROM lotes l JOIN productos p ON p.id = l.producto_id
+       WHERE l.id = $1 FOR UPDATE`,
+      [id]
+    );
+    const stockAntesProd = productoAntes ? parseFloat(productoAntes.stock_actual) : 0;
+
     const { rows: [lote] } = esAprobacionDeCuarentena
-      ? await pool.query(
+      ? await client.query(
           `UPDATE lotes SET estado = $1,
              revisor_id = $3, revisado_at = NOW(), motivo_revision = $4
            WHERE id = $2 RETURNING *`,
           [estado, id, userId, String(motivo).trim()]
         )
-      : await pool.query(
+      : await client.query(
           `UPDATE lotes SET estado = $1 WHERE id = $2 RETURNING *`,
           [estado, id]
         );
-    if (!lote) return res.status(404).json({ error: 'Lote no encontrado' });
-
-    // [H2.1 audit v3] Eliminado UPDATE defensivo: trigger 025 ya recalcula stock_actual al cambiar estado del lote.
+    if (!lote) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lote no encontrado' });
+    }
 
     // Stock move for estado change (aprobado = stock entry, rechazado = stock exit)
     const cantLote = parseFloat(lote.cantidad_actual);
     if (cantLote > 0) {
+      // Releer stock_actual tras el UPDATE (el trigger 025 ya lo recalculó)
+      const { rows: [prodDespues] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1`,
+        [lote.producto_id]
+      );
+      const stockDespuesProd = parseFloat(prodDespues?.stock_actual ?? '0');
+
       if (estado === 'aprobado' && actual.estado === 'cuarentena') {
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'entrada', $3::NUMERIC, 0, $3::NUMERIC, $4, $5)`,
-          [lote.producto_id, lote.id, cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} aprobado: ${motivo}`]
+           VALUES ($1, $2, 'entrada', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, cantLote.toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} aprobado: ${motivo}`]
         );
       } else if (estado === 'rechazado' && actual.estado === 'aprobado') {
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
-          [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} rechazado: ${motivo}`]
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, (-cantLote).toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} rechazado: ${motivo}`]
         );
       } else if (estado === 'cuarentena' && actual.estado === 'aprobado') {
-        // Vuelta a cuarentena (revisión post-aprobación) — sale del stock disponible
-        await pool.query(
+        await client.query(
           `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, usuario_id, motivo)
-           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, 0, $5, $6)`,
-          [lote.producto_id, lote.id, (-cantLote).toFixed(6), cantLote.toFixed(6), (req as any).user?.id ?? null, `Lote ${lote.lote_interno} devuelto a cuarentena: ${motivo}`]
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, $6, $7)`,
+          [lote.producto_id, lote.id, (-cantLote).toFixed(6), stockAntesProd.toFixed(6), stockDespuesProd.toFixed(6), userId, `Lote ${lote.lote_interno} devuelto a cuarentena: ${motivo}`]
         );
       }
     }
 
-    await pool.query(
+    await client.query(
       `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
        VALUES ($1, 'CAMBIO_ESTADO_LOTE', 'lotes', $2, $3)`,
-      [(req as any).user?.id ?? null, id, motivo]
+      [userId, id, motivo]
     );
+
+    await client.query('COMMIT');
     invalidarCacheFinanzas(); // estado lote afecta inmovilizado (sólo aprobado cuenta)
     return res.json(lote);
   } catch (err: unknown) {
+    await client.query('ROLLBACK').catch(() => undefined);
     const msg = err instanceof Error ? err.message : 'Error';
     return res.status(500).json({ error: msg });
+  } finally {
+    client.release();
   }
 });
 
