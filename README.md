@@ -23,7 +23,6 @@ Si no los tienes, `install.bat` lo instala todo automáticamente.
 4. Doble-click `crear-acceso-directo.bat` (crea icono en Escritorio).
 5. Doble-click en el icono **"Loga ERP"** del Escritorio.
 6. El navegador se abre solo en `http://localhost:5173`.
-7. Login: `admin@loga.es` / `Admin123!` → cámbialo al primer acceso.
 
 ## Migración desde versión anterior
 
