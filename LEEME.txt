@@ -1,0 +1,92 @@
+================================================================
+   ERP LOGA - PAQUETE DE PRODUCCION
+================================================================
+
+Contenido:
+  - backend\         codigo backend (Node + TypeScript)
+  - frontend\dist\   frontend ya compilado (no necesitas npm build)
+  - database\        migraciones SQL + dump inicial
+  - *.bat            scripts de instalacion y arranque
+
+================================================================
+   PRIMERA INSTALACION (PC nuevo o sin ERP previo)
+================================================================
+
+1. Asegurate de tener Node.js v18+ y PostgreSQL 16 instalados.
+   Si no, ejecuta install.bat — instala todo automaticamente.
+
+2. Doble-click sobre install.bat (solo la primera vez).
+
+3. Doble-click sobre logaerp-produccion.bat.
+
+4. Abre el navegador en:  http://localhost:5173
+   Login inicial:  admin@loga.es / Admin123!
+   (Cambia la contrasena al primer acceso.)
+
+================================================================
+   MIGRACION DESDE VERSION ANTERIOR
+================================================================
+
+Si el PC ya tiene una version anterior del ERP con datos:
+
+1. CIERRA la version vieja del ERP.
+
+2. Copia esta carpeta SOBRE la actual (NO borres C:\LogaERP\pgdata).
+
+3. Doble-click sobre migrar-cliente.bat.
+   - Hace un backup de seguridad de la BD actual al Escritorio.
+   - Arranca el backend que aplica migraciones nuevas SOBRE los
+     datos existentes (sin perder nada).
+
+4. Espera al mensaje "[migrations] OK". Cierra esa ventana.
+
+5. Doble-click sobre logaerp-produccion.bat para arrancar.
+
+================================================================
+   ARRANQUE DIARIO
+================================================================
+
+Doble-click sobre logaerp-produccion.bat.
+Abre http://localhost:5173 en el navegador.
+
+Para arranque automatico al encender el PC:
+  Win+R -> shell:startup -> crear acceso directo a
+  logaerp-produccion.bat ahi.
+
+================================================================
+   CREDENCIALES IMPORTANTES (NO PERDER)
+================================================================
+
+Configura los siguientes datos al primer arranque:
+  - Cambia la contrasena de admin@loga.es
+  - Configura SMTP en Configuracion -> Email
+  - Configura Google Drive en Configuracion -> Backup (opcional)
+
+La BACKUP_PASSWORD que esta en backend\.env es CRITICA:
+  - Cifra los backups (locales + Drive).
+  - Sin ella NO se pueden restaurar.
+  - Copia esa cadena en un sitio seguro (papel, gestor).
+
+================================================================
+   COMO HACER UN BACKUP MANUAL
+================================================================
+
+Opcion 1 - Desde el ERP:
+   Configuracion -> Backup -> "Crear Backup Ahora".
+
+Opcion 2 - Desde linea de comandos (escritorio):
+   Doble-click sobre exportar-db.bat.
+
+================================================================
+   PROBLEMAS COMUNES
+================================================================
+
+* "Acceso denegado" al puerto 5173 -> cierra cualquier otra
+  app que use ese puerto, o cambia PORT en backend\.env.
+
+* "pg_dump no encontrado" -> verifica que PostgreSQL esta en PATH
+  o ejecuta install.bat de nuevo.
+
+* "ECONNREFUSED" al login -> Postgres no esta arrancado. Reinicia.
+
+Log de arranque: logaerp.log (al lado del .bat).
