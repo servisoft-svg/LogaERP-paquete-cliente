@@ -15,6 +15,10 @@ export const productosApi = {
   importar: (data: object) => api.post('/productos/importar', data),
   subirSDS: (id: string, file: File) => { const fd = new FormData(); fd.append('sds', file); return api.post(`/productos/${id}/sds`, fd, { headers: { 'Content-Type': 'multipart/form-data' } }); },
   eliminarSDS: (id: string) => api.delete(`/productos/${id}/sds`),
+  // Botes compatibles con una caja: lista y reemplazo (PUT atómico).
+  listarBotesCompatibles: (cajaId: string) => api.get(`/productos/${cajaId}/botes-compatibles`),
+  setBotesCompatibles: (cajaId: string, data: { bote_ids: string[]; botes_por_caja?: number }) =>
+    api.put(`/productos/${cajaId}/botes-compatibles`, data),
 };
 
 export const recetasApi = {
@@ -175,8 +179,16 @@ export const pedidosApi = {
   lotesDisponibles: (id: string) => api.get(`/pedidos/${id}/lotes-disponibles`),
   desgloseCoste: (id: string) => api.get(`/pedidos/${id}/desglose-coste`),
   cancelar: (id: string) => api.delete(`/pedidos/${id}`),
+  // Cajas compatibles con un bote (PE/ME): usado para autoenlazar caja al hacer pedido
+  cajasCompatiblesPara: (boteId: string) => api.get(`/productos/${boteId}/cajas-compatibles`),
   descargarAlbaran: (id: string) => api.get(`/pedidos/${id}/albaran.pdf`, { responseType: 'blob' }),
   enviarAlbaran: (id: string, email: string) => api.post(`/pedidos/${id}/enviar-albaran`, { email }),
+  // Material de embalaje EXTRA (no aparece en albarán ni factura).
+  listarEmbalajesExtra: (id: string) => api.get(`/pedidos/${id}/embalajes-extra`),
+  agregarEmbalajeExtra: (id: string, data: { producto_id: string; cantidad: number; notas?: string }) =>
+    api.post(`/pedidos/${id}/embalajes-extra`, data),
+  borrarEmbalajeExtra: (id: string, extraId: string) =>
+    api.delete(`/pedidos/${id}/embalajes-extra/${extraId}`),
 };
 
 export const configuracionApi = {
@@ -346,13 +358,21 @@ api.interceptors.response.use(
   async error => {
     const config = error.config ?? {};
     const status = error.response?.status;
-    const msg = error.response?.data?.error ?? '';
+    const data = error.response?.data;
 
-    // Retry on 500 with serialization keywords (max 2 retries)
-    const isSerializationError = status === 500 && (
+    // `error` siempre string (compat). `error_info` lleva el código simbólico.
+    const codigo: string | undefined = data?.error_info?.codigo;
+    const msg: string = (typeof data?.error === 'string' ? data.error : '')
+      || data?.mensaje
+      || data?.error_info?.mensaje
+      || '';
+
+    // Retry en conflictos de concurrencia (max 2). El backend ya mapea pg 40001
+    // a CONFLICTO_CONCURRENCIA; los 500 antiguos por keywords siguen cubiertos.
+    const isSerializationError = codigo === 'CONFLICTO_CONCURRENCIA' || (status === 500 && (
       msg.includes('serializ') || msg.includes('could not serialize') ||
       msg.includes('deadlock') || msg.includes('concurrent')
-    );
+    ));
     if (isSerializationError && (config._retryCount ?? 0) < 2) {
       config._retryCount = (config._retryCount ?? 0) + 1;
       await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
@@ -385,5 +405,46 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Helpers para componentes: extraen código simbólico, mensaje y detalles del
+// error de axios sin tener que conocer la forma exacta de la respuesta.
+// Uso típico:
+//   try { ... } catch (e) {
+//     const { codigo, mensaje } = parseApiError(e);
+//     if (codigo === 'STOCK_INSUFICIENTE') notify.warn(mensaje);
+//     else notify.error(mensaje);
+//   }
+export type ApiErrorInfo = {
+  codigo?: string;
+  http?: number;
+  mensaje: string;
+  detalles?: Record<string, unknown>;
+  traceId?: string;
+};
+
+export function parseApiError(err: unknown): ApiErrorInfo {
+  const ax = err as { response?: { status?: number; data?: any }; message?: string };
+  const data = ax?.response?.data;
+  const http = ax?.response?.status;
+  const traceId = data?.traceId;
+  if (data?.error_info) {
+    return {
+      codigo: data.error_info.codigo,
+      http: data.error_info.http ?? http,
+      mensaje: data.error_info.mensaje ?? (typeof data.error === 'string' ? data.error : null) ?? data.mensaje ?? 'Error',
+      detalles: data.error_info.detalles,
+      traceId,
+    };
+  }
+  return {
+    http,
+    mensaje: (typeof data?.error === 'string' ? data.error : null) ?? data?.mensaje ?? ax?.message ?? 'Error',
+    traceId,
+  };
+}
+
+export function getErrorCode(err: unknown): string | undefined {
+  return parseApiError(err).codigo;
+}
 
 export default api;

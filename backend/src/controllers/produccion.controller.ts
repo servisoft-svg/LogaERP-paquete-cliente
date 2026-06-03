@@ -1,5 +1,6 @@
-import { Request, Response } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import { produccionService } from '../services/produccion.service';
+import { AppError } from '../lib/AppError';
 import { pool, acquireProductLocks } from '../db/pool';
 import PDFDocument           from 'pdfkit';
 import nodemailer            from 'nodemailer';
@@ -78,7 +79,7 @@ export const produccionController = {
     }
   },
 
-  async confirmar(req: Request, res: Response) {
+  async confirmar(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
       const usuario_id: string | undefined = (req as any).user?.id;
@@ -230,27 +231,24 @@ export const produccionController = {
         lote_estado: qc_fuera_de_rango ? 'cuarentena' : 'aprobado',
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Error interno';
-
+      // El service tira Error('CODIGO[:detalle]'). El errorHandler global mapea
+      // CODIGO al catálogo si existe. Aquí solo enriquecemos los detalles antes
+      // de delegar, para que el cliente reciba info estructurada del faltante.
+      const msg = err instanceof Error ? err.message : '';
       if (msg.startsWith('STOCK_INSUFICIENTE')) {
-        return res.status(422).json({
-          error: 'STOCK_INSUFICIENTE',
-          detalle: msg,
-          mensaje: 'No hay suficiente stock de materias primas. La operación fue cancelada completamente.',
-        });
+        const partes = msg.split(':');
+        return next(new AppError(
+          'STOCK_INSUFICIENTE',
+          'No hay suficiente stock de materias primas. La operación fue cancelada completamente.',
+          {
+            ingrediente: partes[1] ?? null,
+            necesario: partes[2]?.split('=')[1] ?? null,
+            disponible: partes[3]?.split('=')[1] ?? null,
+            raw: msg,
+          }
+        ));
       }
-      if (msg.startsWith('ESTADO_INVALIDO')) {
-        return res.status(409).json({
-          error: 'ESTADO_INVALIDO',
-          mensaje: 'La orden no está en un estado que permita confirmación.',
-        });
-      }
-      if (msg === 'ORDEN_NO_ENCONTRADA') {
-        return res.status(404).json({ error: 'Orden no encontrada' });
-      }
-
-      console.error('[ProduccionCtrl.confirmar]', err);
-      return res.status(500).json({ error: 'Error interno del servidor' });
+      return next(err);
     }
   },
 

@@ -361,14 +361,23 @@ router.post('/simular', async (req: Request, res: Response) => {
     }
     if (!cfg) return res.status(400).json({ error: 'config o receta_id obligatorio' });
 
-    const botes = Number(cantidad_botes);
-    const liquidoCant   = cfg.liquido_id ? Number(cfg.liquido_cantidad ?? 0) * botes : 0;
-    const envasesUd     = cfg.envase_id ? Number(cfg.envases_por_bote ?? 1) * botes : 0;
-    const etiquetasUd   = cfg.etiqueta_id ? Number(cfg.etiquetas_por_bote ?? 1) * botes : 0;
+    // El input `cantidad_botes` representa UNIDADES PE A FABRICAR (legacy name).
+    // Si el PE es "caja con N botes" (lleva_caja=true + caja.unidades_por_envase>1),
+    // cada PE contiene N envases. El multiplicador M agrupa esa relación:
+    //   PE = 1 caja → consume 1 caja + M envases + M etiquetas + M × liquido kg.
+    // Si el PE es un bote suelto (sin caja), M=1 → comportamiento legacy.
+    const N = Number(cantidad_botes);
     const llevaCaja     = !!cfg.lleva_caja;
     const cajaUds       = Number(cfg.caja_uds ?? 1);
-    const cajasUd       = llevaCaja && cajaUds > 0 ? Math.ceil(botes / cajaUds) : 0;
-    const sobranBotes   = llevaCaja && cajaUds > 0 ? (cajasUd * cajaUds) - botes : 0;
+    const M = (llevaCaja && cajaUds > 1) ? cajaUds : Number(cfg.envases_por_bote ?? 1);
+    const totalEnvases  = N * M; // total botes/frascos individuales producidos
+    const liquidoCant   = cfg.liquido_id ? Number(cfg.liquido_cantidad ?? 0) * totalEnvases : 0;
+    const envasesUd     = cfg.envase_id ? totalEnvases : 0;
+    // Etiqueta = etiquetas_por_bote × N (por unidad PE/caja, no por envase individual).
+    // 1 etiqueta/caja por defecto. Para etiquetar cada bote, poner = M.
+    const etiquetasUd   = cfg.etiqueta_id ? Number(cfg.etiquetas_por_bote ?? 1) * N : 0;
+    const cajasUd       = llevaCaja ? N : 0; // 1 caja por unidad PE
+    const sobranBotes   = 0; // sin botes "sobrantes" — el PE define exactamente cuántos
     const peOrigenId    = cfg.pe_origen_id as string | undefined;
 
     // Stock check (consulta directa por id)
@@ -398,7 +407,7 @@ router.post('/simular', async (req: Request, res: Response) => {
       items.push({
         rol: 'pe_origen', id: peOrigenId, nombre: pep?.nombre ?? 'PE origen',
         codigo: '', unidad: pep?.unidad_medida ?? 'ud',
-        cantidad: botes, stock: stockOf(peOrigenId),
+        cantidad: N, stock: stockOf(peOrigenId),
       });
     }
     if (cfg.etiqueta_id) items.push({
@@ -425,7 +434,7 @@ router.post('/simular', async (req: Request, res: Response) => {
         items.push({
           rol: 'extra', id: p.id, nombre: p.nombre, codigo: p.codigo,
           unidad: p.unidad_medida ?? 'ud',
-          cantidad: Number(e.cantidad_por_bote) * botes,
+          cantidad: Number(e.cantidad_por_bote) * totalEnvases,
           stock: parseFloat(p.stock_actual),
         });
       }
@@ -470,7 +479,9 @@ router.post('/simular', async (req: Request, res: Response) => {
 
     const insuficientes = items.filter(it => it.stock < it.cantidad).length;
     res.json({
-      cantidad_botes: botes,
+      cantidad_botes: N,
+      total_envases: totalEnvases,
+      multiplicador: M,
       items,
       sobran_botes: sobranBotes,
       insuficientes,
@@ -514,19 +525,25 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
     if (e) return res.status(400).json({ error: `Receta inválida: ${e}` });
   }
 
-  const botes = Number(cantidad_botes);
-  // Modo "empaquetar": sin líquido ni envase, solo descontar PE origen + caja
-  const liquidoCant = cfg.liquido_id ? Number(cfg.liquido_cantidad ?? 0) * botes : 0;
+  // N = unidades PE a fabricar (= cajas si lleva caja).
+  // M = envases dentro de cada PE (= caja.unidades_por_envase si aplica).
+  // totalEnvases = N × M = botes/frascos individuales consumidos.
+  // Cantidades de PE producidas, lote PE y stock_move PE usan N.
+  // Cantidades de líquido/envase/etiqueta consumidas usan totalEnvases.
+  const N = Number(cantidad_botes);
+  const llevaCaja   = !!cfg.lleva_caja;
+  const cajaUdsCfg  = Number(cfg.caja_uds ?? 1);
+  const M = (llevaCaja && cajaUdsCfg > 1) ? cajaUdsCfg : Number(cfg.envases_por_bote ?? 1);
+  const totalEnvases = N * M;
+  const liquidoCant = cfg.liquido_id ? Number(cfg.liquido_cantidad ?? 0) * totalEnvases : 0;
   const liquidoConsumo = cfg.liquido_unidad === 'g' ? liquidoCant / 1000 :
                          cfg.liquido_unidad === 'mL' ? liquidoCant / 1000 :
                          liquidoCant;
-  const envasesUd   = cfg.envase_id ? Number(cfg.envases_por_bote ?? 1) * botes : 0;
-  // PE origen (cajeado): consume N botes existentes del PE_origen
+  const envasesUd   = cfg.envase_id ? totalEnvases : 0;
   const peOrigenId  = cfg.pe_origen_id as string | undefined;
-  const etiquetasUd = cfg.etiqueta_id ? Number(cfg.etiquetas_por_bote ?? 1) * botes : 0;
-  const llevaCaja   = !!cfg.lleva_caja;
-  const cajaUds     = Number(cfg.caja_uds ?? 1);
-  const cajasUd     = llevaCaja && cajaUds > 0 ? Math.ceil(botes / cajaUds) : 0;
+  // Etiqueta por unidad PE (por caja, no por envase individual).
+  const etiquetasUd = cfg.etiqueta_id ? Number(cfg.etiquetas_por_bote ?? 1) * N : 0;
+  const cajasUd     = llevaCaja ? N : 0; // 1 caja por unidad PE
   const extras      = Array.isArray(cfg.extras)
     ? (cfg.extras as Array<{ producto_id: string; cantidad_por_bote: number }>)
         .filter(e => e?.producto_id && Number(e?.cantidad_por_bote) > 0)
@@ -554,10 +571,10 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
     const checks: Array<{ id: unknown; needed: number; label: string }> = [];
     if (cfg.liquido_id) checks.push({ id: cfg.liquido_id, needed: liquidoConsumo, label: 'líquido' });
     if (cfg.envase_id)  checks.push({ id: cfg.envase_id,  needed: envasesUd,      label: 'envase'  });
-    if (peOrigenId)     checks.push({ id: peOrigenId,     needed: botes,          label: 'PE origen' });
+    if (peOrigenId)     checks.push({ id: peOrigenId,     needed: N,              label: 'PE origen' });
     if (cfg.etiqueta_id) checks.push({ id: cfg.etiqueta_id, needed: etiquetasUd, label: 'etiqueta' });
     if (llevaCaja && cfg.caja_id) checks.push({ id: cfg.caja_id, needed: cajasUd, label: 'caja' });
-    for (const e of extras) checks.push({ id: e.producto_id, needed: Number(e.cantidad_por_bote) * botes, label: 'extra' });
+    for (const e of extras) checks.push({ id: e.producto_id, needed: Number(e.cantidad_por_bote) * totalEnvases, label: 'extra' });
     if (checks.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'sin_consumo', detalle: 'Selecciona al menos un componente a consumir.' });
@@ -583,8 +600,8 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
                $1, $1, 'completada', CURRENT_DATE, NOW(), NOW(), $2, 'envasado',
                $3, $4, $5, $6::UUID, $6::UUID, $7::UUID, $8::UUID)
        RETURNING id, numero_orden`,
-      [botes,
-       `Envasado: ${botes} botes${req.body.receta_id ? ' (receta)' : ''}`,
+      [N,
+       `Envasado: ${N} unidades PE${M > 1 ? ` (× ${M} envases = ${totalEnvases} botes)` : ''}${req.body.receta_id ? ' (receta)' : ''}`,
        cfg.liquido_id ?? null, cfg.envase_id ?? null,
        cfg.envase_nombre ?? null,
        userId,
@@ -620,11 +637,11 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
 
     if (cfg.liquido_id) await descontar(String(cfg.liquido_id), liquidoConsumo, `Envasado ${orden.numero_orden} · líquido`);
     if (cfg.envase_id)  await descontar(String(cfg.envase_id),  envasesUd,      `Envasado ${orden.numero_orden} · envase`);
-    if (peOrigenId)     await descontar(peOrigenId, botes, `Empaquetado ${orden.numero_orden} · PE origen`);
+    if (peOrigenId)     await descontar(peOrigenId, N, `Empaquetado ${orden.numero_orden} · PE origen`);
     if (cfg.etiqueta_id) await descontar(String(cfg.etiqueta_id), etiquetasUd, `Envasado ${orden.numero_orden} · etiqueta`);
     if (llevaCaja && cfg.caja_id) await descontar(String(cfg.caja_id), cajasUd, `Envasado ${orden.numero_orden} · caja`);
     for (const e of extras) {
-      await descontar(e.producto_id, Number(e.cantidad_por_bote) * botes, `Envasado ${orden.numero_orden} · extra`);
+      await descontar(e.producto_id, Number(e.cantidad_por_bote) * totalEnvases, `Envasado ${orden.numero_orden} · extra`);
     }
 
     // Crear lote del PE resultante con coste = suma de componentes / botes
@@ -637,14 +654,14 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
       const c = parseFloat(r?.coste_medio_actual ?? '') || parseFloat(r?.precio_unitario ?? '') || 0;
       return c;
     };
-    const costeExtras = extras.reduce((s, e) => s + costeOf(e.producto_id) * Number(e.cantidad_por_bote) * botes, 0);
+    const costeExtras = extras.reduce((s, e) => s + costeOf(e.producto_id) * Number(e.cantidad_por_bote) * totalEnvases, 0);
     const costeTotal =
       costeOf(cfg.liquido_id) * liquidoConsumo
       + costeOf(cfg.envase_id) * envasesUd
       + (cfg.etiqueta_id ? costeOf(cfg.etiqueta_id) * etiquetasUd : 0)
       + (llevaCaja && cfg.caja_id ? costeOf(cfg.caja_id) * cajasUd : 0)
       + costeExtras;
-    const costeUnitario = botes > 0 ? costeTotal / botes : 0;
+    const costeUnitario = N > 0 ? costeTotal / N : 0;
 
     const year = new Date().getFullYear();
     const { rows: [seqRow] } = await client.query<{ n: number }>(`
@@ -657,20 +674,20 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
                          estado, fecha_fabricacion, precio_compra)
       VALUES ($1, $2, $3::NUMERIC, $3::NUMERIC, 'aprobado', CURRENT_DATE, $4::NUMERIC)
       RETURNING id
-    `, [cfg.producto_envasado_id, loteInterno, botes, costeUnitario.toFixed(6)]);
+    `, [cfg.producto_envasado_id, loteInterno, N, costeUnitario.toFixed(6)]);
 
     // stock_move ENTRADA (produccion_salida) — para trazabilidad + finanzas
     const { rows: [peStock] } = await client.query<{ stock_actual: string }>(
       `SELECT stock_actual FROM productos WHERE id = $1`, [cfg.producto_envasado_id]
     );
-    const peStockAntes = parseFloat(peStock?.stock_actual ?? '0') - botes; // ya se aplicó trigger
+    const peStockAntes = parseFloat(peStock?.stock_actual ?? '0') - N; // ya se aplicó trigger
     await client.query(
       `INSERT INTO stock_moves
          (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, orden_id, usuario_id, motivo)
        VALUES ($1, $2, 'produccion_salida', $3, $4, $5, $6, $7, $8)`,
-      [cfg.producto_envasado_id, loteRow.id, botes.toFixed(6),
-       peStockAntes.toFixed(6), (peStockAntes + botes).toFixed(6),
-       orden.id, userId, `Envasado ${orden.numero_orden}: ${botes} botes`]
+      [cfg.producto_envasado_id, loteRow.id, N.toFixed(6),
+       peStockAntes.toFixed(6), (peStockAntes + N).toFixed(6),
+       orden.id, userId, `Envasado ${orden.numero_orden}: ${N} ud PE${M > 1 ? ` (${totalEnvases} botes)` : ''}`]
     );
 
     // Bumpear version
@@ -691,7 +708,7 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
          RETURNING id`,
         [String(nombre_receta ?? cfg.nombre ?? `Envasado ${orden.numero_orden}`).trim(),
          cfg.producto_envasado_id,
-         cfg.liquido_id, cfg.liquido_cantidad ?? liquidoCant / botes, cfg.liquido_unidad ?? 'kg',
+         cfg.liquido_id, cfg.liquido_cantidad ?? (totalEnvases > 0 ? liquidoCant / totalEnvases : 0), cfg.liquido_unidad ?? 'kg',
          cfg.envase_id, cfg.envases_por_bote ?? 1,
          cfg.etiqueta_id ?? null, cfg.etiquetas_por_bote ?? 1,
          !!cfg.lleva_caja, cfg.lleva_caja ? cfg.caja_id : null,
@@ -708,7 +725,7 @@ router.post('/ejecutar', async (req: Request, res: Response) => {
       `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
        VALUES ($1, 'ENVASADO_EJECUTADO', 'ordenes_produccion', $2, $3)`,
       [userId, orden.id,
-       `${orden.numero_orden} · ${botes} botes envasados · Lote PE: ${loteInterno}${recetaCreadaId ? ' · receta guardada' : ''}`]
+       `${orden.numero_orden} · ${N} ud PE${M > 1 ? ` (${totalEnvases} botes)` : ''} · Lote PE: ${loteInterno}${recetaCreadaId ? ' · receta guardada' : ''}`]
     ).catch(() => undefined);
     res.json({
       ok: true,

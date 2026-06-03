@@ -1180,4 +1180,424 @@ router.get('/informe-plastico', async (req, res) => {
   }
 });
 
+// ── INFORME MATERIALES (todos los materiales agrupados) ─────────────────────
+// Regla de contabilización (def. usuario):
+//   - El consumo de embalaje SOLO cuenta cuando el pedido cliente está
+//     **confirmado / en_produccion / completado** (es decir, NO nuevo y NO
+//     cancelado). La fabricación/envasado interno NO suma — sumamos por venta,
+//     no por producción.
+//   - Si un pedido confirmado se cancela, deja de aparecer automáticamente
+//     (la query se recalcula en vivo en cada descarga; no hay snapshot).
+//
+// Fuente: para cada línea de pedido contabilizable, buscamos la receta de
+// envasado del producto envasado (PE) y expandimos a sus componentes:
+//   envase          → 1 unidad × cantidad_pe (envases_por_bote)
+//   etiqueta        → etiquetas_por_bote × cantidad_pe
+//   caja            → ceil(cantidad_pe / unidades_por_caja)
+// El palet (peso_pale_vacio_kg) se suma como bloque sintético "Madera" porque
+// no es un producto referenciado, sólo un peso libre en la receta.
+router.get('/informe-materiales', async (req, res) => {
+  try {
+    const desde = req.query.desde as string || new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
+    const hasta = req.query.hasta as string || new Date().toISOString().slice(0, 10);
+
+    // Periodo: pedidos cuyo `created_at` cae en el rango. Si el pedido se
+    // cancela posteriormente queda fuera por el filtro de estado.
+    const ESTADOS_VALIDOS = ['confirmado', 'en_produccion', 'completado'];
+
+    const { rows } = await pool.query<{
+      codigo: string;
+      nombre: string;
+      material_embalaje: string | null;
+      peso_material_vacio_kg: string | null;
+      unidades_por_envase: string | null;
+      envases_consumidos: string;
+      num_ordenes: number;
+    }>(`
+      WITH lineas_periodo AS (
+        SELECT
+          lp.producto_id AS pe_id,
+          lp.cantidad::NUMERIC AS unidades_pe,
+          ped.id AS pedido_id
+        FROM lineas_pedido lp
+        JOIN pedidos ped ON ped.id = lp.pedido_id
+        WHERE ped.estado::text = ANY($3::text[])
+          AND ped.created_at >= $1::DATE
+          AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+      ),
+      -- Multiplicador M = envases por unidad PE.
+      -- Si la receta lleva caja con multiplicador (productos.unidades_por_envase > 1),
+      -- M = ese multiplicador. Si no, M = envases_por_bote (default 1).
+      embalaje_consumido AS (
+        -- Envase: M × unidades_pe
+        SELECT re.envase_id AS material_id,
+               l.unidades_pe *
+                 GREATEST(
+                   CASE WHEN re.lleva_caja AND re.caja_id IS NOT NULL
+                        THEN COALESCE((SELECT pcaja.unidades_por_envase FROM productos pcaja WHERE pcaja.id = re.caja_id), re.envases_por_bote, 1)
+                        ELSE re.envases_por_bote
+                   END,
+                 1) AS unidades,
+               l.pedido_id
+          FROM lineas_periodo l
+          JOIN recetas_envasado re ON re.producto_envasado_id = l.pe_id AND re.activa = TRUE
+         WHERE re.envase_id IS NOT NULL
+        UNION ALL
+        -- Etiqueta: etiquetas_por_bote × unidades_pe (por unidad PE, no por envase)
+        SELECT re.etiqueta_id,
+               l.unidades_pe * GREATEST(re.etiquetas_por_bote, 0),
+               l.pedido_id
+          FROM lineas_periodo l
+          JOIN recetas_envasado re ON re.producto_envasado_id = l.pe_id AND re.activa = TRUE
+         WHERE re.etiqueta_id IS NOT NULL
+        UNION ALL
+        -- Caja: usar lp.caja_id explícito si está (modelo nuevo PE=bote).
+        -- Si no, caer a receta envasado (modelo legacy donde PE=caja).
+        SELECT lp.caja_id AS material_id, lp.cantidad_cajas::NUMERIC AS unidades, ped.id AS pedido_id
+          FROM lineas_pedido lp
+          JOIN pedidos ped ON ped.id = lp.pedido_id
+         WHERE ped.estado::text = ANY($3::text[])
+           AND ped.created_at >= $1::DATE
+           AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+           AND lp.caja_id IS NOT NULL AND lp.cantidad_cajas > 0
+        UNION ALL
+        SELECT re.caja_id, l.unidades_pe, l.pedido_id
+          FROM lineas_periodo l
+          JOIN recetas_envasado re ON re.producto_envasado_id = l.pe_id AND re.activa = TRUE
+          JOIN lineas_pedido lp2 ON lp2.pedido_id = l.pedido_id AND lp2.producto_id = l.pe_id
+         WHERE re.lleva_caja = TRUE AND re.caja_id IS NOT NULL
+           AND lp2.caja_id IS NULL   -- solo si no hay caja_id explícita
+        UNION ALL
+        -- Venta directa de material_embalaje (ej. cliente compra 50 botes sueltos):
+        -- la línea ES el material; cuenta 1:1.
+        SELECT lp.producto_id AS material_id, lp.cantidad::NUMERIC AS unidades, ped.id AS pedido_id
+          FROM lineas_pedido lp
+          JOIN pedidos ped ON ped.id = lp.pedido_id
+          JOIN productos p ON p.id = lp.producto_id AND p.tipo = 'material_embalaje'
+         WHERE ped.estado::text = ANY($3::text[])
+           AND ped.created_at >= $1::DATE
+           AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+      )
+      SELECT
+        p.codigo,
+        p.nombre,
+        p.material_embalaje,
+        p.peso_material_vacio_kg,
+        p.unidades_por_envase,
+        SUM(ec.unidades) AS envases_consumidos,
+        COUNT(DISTINCT ec.pedido_id)::INT AS num_ordenes
+      FROM embalaje_consumido ec
+      JOIN productos p ON p.id = ec.material_id
+      WHERE p.tipo = 'material_embalaje'
+      GROUP BY p.id, p.codigo, p.nombre, p.material_embalaje, p.peso_material_vacio_kg, p.unidades_por_envase
+      ORDER BY p.material_embalaje NULLS LAST, p.codigo
+    `, [desde, hasta, ESTADOS_VALIDOS]);
+
+    // Palets: peso suelto en kg, agrupado como línea sintética bajo "Madera".
+    // Una caja por cada `unidades_por_caja`; un palet por cada `cajas_por_pale`.
+    const { rows: palets } = await pool.query<{ peso_kg: string; pedidos: number }>(`
+      WITH lineas_periodo AS (
+        SELECT lp.producto_id AS pe_id, lp.cantidad::NUMERIC AS unidades_pe, ped.id AS pedido_id
+        FROM lineas_pedido lp
+        JOIN pedidos ped ON ped.id = lp.pedido_id
+        WHERE ped.estado::text = ANY($3::text[])
+          AND ped.created_at >= $1::DATE
+          AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+      )
+      SELECT
+        COALESCE(SUM(
+          CEIL(
+            CEIL(l.unidades_pe / GREATEST(re.unidades_por_caja, 1)::NUMERIC)
+            / GREATEST(re.cajas_por_pale, 1)::NUMERIC
+          ) * re.peso_pale_vacio_kg
+        ), 0)::NUMERIC AS peso_kg,
+        COUNT(DISTINCT l.pedido_id)::INT AS pedidos
+      FROM lineas_periodo l
+      JOIN recetas_envasado re ON re.producto_envasado_id = l.pe_id AND re.activa = TRUE
+      WHERE re.cajas_por_pale > 0 AND re.peso_pale_vacio_kg > 0
+    `, [desde, hasta, ESTADOS_VALIDOS]);
+
+    const palet_kg = parseFloat(palets[0]?.peso_kg ?? '0');
+    const palet_pedidos = palets[0]?.pedidos ?? 0;
+
+    // Catálogo completo de material_embalaje — para inferencia por nombre PE
+    // cuando no hay receta_envasado activa.
+    const { rows: mesCatalogo } = await pool.query<{
+      id: string;
+      codigo: string;
+      nombre: string;
+      material_embalaje: string | null;
+      peso_material_vacio_kg: string | null;
+      unidades_por_envase: string | null;
+    }>(
+      `SELECT id, codigo, nombre, material_embalaje, peso_material_vacio_kg, unidades_por_envase
+       FROM productos WHERE tipo = 'material_embalaje' AND activo = TRUE
+       ORDER BY codigo`
+    );
+
+    // Pedidos cuyo PE no tiene receta_envasado activa: caen FUERA del cómputo.
+    // Lo más típico: PE duplicados por error (typos, "amar" → "cola amarila").
+    // Los listamos al final del CSV para que el admin sepa qué falta mapear.
+    const { rows: sinReceta } = await pool.query<{
+      pe_codigo: string;
+      pe_nombre: string;
+      pe_tipo: string;
+      unidades: string;
+      num_pedidos: number;
+    }>(`
+      SELECT
+        p.codigo AS pe_codigo,
+        p.nombre AS pe_nombre,
+        p.tipo::text AS pe_tipo,
+        SUM(lp.cantidad::NUMERIC) AS unidades,
+        COUNT(DISTINCT ped.id)::INT AS num_pedidos
+      FROM lineas_pedido lp
+      JOIN pedidos ped ON ped.id = lp.pedido_id
+      JOIN productos p ON p.id = lp.producto_id
+      LEFT JOIN recetas_envasado re ON re.producto_envasado_id = lp.producto_id AND re.activa = TRUE
+      WHERE ped.estado::text = ANY($3::text[])
+        AND ped.created_at >= $1::DATE
+        AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+        AND p.tipo = 'producto_envasado'
+        AND re.id IS NULL
+        -- material_embalaje vendido directo SÍ se cuenta (rama UNION arriba),
+        -- así que sólo flagueamos PEs sin receta.
+      GROUP BY p.id, p.codigo, p.nombre, p.tipo
+      ORDER BY SUM(lp.cantidad::NUMERIC) DESC
+    `, [desde, hasta, ESTADOS_VALIDOS]);
+
+    type Detalle = {
+      codigo: string;
+      nombre: string;
+      envases: number;
+      multiplicador: number;
+      piezas: number;
+      peso_unitario_kg: number;
+      peso_total_kg: number;
+      num_ordenes: number;
+      tiene_peso: boolean;
+    };
+
+    const grupos = new Map<string, Detalle[]>();
+    const sinMaterial: Detalle[] = [];
+    const sinPeso: Detalle[] = [];
+
+    for (const r of rows) {
+      const envases = parseFloat(r.envases_consumidos);
+      const mult = r.unidades_por_envase && Number(r.unidades_por_envase) > 0
+        ? Number(r.unidades_por_envase) : 1;
+      const piezas = envases * mult;
+      const tienePeso = r.peso_material_vacio_kg !== null && r.peso_material_vacio_kg !== undefined;
+      const pesoUd = tienePeso ? parseFloat(r.peso_material_vacio_kg!) : 0;
+      const pesoTotal = piezas * pesoUd;
+
+      const detalle: Detalle = {
+        codigo: r.codigo,
+        nombre: r.nombre,
+        envases,
+        multiplicador: mult,
+        piezas,
+        peso_unitario_kg: pesoUd,
+        peso_total_kg: pesoTotal,
+        num_ordenes: r.num_ordenes,
+        tiene_peso: tienePeso,
+      };
+
+      const material = r.material_embalaje?.trim() || null;
+      if (!material) {
+        sinMaterial.push(detalle);
+        continue;
+      }
+      if (!tienePeso) sinPeso.push(detalle);
+      if (!grupos.has(material)) grupos.set(material, []);
+      grupos.get(material)!.push(detalle);
+    }
+
+    // ── Extras de pedido ───────────────────────────────────────────────────
+    // pedido_embalajes_extra: ME añadido manualmente a un pedido (palets, film,
+    // etc.) que NO va en albarán/factura. Se suma 1:1 al material correspondiente.
+    const { rows: extras } = await pool.query<{
+      producto_id: string;
+      codigo: string;
+      nombre: string;
+      material_embalaje: string | null;
+      peso_material_vacio_kg: string | null;
+      unidades_por_envase: string | null;
+      cantidad_total: string;
+      num_pedidos: number;
+    }>(`
+      SELECT p.id AS producto_id, p.codigo, p.nombre,
+             p.material_embalaje, p.peso_material_vacio_kg, p.unidades_por_envase,
+             SUM(pe.cantidad)::NUMERIC AS cantidad_total,
+             COUNT(DISTINCT pe.pedido_id)::INT AS num_pedidos
+        FROM pedido_embalajes_extra pe
+        JOIN pedidos ped ON ped.id = pe.pedido_id
+        JOIN productos p ON p.id = pe.producto_id
+       WHERE ped.estado::text = ANY($3::text[])
+         AND ped.created_at >= $1::DATE
+         AND ped.created_at < ($2::DATE + INTERVAL '1 day')
+       GROUP BY p.id, p.codigo, p.nombre, p.material_embalaje, p.peso_material_vacio_kg, p.unidades_por_envase
+    `, [desde, hasta, ESTADOS_VALIDOS]);
+
+    for (const e of extras) {
+      const envases = parseFloat(e.cantidad_total);
+      const mult = e.unidades_por_envase && Number(e.unidades_por_envase) > 0
+        ? Number(e.unidades_por_envase) : 1;
+      const piezas = envases * mult;
+      const tienePeso = e.peso_material_vacio_kg !== null && e.peso_material_vacio_kg !== undefined;
+      const pesoUd = tienePeso ? parseFloat(e.peso_material_vacio_kg!) : 0;
+      const detalle: Detalle = {
+        codigo: e.codigo + ' (extra)',
+        nombre: e.nombre,
+        envases,
+        multiplicador: mult,
+        piezas,
+        peso_unitario_kg: pesoUd,
+        peso_total_kg: piezas * pesoUd,
+        num_ordenes: e.num_pedidos,
+        tiene_peso: tienePeso,
+      };
+      const material = e.material_embalaje?.trim() || null;
+      if (!material) { sinMaterial.push(detalle); continue; }
+      if (!tienePeso) sinPeso.push(detalle);
+      if (!grupos.has(material)) grupos.set(material, []);
+      grupos.get(material)!.push(detalle);
+    }
+
+    // Palets: línea sintética bajo "Madera". No son productos referenciados,
+    // sólo viven como peso_pale_vacio_kg en recetas_envasado.
+    if (palet_kg > 0) {
+      if (!grupos.has('Madera')) grupos.set('Madera', []);
+      grupos.get('Madera')!.push({
+        codigo: '— palet',
+        nombre: 'Palets (peso suelto desde recetas_envasado)',
+        envases: palet_pedidos,
+        multiplicador: 1,
+        piezas: palet_pedidos,
+        peso_unitario_kg: palet_pedidos > 0 ? palet_kg / palet_pedidos : 0,
+        peso_total_kg: palet_kg,
+        num_ordenes: palet_pedidos,
+        tiene_peso: true,
+      });
+    }
+
+    // Orden de materiales — preferimos el orden del catálogo si existe.
+    const { rows: tipos } = await pool.query<{ nombre: string; orden: number }>(
+      `SELECT nombre, orden FROM tipos_material_embalaje WHERE activo = TRUE`
+    );
+    const ordenMaterial = new Map(tipos.map(t => [t.nombre, t.orden]));
+    const materialesOrdenados = [...grupos.keys()].sort((a, b) => {
+      const oa = ordenMaterial.get(a) ?? 1000;
+      const ob = ordenMaterial.get(b) ?? 1000;
+      return oa - ob || a.localeCompare(b);
+    });
+
+    // ── Construir CSV ──────────────────────────────────────────────────────
+    // Locale ES: separador campo `;`, decimal `,`. Excel-ES interpreta "0.200"
+    // como 200 (punto = miles); para evitarlo formateamos números con coma.
+    const BOM = '﻿';
+    const sep = ';';
+    const num = (n: number, dec = 3): string => n.toFixed(dec).replace('.', ',');
+    const q = (v: unknown) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const fila = (vals: unknown[]) => vals.map(q).join(sep);
+
+    const lines: string[] = [];
+    lines.push(fila(['Informe de materiales de embalaje', '', '', '', '', '', '']));
+    lines.push(fila([`Periodo: ${desde} a ${hasta}`, '', '', '', '', '', '']));
+    lines.push(fila(['Base: pedidos confirmados/en producción/completados (excluye nuevos y cancelados)', '', '', '', '', '', '']));
+    lines.push('');
+
+    let granTotalKg = 0;
+    let granTotalPiezas = 0;
+    const resumenPorMaterial: Array<{ material: string; kg: number; piezas: number; productos: number }> = [];
+
+    for (const material of materialesOrdenados) {
+      const detalles = grupos.get(material)!;
+      const totalKg = detalles.reduce((s, d) => s + d.peso_total_kg, 0);
+      const totalPiezas = detalles.reduce((s, d) => s + d.piezas, 0);
+      granTotalKg += totalKg;
+      granTotalPiezas += totalPiezas;
+      resumenPorMaterial.push({ material, kg: totalKg, piezas: totalPiezas, productos: detalles.length });
+
+      // Cabecera bloque material
+      lines.push(fila([`=== ${material.toUpperCase()} ===`, '', '', '', '', '', '']));
+      lines.push(fila([`Total: ${num(totalKg)} kg`, `${num(totalPiezas, 0)} piezas`, `${detalles.length} productos`, '', '', '', '']));
+      lines.push(fila(['Código', 'Producto', 'Envases consumidos', 'Multiplicador', 'Piezas totales', 'Peso vacío (kg/ud)', 'Peso total (kg)', 'Nº órdenes']));
+      // Detalles ordenados por peso descendente dentro del material
+      const detallesOrden = [...detalles].sort((a, b) => b.peso_total_kg - a.peso_total_kg);
+      for (const d of detallesOrden) {
+        lines.push(fila([
+          d.codigo,
+          d.nombre,
+          num(d.envases, 0),
+          d.multiplicador,
+          num(d.piezas, 0),
+          d.tiene_peso ? num(d.peso_unitario_kg, 4) : 'SIN PESO',
+          d.tiene_peso ? num(d.peso_total_kg) : 'REVISAR',
+          d.num_ordenes,
+        ]));
+      }
+      lines.push('');
+    }
+
+    // Resumen final
+    lines.push(fila(['=== RESUMEN ===', '', '', '', '', '', '', '']));
+    lines.push(fila(['Material', 'Peso total (kg)', 'Piezas totales', 'Nº productos', '', '', '', '']));
+    for (const r of resumenPorMaterial) {
+      lines.push(fila([r.material, num(r.kg), num(r.piezas, 0), r.productos, '', '', '', '']));
+    }
+    lines.push(fila(['TOTAL', num(granTotalKg), num(granTotalPiezas, 0), '', '', '', '', '']));
+
+    // Productos sin material asignado
+    if (sinMaterial.length > 0) {
+      lines.push('');
+      lines.push(fila([`⚠ SIN MATERIAL ASIGNADO (${sinMaterial.length} productos consumidos en periodo)`, '', '', '', '', '', '', '']));
+      lines.push(fila(['Código', 'Producto', 'Envases consumidos', 'Acción', '', '', '', '']));
+      for (const d of sinMaterial.sort((a, b) => b.envases - a.envases)) {
+        lines.push(fila([d.codigo, d.nombre, num(d.envases, 0), 'Asignar material en ficha', '', '', '', '']));
+      }
+    }
+
+    // Productos con material pero sin peso
+    if (sinPeso.length > 0) {
+      lines.push('');
+      lines.push(fila([`⚠ SIN PESO ASIGNADO (${sinPeso.length} productos — no cuentan en kg totales)`, '', '', '', '', '', '', '']));
+      lines.push(fila(['Código', 'Producto', 'Envases consumidos', 'Acción', '', '', '', '']));
+      for (const d of sinPeso.sort((a, b) => b.envases - a.envases)) {
+        lines.push(fila([d.codigo, d.nombre, num(d.envases, 0), 'Configurar peso_material_vacio_kg', '', '', '', '']));
+      }
+    }
+
+    // Pedidos con PE vendido pero SIN receta de envasado: no se contabilizan.
+    // Causa típica: PE duplicado por error en la creación de fórmulas.
+    if (sinReceta.length > 0) {
+      const totalUnidades = sinReceta.reduce((s, r) => s + parseFloat(r.unidades), 0);
+      const totalPedidos = sinReceta.reduce((s, r) => s + r.num_pedidos, 0);
+      lines.push('');
+      lines.push(fila([
+        `⚠ PEDIDOS NO CONTABILIZADOS — PE sin receta de envasado activa (${sinReceta.length} productos · ${num(totalUnidades, 0)} ud · ${totalPedidos} pedidos)`,
+        '', '', '', '', '', '', '',
+      ]));
+      lines.push(fila(['Código PE', 'Producto envasado', 'Unidades vendidas', 'Nº pedidos', 'Acción', '', '', '']));
+      for (const r of sinReceta) {
+        lines.push(fila([
+          r.pe_codigo,
+          r.pe_nombre,
+          num(parseFloat(r.unidades), 0),
+          r.num_pedidos,
+          'Crear receta envasado en Escandallo (sin receta no se contabiliza)',
+          '', '', '',
+        ]));
+      }
+    }
+
+    const csv = BOM + lines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="informe-materiales-${desde.slice(0,4)}.csv"`);
+    res.send(csv);
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
 export default router;

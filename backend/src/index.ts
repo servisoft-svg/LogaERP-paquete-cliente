@@ -39,6 +39,7 @@ import automatizacionesRoutes from './routes/automatizaciones.routes';
 import integracionAliloRoutes from './routes/integracionAlilo.routes';
 import { bootstrapDatabase, inspectAllSequences } from './db/bootstrap';
 import { runMigrations } from './db/migrations';
+import { errorHandler, notFoundApi } from './middleware/errorHandler';
 
 dotenv.config();
 
@@ -346,10 +347,8 @@ if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
   });
 }
 
-app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error(`[Global Error] ${err.message}`, { traceId: req.traceId, stack: err.stack });
-  res.status(500).json({ error: 'Error interno del servidor', traceId: req.traceId });
-});
+app.use(notFoundApi);
+app.use(errorHandler);
 
 // Iniciar workers BullMQ si Redis está disponible
 queuesHealthy().then((ok) => {

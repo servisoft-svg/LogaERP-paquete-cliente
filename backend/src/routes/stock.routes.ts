@@ -5,6 +5,7 @@ import { toNum } from '../types';
 import { logger } from '../lib/logger';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { adminOnly } from '../middleware/auth';
+import { AppError } from '../lib/AppError';
 
 const router = Router();
 
@@ -17,7 +18,7 @@ router.get ('/:id/historial',       stockController.historial);
 router.get ('/:id/cantidad-sugerida', stockController.cantidadSugerida);
 
 // GET /api/stock/reconciliar — verify and fix stock_actual vs SUM(lotes)
-router.get('/reconciliar', async (_req, res) => {
+router.get('/reconciliar', async (_req, res, next) => {
   try {
     const { rows: discrepancias } = await pool.query(`
       SELECT p.id, p.codigo, p.nombre,
@@ -34,13 +35,13 @@ router.get('/reconciliar', async (_req, res) => {
       ORDER BY ABS(p.stock_actual - COALESCE(s.suma, 0)) DESC
     `);
     return res.json({ ok: true, discrepancias, total: discrepancias.length });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // POST /api/stock/reconciliar — fix all discrepancies WITH audit trail in stock_moves
-router.post('/reconciliar', adminOnly, async (req, res) => {
+router.post('/reconciliar', adminOnly, async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -91,17 +92,16 @@ router.post('/reconciliar', adminOnly, async (req, res) => {
     await client.query('COMMIT');
     invalidarCacheFinanzas(); // reconciliación cambia stock_actual → invalida valoración
     return res.json({ ok: true, corregidos: discrepancias.length });
-  } catch (err: unknown) {
+  } catch (err) {
     await client.query('ROLLBACK').catch(rbErr => logger.error('[stock.reconciliar] ROLLBACK fallo', { err: rbErr }));
-    logger.error('[stock.reconciliar]', { err });
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+    return next(err);
   } finally {
     client.release();
   }
 });
 
 // GET /api/stock/pedidos-proveedor — historial de solicitudes a proveedor con lead time
-router.get('/pedidos-proveedor', async (req, res) => {
+router.get('/pedidos-proveedor', async (req, res, next) => {
   try {
     const estado = req.query.estado as string || undefined;
     const productoId = req.query.producto_id as string || undefined;
@@ -125,13 +125,13 @@ router.get('/pedidos-proveedor', async (req, res) => {
 
     const { rows } = await pool.query(sql, params);
     return res.json(rows);
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // GET /api/stock/pedidos-proveedor/:id/pdf — descargar PDF de solicitud existente
-router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
+router.get('/pedidos-proveedor/:id/pdf', async (req, res, next) => {
   try {
     const { rows: [pp] } = await pool.query(
       `SELECT pp.*, p.codigo AS producto_codigo, p.nombre AS producto_nombre, p.unidad_medida,
@@ -146,7 +146,7 @@ router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
        WHERE pp.id = $1`,
       [req.params.id]
     );
-    if (!pp) return res.status(404).json({ error: 'Pedido no encontrado' });
+    if (!pp) return next(AppError.notFound('Pedido proveedor', req.params.id));
 
     const { renderSolicitudCompraPDF, cargarDatosEmpresa } = await import('../lib/pdfSolicitudCompra');
     const empresa = await cargarDatosEmpresa();
@@ -174,13 +174,13 @@ router.get('/pedidos-proveedor/:id/pdf', async (req, res) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${pp.numero_solicitud ?? 'solicitud'}.pdf"`);
     return res.send(pdf);
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // GET /api/stock/lead-time-proveedores — lead time medio por proveedor
-router.get('/lead-time-proveedores', async (_req, res) => {
+router.get('/lead-time-proveedores', async (_req, res, next) => {
   try {
     const { rows } = await pool.query(`
       SELECT
@@ -200,8 +200,8 @@ router.get('/lead-time-proveedores', async (_req, res) => {
       ORDER BY total_pedidos DESC
     `);
     return res.json(rows);
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 

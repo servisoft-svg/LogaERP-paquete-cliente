@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -12,6 +12,9 @@ interface RecetaEnvasadoPorte {
   id: string;
   producto_envasado_id: string;
   liquido_cantidad: string;
+  envases_por_bote?: number | null;
+  lleva_caja?: boolean | null;
+  caja_uds?: number | null;            // multiplicador: envases dentro de 1 caja
   peso_envase_vacio_kg?: string | number | null;
   unidades_por_caja?:    string | number | null;
   peso_caja_vacia_kg?:   string | number | null;
@@ -50,17 +53,118 @@ export default function Pedidos() {
   // Modal crear/editar
   const [modalOpen, setModalOpen]   = useState(false);
   const [editando, setEditando]     = useState<Pedido | null>(null);
+
+  // Material embalaje EXTRA del pedido (palets, film, etc.) — no entran en
+  // albarán/factura. Solo se suma en el informe de materiales + coste interno.
+  // En edición se persisten al servidor inmediatamente. En creación nueva se
+  // bufferan local y se POSTean tras crear el pedido.
+  type EmbExtra = {
+    id: string; // server id, o "tmp-N" para drafts en creación
+    producto_id: string;
+    cantidad: string | number;
+    notas: string | null;
+    codigo: string;
+    nombre: string;
+    unidad_medida: string;
+    stock_actual?: string | number;
+  };
+  const [embExtras, setEmbExtras] = useState<EmbExtra[]>([]);
+  const [embExtraDraft, setEmbExtraDraft] = useState<{ producto_id: string; cantidad: string; notas: string }>({ producto_id: '', cantidad: '', notas: '' });
+  const [embExtraBusy, setEmbExtraBusy] = useState(false);
+  const materialesEmbalaje = useMemo(
+    () => productos.filter(p => p.tipo === 'material_embalaje' && p.activo !== false),
+    [productos]
+  );
+  const cargarEmbExtras = async (pedidoId: string) => {
+    try {
+      const { data } = await pedidosApi.listarEmbalajesExtra(pedidoId);
+      setEmbExtras(data as EmbExtra[]);
+    } catch (e) { console.error('embalajes-extra fetch', e); }
+  };
+  const addEmbExtra = async () => {
+    const cant = Number(embExtraDraft.cantidad);
+    if (!embExtraDraft.producto_id || !Number.isFinite(cant) || cant <= 0) {
+      notify.error('Selecciona producto y cantidad > 0'); return;
+    }
+    const prod = productos.find(p => p.id === embExtraDraft.producto_id);
+    if (!prod) return;
+    if (editando) {
+      // Persistir inmediatamente
+      setEmbExtraBusy(true);
+      try {
+        await pedidosApi.agregarEmbalajeExtra(editando.id, {
+          producto_id: embExtraDraft.producto_id,
+          cantidad: cant,
+          notas: embExtraDraft.notas.trim() || undefined,
+        });
+        setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '' });
+        await cargarEmbExtras(editando.id);
+        notify.success('Extra añadido');
+      } catch (e: any) {
+        notify.error(e?.response?.data?.error?.mensaje ?? 'Error añadiendo extra');
+      } finally { setEmbExtraBusy(false); }
+    } else {
+      // Buffer local — se POSTea tras crear el pedido
+      setEmbExtras(prev => [...prev, {
+        id: `tmp-${Date.now()}-${Math.random()}`,
+        producto_id: embExtraDraft.producto_id,
+        cantidad: cant,
+        notas: embExtraDraft.notas.trim() || null,
+        codigo: prod.codigo,
+        nombre: prod.nombre,
+        unidad_medida: prod.unidad_medida ?? 'ud',
+      }]);
+      setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '' });
+    }
+  };
+  const delEmbExtra = async (extraId: string) => {
+    if (extraId.startsWith('tmp-')) {
+      setEmbExtras(prev => prev.filter(e => e.id !== extraId));
+      return;
+    }
+    if (!editando) return;
+    try {
+      await pedidosApi.borrarEmbalajeExtra(editando.id, extraId);
+      await cargarEmbExtras(editando.id);
+    } catch { notify.error('Error eliminando'); }
+  };
+  // Cargar extras al entrar en modo edición; resetear al salir.
+  useEffect(() => {
+    if (modalOpen && editando) cargarEmbExtras(editando.id);
+    else if (!modalOpen) setEmbExtras([]); // limpia al cerrar
+  }, [modalOpen, editando]);
   const [saving, setSaving]         = useState(false);
   interface LineaForm {
     producto_id: string;
-    cantidad: string;
+    cantidad: string;             // total botes (= cajas × N + sueltos)
     unidad_medida: string;
     precio_unitario: string;
     presentacion: string;
     _customMult?: string;
     _search?: string;
+    // ── Nuevo modelo PE = bote, caja autoenlazada ───────────────
+    cantidad_cajas?: string;       // cajas completas
+    cantidad_botes_sueltos?: string;
+    caja_id?: string;              // caja seleccionada (de cajas_compatibles)
   }
-  const emptyLinea = (): LineaForm => ({ producto_id: '', cantidad: '', unidad_medida: 'kg', precio_unitario: '', presentacion: 'ud', _customMult: '', _search: '' });
+  const emptyLinea = (): LineaForm => ({ producto_id: '', cantidad: '', unidad_medida: 'kg', precio_unitario: '', presentacion: 'ud', _customMult: '', _search: '', cantidad_cajas: '', cantidad_botes_sueltos: '', caja_id: '' });
+
+  // Cache cajas compatibles por bote_id (se carga al elegir producto en línea)
+  type CajaCompat = { id: string; codigo: string; nombre: string; botes_por_caja: number | null; unidades_por_envase: number | null; stock_actual: string };
+  const [cajasCompatPor, setCajasCompatPor] = useState<Record<string, CajaCompat[]>>({});
+  const cargarCajasCompat = async (boteId: string) => {
+    if (cajasCompatPor[boteId]) return cajasCompatPor[boteId];
+    try {
+      const r = await pedidosApi.cajasCompatiblesPara(boteId);
+      const data = r.data as CajaCompat[];
+      setCajasCompatPor(prev => ({ ...prev, [boteId]: data }));
+      return data;
+    } catch { return []; }
+  };
+  const cajasParaLinea = (linea: LineaForm): CajaCompat[] => {
+    if (!linea.producto_id) return [];
+    return cajasCompatPor[linea.producto_id] ?? [];
+  };
 
   // Presentaciones por formato de bote
   const getPresentaciones = (p: Producto) => {
@@ -135,8 +239,15 @@ export default function Pedidos() {
     const cPal   = parseInt(String(rec.cajas_por_pale ?? 0), 10) || 0;
     const pVac   = parseFloat(String(rec.peso_pale_vacio_kg ?? 0)) || 0;
 
-    const pesoLiquido = liq * totalUds;
-    const pesoEnvases = envVac * totalUds;
+    // M = envases dentro de 1 unidad PE. Si la receta lleva caja con
+    // multiplicador (caja_uds > 1), usamos ese valor. Si no, envases_por_bote.
+    // Caso típico cola domus: M = 177 frascos por caja-PE.
+    const M = (rec.lleva_caja && Number(rec.caja_uds ?? 0) > 1)
+      ? Number(rec.caja_uds)
+      : Math.max(1, Number(rec.envases_por_bote ?? 1));
+    const totalEnvasesIndiv = totalUds * M;
+    const pesoLiquido = liq * totalEnvasesIndiv;
+    const pesoEnvases = envVac * totalEnvasesIndiv;
     const nCajas = udC > 0 ? Math.ceil(totalUds / udC) : 0;
     const pesoCajas = cVac * nCajas;
     const nPales = cPal > 0 ? Math.ceil(nCajas / cPal) : 0;
@@ -157,8 +268,13 @@ export default function Pedidos() {
     if (!cant || cant <= 0) return '—';
     const prod = productoId ? productos.find(p => p.id === productoId) : null;
     const peso = prod?.peso_unitario_kg ? parseFloat(prod.peso_unitario_kg) : null;
-    if (peso && prod?.tipo === 'producto_envasado') {
-      return `${cant.toLocaleString('es-ES')} ud (${(cant * peso).toLocaleString('es-ES')} kg)`;
+    // PE siempre se mide en "ud" (envases vendidos). Si hay peso, mostramos
+    // también el equivalente kg entre paréntesis. Sin peso, solo "ud" — antes
+    // caía al fallback que mostraba "kg" heredado del producto base, confuso.
+    if (prod?.tipo === 'producto_envasado') {
+      return peso
+        ? `${cant.toLocaleString('es-ES')} ud (${(cant * peso).toLocaleString('es-ES')} kg)`
+        : `${cant.toLocaleString('es-ES')} ud`;
     }
     return `${cant.toLocaleString('es-ES')} ${unidad ?? 'kg'}`;
   };
@@ -170,8 +286,33 @@ export default function Pedidos() {
   const [portes, setPortes] = useState('0');
   const [ivaPct, setIvaPct] = useState('21');
 
+  // Cargar cajas compatibles cuando una línea cambia su producto_id.
+  // Si hay exactamente 1 caja → autoseleccionar caja_id en la línea.
+  useEffect(() => {
+    for (const l of lineas) {
+      const prod = productos.find(p => p.id === l.producto_id);
+      if (!prod || prod.tipo !== 'producto_envasado') continue;
+      if (cajasCompatPor[l.producto_id] !== undefined) {
+        const cajas = cajasCompatPor[l.producto_id];
+        if (cajas.length === 1 && !l.caja_id) {
+          setLineas(prev => prev.map(x => x.producto_id === l.producto_id && !x.caja_id ? { ...x, caja_id: cajas[0].id } : x));
+        }
+        continue;
+      }
+      cargarCajasCompat(l.producto_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lineas.map(l => l.producto_id).join(','), productos.length]);
+
   // Detalle
   const [detalle, setDetalle]       = useState<Pedido | null>(null);
+  const [detalleExtras, setDetalleExtras] = useState<EmbExtra[]>([]);
+  useEffect(() => {
+    if (!detalle) { setDetalleExtras([]); return; }
+    pedidosApi.listarEmbalajesExtra(detalle.id)
+      .then(r => setDetalleExtras(r.data as EmbExtra[]))
+      .catch(() => setDetalleExtras([]));
+  }, [detalle]);
 
   // Confirmar cancelar
   const [confirmCancel, setConfirmCancel] = useState<Pedido | null>(null);
@@ -359,18 +500,39 @@ export default function Pedidos() {
           const mult = getMultiplicador(l);
           const totalUds = parseFloat(l.cantidad || '0') * mult;
           const pres = mult > 1 ? ` (${l.cantidad} × ${mult})` : '';
+          const cajasComp = cajasParaLinea(l);
+          const tieneVinc = cajasComp.length > 0;
+          // Re-computar cajas/sueltos desde totalUds + M de la caja seleccionada
+          // (no fiamos del state stale; UI puede no haber persistido los valores).
+          let cantidadCajas = 0;
+          let cantidadSueltos = 0;
+          let cajaIdFinal: string | null = null;
+          if (tieneVinc) {
+            const cajaActual = cajasComp.find(c => c.id === l.caja_id) ?? cajasComp[0];
+            cajaIdFinal = cajaActual?.id ?? null;
+            const M = Number(cajaActual?.botes_por_caja ?? cajaActual?.unidades_por_envase ?? 0) || 0;
+            cantidadCajas = M > 0 ? Math.floor(totalUds / M) : 0;
+            cantidadSueltos = M > 0 ? totalUds - cantidadCajas * M : totalUds;
+          }
           return {
-          producto_id: l.producto_id,
-          producto_nombre: (productos.find(p => p.id === l.producto_id)?.nombre ?? '') + pres,
-          cantidad: totalUds,
-          unidad_medida: productos.find(p => p.id === l.producto_id)?.tipo === 'producto_envasado' ? 'ud' : l.unidad_medida,
-          precio_unitario: parseFloat(l.precio_unitario || '0'),
-          subtotal: totalUds * parseFloat(l.precio_unitario || '0'),
-        }}),
+            producto_id: l.producto_id,
+            producto_nombre: (productos.find(p => p.id === l.producto_id)?.nombre ?? '') + pres,
+            cantidad: totalUds,
+            unidad_medida: productos.find(p => p.id === l.producto_id)?.tipo === 'producto_envasado' ? 'ud' : l.unidad_medida,
+            precio_unitario: parseFloat(l.precio_unitario || '0'),
+            subtotal: totalUds * parseFloat(l.precio_unitario || '0'),
+            // Vinculación caja (nuevo modelo)
+            ...(tieneVinc ? {
+              cantidad_cajas: cantidadCajas,
+              cantidad_botes_sueltos: cantidadSueltos,
+              caja_id: cajaIdFinal,
+            } : {}),
+          };
+        }),
       };
 
       const accion = editando ? pedidosApi.editar(editando.id, payload) : pedidosApi.crear(payload);
-      await notify.promise(accion, {
+      const resp = await notify.promise(accion, {
         loading: editando ? 'Guardando cambios…' : 'Creando pedido…',
         success: editando ? 'Pedido actualizado' : 'Pedido creado',
         successDesc: (
@@ -381,6 +543,20 @@ export default function Pedidos() {
         ),
         error: editando ? 'No se pudo guardar' : 'No se pudo crear el pedido',
       });
+
+      // Si era pedido nuevo + hay extras bufferados, postearlos ahora.
+      if (!editando && embExtras.length > 0) {
+        const nuevoPedidoId = (resp?.data?.id ?? resp?.data?.pedido?.id) as string | undefined;
+        if (nuevoPedidoId) {
+          await Promise.all(embExtras.map(e =>
+            pedidosApi.agregarEmbalajeExtra(nuevoPedidoId, {
+              producto_id: e.producto_id,
+              cantidad: Number(e.cantidad),
+              notas: e.notas ?? undefined,
+            }).catch(err => console.error('extra falló', err))
+          ));
+        }
+      }
 
       setModalOpen(false);
       setEditando(null);
@@ -486,8 +662,14 @@ export default function Pedidos() {
   const [lotesSeleccion, setLotesSeleccion] = useState<Record<string, Record<string, number>>>({});
   const [consumiendo, setConsumiendo] = useState(false);
 
+  // Extras del pedido al abrir consumir — para mostrar en preparación
+  const [consumirExtras, setConsumirExtras] = useState<EmbExtra[]>([]);
   const abrirConsumir = async (p: Pedido) => {
     setConsumirPedido(p);
+    setConsumirExtras([]);
+    pedidosApi.listarEmbalajesExtra(p.id)
+      .then(r => setConsumirExtras(r.data as EmbExtra[]))
+      .catch(() => setConsumirExtras([]));
     try {
       const res = await pedidosApi.lotesDisponibles(p.id);
       const data = res.data as Record<string, any[]>;
@@ -1313,19 +1495,123 @@ export default function Pedidos() {
                           </div>
                         )}
 
-                        {/* Cantidad */}
-                        <div>
-                          <p className="text-[10px] text-gray-400 font-medium mb-1">{mult > 1 ? 'Cajas' : 'Cantidad'}</p>
-                          <Input type="number" min="1" step="1" value={linea.cantidad} onChange={e => {
-                            const nl = [...lineas]; nl[idx] = { ...nl[idx], cantidad: e.target.value }; setLineas(nl);
-                          }} placeholder="0" className="text-center font-bold text-lg" />
-                        </div>
+                        {/* Cantidad · dual input cuando hay cajas compatibles vinculadas */}
+                        {(() => {
+                          const cajasComp = cajasParaLinea(linea);
+                          const tieneVinc = prod?.tipo === 'producto_envasado' && cajasComp.length > 0;
+                          if (!tieneVinc) {
+                            return (
+                              <div>
+                                <p className="text-[10px] text-gray-400 font-medium mb-1">{mult > 1 ? 'Cajas' : 'Cantidad'}</p>
+                                <Input type="number" min="1" step="1" value={linea.cantidad} onChange={e => {
+                                  const nl = [...lineas]; nl[idx] = { ...nl[idx], cantidad: e.target.value }; setLineas(nl);
+                                }} placeholder="0" className="text-center font-bold text-lg" />
+                              </div>
+                            );
+                          }
+                          const cajaSel = cajasComp.find(c => c.id === linea.caja_id) ?? cajasComp[0];
+                          const M = Number(cajaSel?.botes_por_caja ?? cajaSel?.unidades_por_envase ?? 0) || 0;
+                          const total = Number(linea.cantidad || 0);
+                          // SIEMPRE computamos desglose desde total+M (no leemos stored values).
+                          // Esto garantiza que ver = realidad incluso en pedidos viejos sin desglose.
+                          const cajasAuto = M > 0 ? Math.floor(total / M) : 0;
+                          const sueltosAuto = M > 0 ? total - cajasAuto * M : total;
+                          // Reparte un total dado entre cajas/sueltos según M.
+                          // Cuando cambia caja (cambia M), recalcula sobre el MISMO total.
+                          const repartir = (t: number, m: number) => {
+                            if (m <= 0) return { cajas: 0, sueltos: t };
+                            const cajas = Math.floor(t / m);
+                            const sueltos = t - cajas * m;
+                            return { cajas, sueltos };
+                          };
+                          const setLinea = (patch: Partial<LineaForm>) => {
+                            const nl = [...lineas];
+                            nl[idx] = { ...nl[idx], ...patch };
+                            setLineas(nl);
+                          };
+                          const onTotal = (valor: string) => {
+                            const t = Math.max(0, Math.floor(Number(valor) || 0));
+                            const { cajas, sueltos } = repartir(t, M);
+                            setLinea({
+                              cantidad: String(t),
+                              cantidad_cajas: String(cajas),
+                              cantidad_botes_sueltos: String(sueltos),
+                            });
+                          };
+                          const onCaja = (nuevoCajaId: string) => {
+                            const nueva = cajasComp.find(c => c.id === nuevoCajaId);
+                            const mNuevo = Number(nueva?.botes_por_caja ?? nueva?.unidades_por_envase ?? 0) || 0;
+                            const { cajas, sueltos } = repartir(total, mNuevo);
+                            setLinea({
+                              caja_id: nuevoCajaId,
+                              cantidad_cajas: String(cajas),
+                              cantidad_botes_sueltos: String(sueltos),
+                            });
+                          };
+                          // Si la línea aún no tiene caja_id y solo hay 1 caja, autoseleccionarla
+                          const cajaIdEfectivo = linea.caja_id || cajasComp[0]?.id || '';
+                          const sinM = M <= 0; // la caja existe pero sin botes_por_caja configurado
+                          return (
+                            <div className="col-span-2 rounded-lg border-2 border-indigo-300 bg-indigo-50/60 p-2 space-y-2">
+                              {/* Caja a usar (1 o varias) */}
+                              {cajasComp.length > 1 ? (
+                                <div>
+                                  <p className="text-[10px] text-indigo-900 font-bold mb-0.5">📦 Caja a usar</p>
+                                  <Select value={cajaIdEfectivo} onChange={e => onCaja(e.target.value)}>
+                                    {cajasComp.map(c => {
+                                      const mc = Number(c.botes_por_caja ?? c.unidades_por_envase ?? 0) || 0;
+                                      return (
+                                        <option key={c.id} value={c.id}>
+                                          {c.nombre} {mc > 0 ? `— ${mc} botes/caja` : '— (sin botes/caja configurado)'}
+                                        </option>
+                                      );
+                                    })}
+                                  </Select>
+                                </div>
+                              ) : (
+                                <p className="text-[10px] text-indigo-900 bg-white border border-indigo-200 rounded px-2 py-1">
+                                  📦 <b>{cajaSel?.nombre ?? '?'}</b> · <span className="text-indigo-700">{M > 0 ? `${M} botes/caja` : '⚠ sin botes/caja'}</span>
+                                </p>
+                              )}
+                              {sinM && (
+                                <div className="rounded border-2 border-amber-400 bg-amber-50 px-2 py-1.5 text-[10px] text-amber-900">
+                                  ⚠ La caja <b>{cajaSel?.nombre}</b> no tiene <b>"Botes dentro de 1 caja"</b> configurado.
+                                  Edítala en Productos (ficha de la caja → bloque embalaje → "Botes dentro de 1 caja"). Sin esto no podemos repartir botes en cajas.
+                                </div>
+                              )}
+                              {/* Total botes input */}
+                              <div>
+                                <p className="text-[10px] text-gray-600 font-bold mb-0.5">Total botes</p>
+                                <Input type="number" min="0" step="1" value={total > 0 ? String(total) : ''}
+                                  onChange={e => onTotal(e.target.value)}
+                                  placeholder="Pon cuántos botes"
+                                  className="text-center font-bold text-base" />
+                              </div>
+                              {/* Desglose abajo (siempre que haya M) */}
+                              {!sinM && (
+                                <div className="flex items-center justify-center gap-1.5 bg-white rounded border border-indigo-200 px-2 py-1.5 text-[11px] font-mono">
+                                  {total > 0 ? (
+                                    <>
+                                      <span><b className="text-indigo-700 text-sm">{cajasAuto}</b> caja{cajasAuto !== 1 ? 's' : ''}</span>
+                                      <span className="text-gray-300">+</span>
+                                      <span><b className="text-indigo-700 text-sm">{sueltosAuto}</b> suelto{sueltosAuto !== 1 ? 's' : ''}</span>
+                                      <span className="text-gray-300">=</span>
+                                      <span className="text-gray-700 font-semibold">{total} botes</span>
+                                    </>
+                                  ) : (
+                                    <span className="text-gray-400 italic">→ pon total botes y verás cuántas cajas</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
                         {/* Precio · auto-rellenado con histórico del cliente */}
                         {isAdmin && (
                           <div>
                             <p className="text-[10px] text-gray-400 font-medium mb-1 flex items-center gap-1">
-                              Precio/ud
+                              {prod?.tipo === 'producto_envasado' ? 'Precio/bote' : 'Precio/ud'}
                               {linea.producto_id && form.cliente_id && (() => {
                                 const sug = getPrecioSugerido(linea.producto_id);
                                 if (!sug.historico) return null;
@@ -1466,7 +1752,7 @@ export default function Pedidos() {
               );
             })}
             </AnimatePresence>
-            {/* Resumen porte: peso total + cajas + palés */}
+            {/* Resumen porte: peso total + cajas + palés + extras */}
             {(() => {
               const totals = lineas.reduce((acc, l) => {
                 const p = getPesoLinea(l);
@@ -1481,6 +1767,19 @@ export default function Pedidos() {
                 acc.uds     += p.uds;
                 return acc;
               }, { peso: 0, liquido: 0, envase: 0, caja: 0, pale: 0, cajas: 0, pales: 0, uds: 0 });
+              // Suma peso de extras: cantidad × peso_material_vacio_kg (fallback peso_unitario_kg)
+              let pesoExtras = 0;
+              let udExtras = 0;
+              for (const ex of embExtras) {
+                const prod = productos.find(pp => pp.id === ex.producto_id);
+                if (!prod) continue;
+                const pesoUd = parseFloat((prod as any).peso_material_vacio_kg ?? '0')
+                  || parseFloat(prod.peso_unitario_kg ?? '0') || 0;
+                const cantNum = Number(ex.cantidad) || 0;
+                pesoExtras += pesoUd * cantNum;
+                udExtras   += cantNum;
+              }
+              totals.peso += pesoExtras;
               if (totals.peso <= 0) return null;
               const cli = form.cliente_id ? clientes.find(c => c.id === form.cliente_id) : null;
               const prov = cpAProvincia(cli?.codigo_postal);
@@ -1501,6 +1800,11 @@ export default function Pedidos() {
                     <span>envases: <b className="text-gray-900">{fmt(totals.envase)} kg</b></span>
                     <span>cajas ({totals.cajas}): <b className="text-gray-900">{fmt(totals.caja)} kg</b></span>
                     <span>palés ({totals.pales}): <b className="text-gray-900">{fmt(totals.pale)} kg</b></span>
+                    {pesoExtras > 0 && (
+                      <span className="col-span-2 sm:col-span-4 text-amber-700">
+                        extras ({udExtras} ud): <b>{fmt(pesoExtras)} kg</b>
+                      </span>
+                    )}
                   </div>
                   {!cli?.codigo_postal && form.cliente_id && (
                     <p className="text-[10px] text-amber-700 italic">Añade el CP al cliente para identificar la provincia.</p>
@@ -1570,6 +1874,55 @@ export default function Pedidos() {
               </div>
             );
           })()}
+          {/* Material embalaje EXTRA — no albarán ni factura, suma a coste interno */}
+          {(
+            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2">
+              <div className="flex items-baseline justify-between">
+                <p className="text-xs font-bold text-amber-900">Material de embalaje extra para el pedido</p>
+                <span className="text-[10px] text-amber-700">No aparece en albarán/factura · cuenta en informe materiales</span>
+              </div>
+              {embExtras.length > 0 && (
+                <ul className="space-y-1">
+                  {embExtras.map(e => (
+                    <li key={e.id} className="flex items-center gap-2 text-xs bg-white border border-amber-200 rounded px-2 py-1">
+                      <span className="font-mono text-gray-500">{e.codigo}</span>
+                      <span className="flex-1 text-gray-800">{e.nombre}</span>
+                      <span className="font-mono">{Number(e.cantidad).toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
+                      {e.notas && <span className="text-gray-500 italic max-w-[40%] truncate">· {e.notas}</span>}
+                      <button onClick={() => delEmbExtra(e.id)} className="text-gray-400 hover:text-red-600 p-1 rounded" title="Eliminar">
+                        <X size={11} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="grid grid-cols-12 gap-2">
+                <select value={embExtraDraft.producto_id}
+                  onChange={e => setEmbExtraDraft({ ...embExtraDraft, producto_id: e.target.value })}
+                  className="col-span-6 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-amber-500">
+                  <option value="">Material…</option>
+                  {materialesEmbalaje.map(p => (
+                    <option key={p.id} value={p.id}>{p.codigo} · {p.nombre}</option>
+                  ))}
+                </select>
+                <input type="number" min="0" step="0.01" placeholder="Cantidad"
+                  value={embExtraDraft.cantidad}
+                  onChange={e => setEmbExtraDraft({ ...embExtraDraft, cantidad: e.target.value })}
+                  className="col-span-2 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-right font-mono outline-none focus:border-amber-500" />
+                <input type="text" placeholder="Notas (opcional)"
+                  value={embExtraDraft.notas}
+                  onChange={e => setEmbExtraDraft({ ...embExtraDraft, notas: e.target.value })}
+                  className="col-span-3 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-amber-500" />
+                <button onClick={addEmbExtra} disabled={embExtraBusy || !embExtraDraft.producto_id || !embExtraDraft.cantidad}
+                  className="col-span-1 rounded-md bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700 disabled:bg-gray-300">
+                  +
+                </button>
+              </div>
+              {!editando && embExtras.length > 0 && (
+                <p className="text-[10px] text-amber-700 italic">Se añadirán al crear el pedido.</p>
+              )}
+            </div>
+          )}
           <div className="flex gap-3 pt-2 sticky bottom-0 bg-white pb-1 -mx-1 px-1">
             <button onClick={() => { setModalOpen(false); setEditando(null); }} className="flex-1 rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50">
               Cancelar <kbd className="ml-1 text-[9px] text-gray-400 font-mono">Esc</kbd>
@@ -1608,6 +1961,22 @@ export default function Pedidos() {
                       {isAdmin && l.subtotal && parseFloat(l.subtotal) > 0 && (
                         <span className="font-semibold text-gray-700 tabular-nums">{parseFloat(l.subtotal).toFixed(2)} EUR</span>
                       )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {detalleExtras.length > 0 && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+                <p className="text-[11px] font-semibold text-amber-700 uppercase mb-2">Material embalaje extra</p>
+                <p className="text-[10px] text-amber-600 mb-2 italic">No incluido en albarán/factura · consumido del stock · contado en informe materiales</p>
+                <div className="space-y-1">
+                  {detalleExtras.map(e => (
+                    <div key={e.id} className="flex justify-between text-xs gap-2">
+                      <span className="font-mono text-gray-500 shrink-0">{e.codigo}</span>
+                      <span className="flex-1 text-gray-800 truncate">{e.nombre}</span>
+                      <span className="font-mono">{Number(e.cantidad).toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
+                      {e.notas && <span className="text-gray-500 italic max-w-[40%] truncate">· {e.notas}</span>}
                     </div>
                   ))}
                 </div>
@@ -1670,6 +2039,131 @@ export default function Pedidos() {
       {/* Modal seleccion de lotes para consumir */}
       <Modal open={!!consumirPedido} onClose={() => setConsumirPedido(null)} title="Consumir stock" subtitle={consumirPedido?.numero_pedido}>
         <div className="space-y-4">
+          {/* ── Preparación: desglose por línea (botes, etiquetas, cajas, líquido) ── */}
+          {consumirPedido?.lineas && consumirPedido.lineas.length > 0 && (
+            <div className="rounded-xl border-2 border-indigo-200 bg-indigo-50/50 overflow-hidden">
+              <div className="px-3 py-2 bg-indigo-100/60">
+                <p className="text-[11px] font-bold text-indigo-800 uppercase tracking-wider">Preparación necesaria</p>
+                <p className="text-[10px] text-indigo-700 mt-0.5">Lo que hay que sacar del almacén para este pedido.</p>
+              </div>
+              <div className="p-3 space-y-3">
+                {consumirPedido.lineas.map((linea: any, i: number) => {
+                  const prod = productos.find(p => p.id === linea.producto_id);
+                  if (!prod) return null;
+                  const cant = parseFloat(linea.cantidad ?? '0');
+                  if (cant <= 0) return null;
+                  if (prod.tipo !== 'producto_envasado') {
+                    return (
+                      <div key={i} className="rounded-lg border border-gray-200 bg-white p-2 text-xs">
+                        <p className="font-semibold">{prod.nombre}</p>
+                        <p className="text-gray-600 font-mono">{cant.toLocaleString('es-ES')} {linea.unidad_medida ?? prod.unidad_medida}</p>
+                      </div>
+                    );
+                  }
+                  const rec = recetasEnvasado.find(r => r.producto_envasado_id === prod.id);
+                  if (!rec) {
+                    return (
+                      <div key={i} className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs">
+                        <p className="font-semibold">{prod.nombre} · {cant.toLocaleString('es-ES')} ud</p>
+                        <p className="text-amber-700 italic">⚠ Sin receta-envasado configurada · no podemos desglosar componentes.</p>
+                      </div>
+                    );
+                  }
+                  // Solo necesitamos saber si hay caja en receta legacy para el fallback
+                  // (el modelo nuevo PE=bote no consume cola/etiquetas al vender).
+                  return (
+                    <div key={i} className="rounded-lg border border-indigo-200 bg-white p-3 space-y-2">
+                      <div className="flex items-baseline justify-between gap-2 pb-2 border-b border-indigo-100">
+                        <p className="text-xs font-bold text-indigo-900">{prod.nombre}</p>
+                        <p className="text-xs font-mono text-indigo-600">{cant.toLocaleString('es-ES')} ud (botes ya envasados)</p>
+                      </div>
+                      <ul className="text-[11px] space-y-1 font-mono">
+                        {/* Caja del nuevo modelo (línea.caja_id) tiene prioridad */}
+                        {(linea as any).caja_id && Number((linea as any).cantidad_cajas) > 0 && (() => {
+                          const cajaProd = productos.find(p => p.id === (linea as any).caja_id);
+                          if (!cajaProd) return null;
+                          const stockCaja = parseFloat(cajaProd.stock_actual ?? '0');
+                          const necCajas = Number((linea as any).cantidad_cajas);
+                          const okStock = stockCaja >= necCajas;
+                          return (
+                            <li className={clsx('flex justify-between gap-2', !okStock && 'text-red-700 bg-red-50 px-1 rounded')}>
+                              <span className="text-gray-600">{okStock ? '✓' : '⚠'} Cajas · {cajaProd.nombre}</span>
+                              <span className="font-bold tabular-nums">{necCajas.toLocaleString('es-ES')} ud {!okStock && <span className="text-[10px]">(stock: {stockCaja.toFixed(0)})</span>}</span>
+                            </li>
+                          );
+                        })()}
+                        {/* Sueltos (botes que no entran en caja completa) */}
+                        {(linea as any).caja_id && Number((linea as any).cantidad_botes_sueltos) > 0 && (
+                          <li className="flex justify-between gap-2 text-amber-700">
+                            <span>Botes sueltos (sin caja)</span>
+                            <span className="font-bold tabular-nums">{Number((linea as any).cantidad_botes_sueltos).toLocaleString('es-ES')} ud</span>
+                          </li>
+                        )}
+                        {/* Modelo legacy: caja viene de receta */}
+                        {!(linea as any).caja_id && rec.lleva_caja && (rec as any).caja_nombre && (
+                          <li className="flex justify-between gap-2">
+                            <span className="text-gray-600">Cajas · {(rec as any).caja_nombre}</span>
+                            <span className="font-bold text-gray-900 tabular-nums">{cant.toLocaleString('es-ES')} ud</span>
+                          </li>
+                        )}
+                      </ul>
+                      <p className="text-[9px] text-gray-400 italic mt-1">Cola, frascos y etiquetas de bote ya estaban dentro de los botes envasados. Si se etiqueta la caja, añádelo como "Material extra".</p>
+                    </div>
+                  );
+                })}
+                {consumirExtras.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+                    <p className="text-[10px] uppercase tracking-wider font-bold text-amber-700 mb-1.5">Material extra (preparar también)</p>
+                    <ul className="text-[11px] space-y-0.5 font-mono">
+                      {consumirExtras.map(e => {
+                        const necesario = Number(e.cantidad);
+                        const stock = parseFloat(String(e.stock_actual ?? 0));
+                        const okStock = stock >= necesario;
+                        return (
+                          <li key={e.id} className={clsx('flex justify-between gap-2', !okStock && 'text-red-700 bg-red-50 px-1 rounded')}>
+                            <span className="text-gray-600">{okStock ? '✓' : '⚠'} {e.codigo} · {e.nombre}{e.notas && <span className="text-gray-400 italic"> · {e.notas}</span>}</span>
+                            <span className="font-bold tabular-nums">{necesario.toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'} {!okStock && <span className="text-[10px]">(stock: {stock.toFixed(0)})</span>}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Aviso global si hay items sin stock para consumir */}
+                {(() => {
+                  const faltantes: string[] = [];
+                  // Cajas faltantes por línea
+                  for (const linea of (consumirPedido?.lineas ?? [])) {
+                    const cajaId = (linea as any).caja_id;
+                    const necCajas = Number((linea as any).cantidad_cajas ?? 0);
+                    if (!cajaId || necCajas <= 0) continue;
+                    const cajaProd = productos.find(p => p.id === cajaId);
+                    if (!cajaProd) continue;
+                    const stockCaja = parseFloat(cajaProd.stock_actual ?? '0');
+                    if (stockCaja < necCajas) faltantes.push(`${cajaProd.nombre}: falta ${(necCajas - stockCaja).toFixed(0)} ud`);
+                  }
+                  // Extras faltantes
+                  for (const e of consumirExtras) {
+                    const necesario = Number(e.cantidad);
+                    const stock = parseFloat(String(e.stock_actual ?? 0));
+                    if (stock < necesario) faltantes.push(`${e.nombre} (extra): falta ${(necesario - stock).toFixed(0)} ${e.unidad_medida ?? 'ud'}`);
+                  }
+                  if (faltantes.length === 0) return null;
+                  return (
+                    <div className="rounded-lg border-2 border-red-300 bg-red-50 p-3">
+                      <p className="text-[11px] font-bold text-red-800 uppercase mb-1.5">⚠ NO se puede consumir aún · stock insuficiente:</p>
+                      <ul className="text-[11px] space-y-0.5 font-mono text-red-700">
+                        {faltantes.map((f, i) => <li key={i}>· {f}</li>)}
+                      </ul>
+                      <p className="text-[10px] text-red-600 mt-1.5 italic">Añade stock (Productos → ajuste manual o nuevo lote) y vuelve a abrir Consumir.</p>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
           {Object.entries(lotesDisp).map(([prodId, lotes]) => {
             const cantPedida = parseFloat(lotes[0]?.cantidad_pedida ?? '0');
             const seleccionado = Object.values(lotesSeleccion[prodId] ?? {}).reduce((s, v) => s + v, 0);

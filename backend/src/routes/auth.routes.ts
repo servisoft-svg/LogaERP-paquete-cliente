@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { pool } from '../db/pool';
 import { signToken, verifyToken, authMiddleware, adminOnly, invalidateRevocadosCache } from '../middleware/auth';
+import { AppError } from '../lib/AppError';
 
 const router = Router();
 
@@ -59,13 +60,13 @@ async function checkBloqueo(emailNorm: string): Promise<{ bloqueado: boolean; mi
 }
 
 // POST /api/auth/login
-router.post('/login', loginLimiter, async (req, res) => {
+router.post('/login', loginLimiter, async (req, res, next) => {
   try {
     const { email, password } = req.body;
     const ip = getIp(req);
     const userAgent = req.headers['user-agent'] ?? '';
 
-    if (!email || !password) return res.status(400).json({ error: 'Email y password obligatorios' });
+    if (!email || !password) return next(AppError.validacion('Email y password obligatorios'));
 
     const emailNorm = email.toLowerCase().trim();
 
@@ -101,11 +102,11 @@ router.post('/login', loginLimiter, async (req, res) => {
     // Comprobar bloqueo progresivo
     const bloqueo = await checkBloqueo(emailNorm);
     if (bloqueo.bloqueado) {
-      return res.status(429).json({
-        error: `Cuenta bloqueada por ${bloqueo.minutos_restantes} minuto${bloqueo.minutos_restantes !== 1 ? 's' : ''}. Demasiados intentos fallidos (${bloqueo.intentos}).`,
-        minutos_restantes: bloqueo.minutos_restantes,
-        intentos: bloqueo.intentos,
-      });
+      return next(new AppError(
+        'BLOQUEO_PROGRESIVO',
+        `Cuenta bloqueada por ${bloqueo.minutos_restantes} minuto${bloqueo.minutos_restantes !== 1 ? 's' : ''}. Demasiados intentos fallidos (${bloqueo.intentos}).`,
+        { minutos_restantes: bloqueo.minutos_restantes, intentos: bloqueo.intentos }
+      ));
     }
 
     const { rows: [user] } = await pool.query(
@@ -118,7 +119,7 @@ router.post('/login', loginLimiter, async (req, res) => {
         `INSERT INTO login_logs (email, ip, user_agent, exito) VALUES ($1, $2, $3, false)`,
         [emailNorm, ip, userAgent]
       ).catch(() => {});
-      return res.status(401).json({ error: 'Credenciales incorrectas' });
+      return next(new AppError('CREDENCIALES_INVALIDAS', 'Credenciales incorrectas'));
     }
 
     const valid = await bcrypt.compare(password, user.password_hash);
@@ -131,17 +132,20 @@ router.post('/login', loginLimiter, async (req, res) => {
       // Avisar cuantos intentos quedan
       const nuevo = await checkBloqueo(emailNorm);
       if (nuevo.bloqueado) {
-        return res.status(429).json({
-          error: `Cuenta bloqueada ${nuevo.minutos_restantes} minuto${nuevo.minutos_restantes !== 1 ? 's' : ''}. Demasiados intentos fallidos.`,
-          minutos_restantes: nuevo.minutos_restantes,
-        });
+        return next(new AppError(
+          'BLOQUEO_PROGRESIVO',
+          `Cuenta bloqueada ${nuevo.minutos_restantes} minuto${nuevo.minutos_restantes !== 1 ? 's' : ''}. Demasiados intentos fallidos.`,
+          { minutos_restantes: nuevo.minutos_restantes }
+        ));
       }
       const restantes = MAX_INTENTOS - (nuevo.intentos % MAX_INTENTOS || MAX_INTENTOS);
-      return res.status(401).json({
-        error: restantes > 0
+      return next(new AppError(
+        'CREDENCIALES_INVALIDAS',
+        restantes > 0
           ? `Credenciales incorrectas. ${restantes} intento${restantes !== 1 ? 's' : ''} restante${restantes !== 1 ? 's' : ''}.`
           : 'Credenciales incorrectas',
-      });
+        { intentos_restantes: Math.max(0, restantes) }
+      ));
     }
 
     // Login exitoso — log + reset implícito (los fallos anteriores ya no cuentan)
@@ -156,13 +160,13 @@ router.post('/login', loginLimiter, async (req, res) => {
       token,
       usuario: { id: user.id, nombre: user.nombre, email: user.email, rol: user.rol },
     });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // GET /api/auth/login-logs — admin only
-router.get('/login-logs', authMiddleware, adminOnly, async (req, res) => {
+router.get('/login-logs', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     const limit = Math.min(500, parseInt(String(req.query.limit ?? '100'), 10) || 100);
     const { rows } = await pool.query(
@@ -174,8 +178,8 @@ router.get('/login-logs', authMiddleware, adminOnly, async (req, res) => {
       [limit]
     );
     return res.json(rows);
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
@@ -183,13 +187,13 @@ router.get('/login-logs', authMiddleware, adminOnly, async (req, res) => {
 // authMiddleware ya valida el JWT (con algoritmo HS256 pinneado vía verifyToken).
 // Antes hacía la validación inline; centralizado para consistencia (Fix #23).
 // PUT /api/auth/me — actualizar el propio perfil (nombre, email)
-router.put('/me', authMiddleware, async (req, res) => {
+router.put('/me', authMiddleware, async (req, res, next) => {
   try {
     const userId = (req as any).user?.id;
-    if (!userId) return res.status(401).json({ error: 'No autorizado' });
+    if (!userId) return next(AppError.unauthorized());
     const { nombre, email, email_firma } = req.body ?? {};
     if (!nombre || !String(nombre).trim()) {
-      return res.status(400).json({ error: 'El nombre no puede estar vacío' });
+      return next(AppError.validacion('El nombre no puede estar vacío', { campo: 'nombre' }));
     }
     const emailNorm = email ? String(email).trim().toLowerCase() : null;
     // email_firma es el email que aparece en albaranes / firmas, separado del
@@ -206,9 +210,7 @@ router.put('/me', authMiddleware, async (req, res) => {
         [emailNorm, userId]
       );
       if (dup.length > 0) {
-        return res.status(409).json({
-          error: `El email "${emailNorm}" ya está en uso por otro usuario activo.`,
-        });
+        return next(new AppError('DUPLICADO', `El email "${emailNorm}" ya está en uso por otro usuario activo.`, { campo: 'email' }));
       }
       // Si hay un usuario INACTIVO con ese email, renombramos su email para
       // liberar el slot (el unique constraint es a nivel BD).
@@ -228,42 +230,40 @@ router.put('/me', authMiddleware, async (req, res) => {
        RETURNING id, nombre, email, email_firma, rol`,
       [String(nombre).trim(), emailNorm, emailFirmaNorm, emailFirmaNorm !== undefined, userId]
     );
-    if (!u) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (!u) return next(AppError.notFound('Usuario', userId));
     return res.json(u);
   } catch (e) {
-    // Mensaje claro si Postgres lanza unique violation (defensa por si la
-    // condición de carrera deja pasar dos updates simultáneos).
-    const err = e as { code?: string; message?: string };
+    const err = e as { code?: string };
     if (err.code === '23505') {
-      return res.status(409).json({ error: 'Ese email ya está en uso por otro usuario.' });
+      return next(new AppError('DUPLICADO', 'Ese email ya está en uso por otro usuario.', { campo: 'email' }));
     }
-    return res.status(500).json({ error: err.message ?? 'Error al guardar perfil' });
+    return next(e);
   }
 });
 
-router.get('/me', authMiddleware, async (req, res) => {
+router.get('/me', authMiddleware, async (req, res, next) => {
   try {
     const userId = (req as any).user?.id;
-    if (!userId) return res.status(401).json({ error: 'No autorizado' });
+    if (!userId) return next(AppError.unauthorized());
 
     const { rows: [user] } = await pool.query(
       `SELECT id, nombre, email, email_firma, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
       [userId]
     );
-    if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
+    if (!user) return next(AppError.unauthorized('Usuario no encontrado'));
 
     return res.json(user);
-  } catch {
-    return res.status(500).json({ error: 'Error interno' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // POST /api/auth/refresh - renew token. Acepta tokens recién expirados
 // (gracia 30 días) para que la sesión sobreviva entre recargas/reinicios.
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', async (req, res, next) => {
   try {
     const auth = req.headers.authorization?.replace('Bearer ', '');
-    if (!auth) return res.status(401).json({ error: 'No autorizado' });
+    if (!auth) return next(AppError.unauthorized());
 
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET ?? '';
@@ -273,14 +273,13 @@ router.post('/refresh', async (req, res) => {
       decoded = jwt.verify(auth, JWT_SECRET, JWT_VERIFY_OPTS) as typeof decoded;
     } catch (err: unknown) {
       // Token expirado: aceptarlo solo si la expiración fue hace <24h.
-      // (Antes 30 días — ventana excesiva para tokens robados.)
       if (err instanceof Error && err.name === 'TokenExpiredError') {
         const payload = jwt.verify(auth, JWT_SECRET, { ...JWT_VERIFY_OPTS, ignoreExpiration: true }) as typeof decoded;
         const ageS = Date.now() / 1000 - (payload.exp ?? 0);
-        if (ageS > 86400) return res.status(401).json({ error: 'Sesion expirada' });
+        if (ageS > 86400) return next(new AppError('TOKEN_EXPIRADO', 'Sesión expirada'));
         decoded = payload;
       } else {
-        return res.status(401).json({ error: 'Token invalido' });
+        return next(new AppError('UNAUTHORIZED', 'Token inválido'));
       }
     }
 
@@ -288,7 +287,7 @@ router.post('/refresh', async (req, res) => {
       `SELECT id, nombre, email, rol FROM usuarios WHERE id = $1 AND activo = TRUE`,
       [decoded.id]
     );
-    if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
+    if (!user) return next(AppError.unauthorized('Usuario no encontrado'));
 
     const token = signToken({ id: user.id, rol: user.rol });
 
@@ -314,13 +313,13 @@ router.post('/refresh', async (req, res) => {
 
     return res.json({ token, usuario: user });
   } catch {
-    return res.status(401).json({ error: 'Token invalido' });
+    return next(new AppError('UNAUTHORIZED', 'Token inválido'));
   }
 });
 
 // POST /api/auth/logout — revoca el jti actual server-side.
 // Tras logout, el token deja de valer aunque no haya expirado por TTL.
-router.post('/logout', authMiddleware, async (req, res) => {
+router.post('/logout', authMiddleware, async (req, res, next) => {
   try {
     const user = (req as any).user as { id: string; jti?: string; exp?: number };
     if (!user?.jti || !user.exp) {
@@ -337,23 +336,22 @@ router.post('/logout', authMiddleware, async (req, res) => {
     );
     invalidateRevocadosCache();
     return res.json({ ok: true });
-  } catch (err: unknown) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    return next(err);
   }
 });
 
 // POST /api/auth/register — protegido: solo admins
-router.post('/register', authMiddleware, adminOnly, async (req, res) => {
+router.post('/register', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     const { nombre, email, password, rol } = req.body;
-    if (!nombre || !email || !password) return res.status(400).json({ error: 'Todos los campos son obligatorios' });
+    if (!nombre || !email || !password) return next(AppError.validacion('Todos los campos son obligatorios'));
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) return res.status(400).json({ error: 'Formato de email invalido' });
+    if (!emailRegex.test(email)) return next(AppError.validacion('Formato de email inválido', { campo: 'email' }));
 
-    // Password policy
-    if (password.length < 8) return res.status(400).json({ error: 'La contrasena debe tener al menos 8 caracteres' });
-    if (!/[A-Z]/.test(password) || !/[0-9]/.test(password)) return res.status(400).json({ error: 'La contrasena debe tener al menos una mayuscula y un numero' });
+    if (password.length < 8) return next(AppError.validacion('La contraseña debe tener al menos 8 caracteres', { campo: 'password' }));
+    if (!/[A-Z]/.test(password) || !/[0-9]/.test(password)) return next(AppError.validacion('La contraseña debe tener al menos una mayúscula y un número', { campo: 'password' }));
 
     const hash = await bcrypt.hash(password, 12);
     const { rows: [user] } = await pool.query(
@@ -362,9 +360,11 @@ router.post('/register', authMiddleware, adminOnly, async (req, res) => {
     );
     return res.status(201).json(user);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Error';
-    if (msg.includes('unique') || msg.includes('duplicate')) return res.status(409).json({ error: 'Email ya registrado' });
-    return res.status(500).json({ error: msg });
+    const msg = err instanceof Error ? err.message : '';
+    if (msg.includes('unique') || msg.includes('duplicate')) {
+      return next(new AppError('DUPLICADO', 'Email ya registrado', { campo: 'email' }));
+    }
+    return next(err);
   }
 });
 

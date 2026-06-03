@@ -267,19 +267,19 @@ export default function Finanzas() {
           <div className="w-px h-4 bg-zinc-200 dark:bg-white/10 mx-1" />
           <button onClick={() => {
             const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
-            const url = `/api/finanzas/informe-plastico?desde=${año}-01-01&hasta=${año}-12-31`;
+            const url = `/api/finanzas/informe-materiales?desde=${año}-01-01&hasta=${año}-12-31`;
             fetch(url, { headers: { Authorization: `Bearer ${token}` } })
               .then(r => r.blob())
               .then(blob => {
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
-                a.download = `informe-plastico-${año}.csv`;
+                a.download = `informe-materiales-${año}.csv`;
                 document.body.appendChild(a); a.click(); document.body.removeChild(a);
               })
               .catch(e => console.error('Error:', e));
           }}
             className="group inline-flex items-center gap-1.5 px-2.5 h-7 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:text-loga-red hover:bg-loga-red/5 rounded-md transition-colors">
-            Plástico {año}
+            Materiales {año}
             <Download size={10} strokeWidth={2} className="opacity-50 group-hover:opacity-100 transition-opacity" />
           </button>
         </div>

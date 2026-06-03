@@ -20,6 +20,13 @@ export interface AlertaPendiente {
   con_sonido: boolean;
   con_notificacion: boolean;
   origen?: string;
+  // Quién la creó (visible al operario para saber de parte de quién)
+  creador_nombre?: string | null;
+  creador_rol?: string | null;
+  // Recurso enlazado (producto/lote/orden/pedido) si se vinculó al crear
+  referencia_tipo?: 'producto' | 'lote' | 'orden' | 'pedido' | null;
+  referencia_id?: string | null;
+  referencia?: { label: string; url: string } | null;
 }
 
 const POLL_MS = 30_000;

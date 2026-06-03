@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -346,8 +346,38 @@ export default function Productos() {
     setCosteReceta(null);
     setResetAuto(false);
     setFormSpecs([]);
+    setBotesCompatibles([]);
+    setBotesPorCaja('');
     setModalOpen(true);
   };
+
+  // ── Estado para vinculación caja ↔ botes compatibles ──────────────────────
+  const [botesCompatibles, setBotesCompatibles] = useState<string[]>([]); // ids
+  const [botesPorCaja, setBotesPorCaja] = useState<string>('');
+  // Catálogo de botes seleccionables: PEs + frasco-MEs (subcategoria_me Bote)
+  const botesPosibles = useMemo(() => {
+    return productos.filter(p =>
+      p.activo !== false && (
+        p.tipo === 'producto_envasado' ||
+        (p.tipo === 'material_embalaje' && ['Bote', 'Frasco', 'Garrafa', 'Bidón', 'Bidon'].includes(((p as any).subcategoria_me ?? '')))
+      )
+    );
+  }, [productos]);
+  // Cargar lista compatibles al editar una caja
+  useEffect(() => {
+    if (!modalOpen || !editando) return;
+    const subcat = (editando as any).subcategoria_me ?? '';
+    if (editando.tipo !== 'material_embalaje' || !['Caja', 'Palé', 'Pale'].includes(subcat)) {
+      setBotesCompatibles([]);
+      setBotesPorCaja('');
+      return;
+    }
+    productosApi.listarBotesCompatibles(editando.id).then(r => {
+      const data = r.data as { botes: { id: string }[]; caja: { botes_por_caja: number | null } };
+      setBotesCompatibles(data.botes.map(b => b.id));
+      setBotesPorCaja(data.caja.botes_por_caja != null ? String(data.caja.botes_por_caja) : '');
+    }).catch(() => { setBotesCompatibles([]); setBotesPorCaja(''); });
+  }, [modalOpen, editando]);
 
   const abrirEditar = async (p: Producto) => {
     setEditando(p);
@@ -499,6 +529,15 @@ export default function Productos() {
             spec_id: s.spec_id, min_valor: s.min_valor, max_valor: s.max_valor, orden: i,
             parametros: s.parametros && Object.values(s.parametros).some((v) => v !== '' && v != null) ? s.parametros : null,
           })));
+          // Persistir botes compatibles si la caja se editó (rol agrupador).
+          // Solo se envía si subcategoria es Caja/Palé y hay edición real.
+          const subcat = form.subcategoria_me;
+          if (form.tipo === 'material_embalaje' && ['Caja', 'Palé', 'Pale'].includes(subcat)) {
+            await productosApi.setBotesCompatibles(productoIdGuardado, {
+              bote_ids: botesCompatibles,
+              botes_por_caja: botesPorCaja ? Number(botesPorCaja) : undefined,
+            }).catch(e => console.error('compatibles falló', e));
+          }
         }
         return { nombre: form.nombre, codigo: editando.codigo, tipo: form.tipo, unidad: form.unidad_medida, precio_compra: form.precio_unitario, precio_venta: form.precio_venta, stock_minimo: form.stock_minimo };
       } else {
@@ -2231,6 +2270,40 @@ export default function Productos() {
                     <p className="text-[11px] text-gray-500 bg-white/70 border border-gray-100 rounded-lg px-3 py-2 leading-relaxed">
                       ℹ Los kg de cola por bote se configuran en el <b className="text-gray-700">bote individual</b> (sub-cat Bote) o en el <b className="text-gray-700">producto envasado</b>. Al planificar envasado se multiplica: <span className="font-mono">cajas × botes × kg/bote</span>.
                     </p>
+
+                    {/* ── Botes compatibles con esta caja ───────────────── */}
+                    {editando && (
+                      <div className="rounded-lg border-2 border-amber-300 bg-white p-3 space-y-2">
+                        <div>
+                          <p className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">📦 Botes compatibles</p>
+                          <p className="text-[10px] text-gray-500">Marca qué botes encajan en esta caja. Al hacer un pedido, la caja se autoenlaza al bote.</p>
+                        </div>
+                        <div className="max-h-56 overflow-y-auto border border-gray-200 rounded divide-y divide-gray-100">
+                          {botesPosibles.length === 0 && (
+                            <p className="text-[11px] text-gray-400 italic p-2 text-center">No hay botes/PEs creados aún.</p>
+                          )}
+                          {botesPosibles.map(b => {
+                            const checked = botesCompatibles.includes(b.id);
+                            return (
+                              <label key={b.id} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-amber-50 cursor-pointer">
+                                <input type="checkbox" checked={checked} onChange={() => {
+                                  setBotesCompatibles(prev => checked ? prev.filter(x => x !== b.id) : [...prev, b.id]);
+                                }} className="accent-amber-600" />
+                                <span className="font-mono text-gray-400 shrink-0">{b.codigo}</span>
+                                <span className="flex-1 truncate">{b.nombre}</span>
+                                <span className="text-[10px] text-gray-400">{b.tipo === 'producto_envasado' ? 'PE' : 'ME'}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-gray-500 italic">{botesCompatibles.length} bote(s) vinculado(s) · se guarda al pulsar Guardar.</p>
+                      </div>
+                    )}
+                    {!editando && (
+                      <p className="text-[11px] text-gray-500 italic bg-gray-50 border border-gray-200 rounded p-2">
+                        💡 Guarda la caja primero, luego edítala para vincularla a sus botes compatibles.
+                      </p>
+                    )}
                   </>
                 )}
 

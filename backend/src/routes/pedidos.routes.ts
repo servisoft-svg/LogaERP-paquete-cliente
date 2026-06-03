@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { pool, acquireProductLocks, withSerializableTransaction } from '../db/pool';
+import { AppError } from '../lib/AppError';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { alertaService } from '../services/alerta.service';
 import { automatizacionesService } from '../services/automatizaciones.service';
@@ -33,7 +34,13 @@ router.get('/', async (req, res) => {
          WHERE rs.pedido_id = pd.id
            AND rs.estado = 'consumida'
            AND rs.lote_id IS NOT NULL
-        ) AS coste_real
+        )
+        + COALESCE(
+          (SELECT SUM(pe.cantidad * COALESCE(pp.coste_medio_actual, pp.precio_unitario, 0))
+             FROM pedido_embalajes_extra pe
+             JOIN productos pp ON pp.id = pe.producto_id
+            WHERE pe.pedido_id = pd.id), 0)
+        AS coste_real
       FROM pedidos pd
       LEFT JOIN clientes c ON c.id = pd.cliente_id
       LEFT JOIN productos p ON p.id = pd.producto_id
@@ -177,21 +184,25 @@ router.post('/', async (req, res) => {
          subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2)]
       );
 
-      // 2) INSERT líneas (batch)
+      // 2) INSERT líneas (batch). Incluye desglose cajas+sueltos+caja_id si la
+      // línea viene de un PE con caja vinculada (frontend lo manda).
       if (lineasValidas.length > 0) {
         const placeholders: string[] = [];
         const params: unknown[] = [];
         let idx = 1;
         for (const l of lineasValidas) {
-          placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
+          placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::UUID)`);
           params.push(
             p.id, l.producto_id ?? null, l.producto_nombre ?? null,
             l.cantidad ?? null, l.unidad_medida ?? 'kg', l.notas ?? null,
             l.precio_unitario ?? null, l.subtotal ?? null,
+            (l as any).cantidad_cajas ?? 0,
+            (l as any).cantidad_botes_sueltos ?? 0,
+            (l as any).caja_id ?? null,
           );
         }
         await client.query(
-          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal)
+          `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, notas, precio_unitario, subtotal, cantidad_cajas, cantidad_botes_sueltos, caja_id)
            VALUES ${placeholders.join(', ')}`,
           params
         );
@@ -386,13 +397,14 @@ router.put('/:id', adminOnly, async (req, res) => {
           const placeholders: string[] = [];
           const params: unknown[] = [];
           let idx = 1;
-          for (const l of lineasValidas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; precio_unitario?: string|number }[]) {
-            placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC)`);
+          for (const l of lineasValidas as { producto_id?: string; producto_nombre?: string; cantidad?: string|number; unidad_medida?: string; precio_unitario?: string|number; cantidad_cajas?: number|string; cantidad_botes_sueltos?: number|string; caja_id?: string }[]) {
+            placeholders.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}::NUMERIC, $${idx++}, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::NUMERIC, $${idx++}::UUID)`);
             const subtotal = (parseFloat(String(l.cantidad ?? 0)) * parseFloat(String(l.precio_unitario ?? 0))).toFixed(2);
-            params.push(req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, subtotal);
+            params.push(req.params.id, l.producto_id ?? null, l.producto_nombre ?? null, l.cantidad ?? null, l.unidad_medida ?? 'kg', l.precio_unitario ?? null, subtotal,
+              l.cantidad_cajas ?? 0, l.cantidad_botes_sueltos ?? 0, l.caja_id ?? null);
           }
           await txClient.query(
-            `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal)
+            `INSERT INTO lineas_pedido (pedido_id, producto_id, producto_nombre, cantidad, unidad_medida, precio_unitario, subtotal, cantidad_cajas, cantidad_botes_sueltos, caja_id)
              VALUES ${placeholders.join(', ')}`,
             params
           );
@@ -633,8 +645,38 @@ router.get('/:id/desglose-coste', async (req, res) => {
         fecha_entrada: r.fecha_entrada,
       };
     });
-    const coste_total = Math.round(desglose.reduce((s, d) => s + d.coste_linea, 0) * 100) / 100;
-    return res.json({ desglose, coste_total });
+    // Extras de embalaje del pedido — coste = cantidad × CMP del producto.
+    // No están en reservas (no son líneas), pero suman al coste interno.
+    const { rows: extras } = await pool.query<{
+      producto_id: string; producto_nombre: string; producto_codigo: string; unidad_medida: string;
+      cantidad: string; coste_unitario: string | null;
+    }>(
+      `SELECT pe.producto_id,
+              p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida,
+              pe.cantidad,
+              COALESCE(p.coste_medio_actual, p.precio_unitario, 0) AS coste_unitario
+         FROM pedido_embalajes_extra pe JOIN productos p ON p.id = pe.producto_id
+        WHERE pe.pedido_id = $1`,
+      [req.params.id]
+    );
+    const extrasDesglose = extras.map(e => {
+      const cant = parseFloat(e.cantidad);
+      const coste = parseFloat(e.coste_unitario ?? '0');
+      return {
+        es_extra: true as const,
+        producto_id: e.producto_id,
+        producto_nombre: e.producto_nombre,
+        producto_codigo: e.producto_codigo,
+        unidad_medida: e.unidad_medida,
+        cantidad: cant,
+        precio_compra: coste,
+        coste_linea: Math.round(cant * coste * 100) / 100,
+      };
+    });
+    const coste_lineas = Math.round(desglose.reduce((s, d) => s + d.coste_linea, 0) * 100) / 100;
+    const coste_extras = Math.round(extrasDesglose.reduce((s, d) => s + d.coste_linea, 0) * 100) / 100;
+    const coste_total = Math.round((coste_lineas + coste_extras) * 100) / 100;
+    return res.json({ desglose, extras: extrasDesglose, coste_lineas, coste_extras, coste_total });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
@@ -687,7 +729,7 @@ router.get('/:id/lotes-disponibles', async (req, res) => {
 });
 
 // POST /api/pedidos/:id/consumir — resta stock. Acepta lotes_override opcional
-router.post('/:id/consumir', async (req, res) => {
+router.post('/:id/consumir', async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
@@ -697,13 +739,17 @@ router.post('/:id/consumir', async (req, res) => {
     //   - { producto_id: [{lote_id, cantidad}, ...] }             → cantidad EXACTA por lote (respeta split manual)
     const lotesOverride: Record<string, string[] | Array<{ lote_id: string; cantidad: number }>> = req.body.lotes_override ?? {};
     const { rows: [pedido] } = await client.query(`SELECT * FROM pedidos WHERE id = $1 FOR UPDATE`, [id]);
-    if (!pedido) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Pedido no encontrado' }); }
+    if (!pedido) { await client.query('ROLLBACK'); return next(AppError.notFound('Pedido', id)); }
 
     // Validate state — only allow consumir from valid states
     const consumirPermitido = ['confirmado', 'en_produccion', 'fabricado', 'envasado'];
     if (!consumirPermitido.includes(pedido.estado)) {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: `No se puede consumir un pedido en estado "${pedido.estado}"` });
+      return next(new AppError(
+        'ESTADO_INVALIDO',
+        `No se puede consumir un pedido en estado "${pedido.estado}"`,
+        { estado_actual: pedido.estado, estados_validos: consumirPermitido }
+      ));
     }
 
     // Cargar lineas del pedido (o usar producto principal si no hay lineas)
@@ -730,7 +776,7 @@ router.post('/:id/consumir', async (req, res) => {
       stock: 0,
     }] : [];
 
-    if (items.length === 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Pedido sin productos' }); }
+    if (items.length === 0) { await client.query('ROLLBACK'); return next(AppError.validacion('Pedido sin productos')); }
 
     // Lock TODOS los productos del pedido en una sola query (evita N+1 + race conditions
     // entre filas distintas de la misma transacción)
@@ -753,17 +799,24 @@ router.post('/:id/consumir', async (req, res) => {
         const prod = prodMap.get(item.producto_id);
         if (!prod) {
           await client.query('ROLLBACK');
-          return res.status(404).json({ error: `Producto ${item.producto_id} no encontrado` });
+          return next(AppError.notFound('Producto', item.producto_id));
         }
         item.stock = parseFloat(prod.stock_actual);
         item.nombre = prod.nombre;
         item.unidad = prod.unidad_medida;
         if (item.stock < item.cantidad) {
           await client.query('ROLLBACK');
-          return res.status(422).json({
-            error: 'STOCK_INSUFICIENTE',
-            mensaje: `${item.nombre}: stock ${item.stock.toFixed(3)} ${item.unidad}, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
-          });
+          return next(new AppError(
+            'STOCK_INSUFICIENTE',
+            `${item.nombre}: stock ${item.stock.toFixed(3)} ${item.unidad}, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
+            {
+              producto_id: item.producto_id,
+              producto: item.nombre,
+              stock_actual: item.stock,
+              cantidad_necesaria: item.cantidad,
+              unidad: item.unidad,
+            }
+          ));
         }
       }
     }
@@ -847,16 +900,151 @@ router.post('/:id/consumir', async (req, res) => {
       // Verify all quantity was consumed from approved lots
       if (restante > 0.001) {
         await client.query('ROLLBACK');
-        return res.status(422).json({
-          error: 'STOCK_INSUFICIENTE',
-          mensaje: `${item.nombre}: solo hay ${(item.cantidad - restante).toFixed(3)} ${item.unidad} en lotes aprobados, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
-        });
+        return next(new AppError(
+          'STOCK_INSUFICIENTE',
+          `${item.nombre}: solo hay ${(item.cantidad - restante).toFixed(3)} ${item.unidad} en lotes aprobados, necesario ${item.cantidad.toFixed(3)} ${item.unidad}`,
+          {
+            producto_id: item.producto_id,
+            producto: item.nombre,
+            consumido: item.cantidad - restante,
+            faltante: restante,
+            unidad: item.unidad,
+          }
+        ));
       }
 
       // [Eliminado tras hot-fix C-5 trigger]: trigger fn_trg_lotes_stock_actual
       // ya recalculó productos.stock_actual desde lotes al UPDATE lotes anterior.
       // Restar de nuevo causaba doble descuento → CHECK constraint violation.
       consumidos.push(`${item.nombre}: ${item.cantidad} ${item.unidad}`);
+    }
+
+    // Cajas autoenlazadas: por cada línea con cantidad_cajas > 0 y caja_id,
+    // descontamos esas cajas del stock (FIFO sobre lotes aprobados de la caja).
+    // Trazable vía referencia_externa = PED-CAJA:pedido_id.
+    const { rows: lineasCajas } = await client.query<{
+      caja_id: string; cantidad_cajas: string; producto_id: string; producto_nombre: string;
+      caja_nombre: string; caja_codigo: string;
+    }>(
+      `SELECT lp.caja_id, lp.cantidad_cajas, lp.producto_id, lp.producto_nombre,
+              p.nombre AS caja_nombre, p.codigo AS caja_codigo
+         FROM lineas_pedido lp JOIN productos p ON p.id = lp.caja_id
+        WHERE lp.pedido_id = $1 AND lp.caja_id IS NOT NULL AND lp.cantidad_cajas > 0`,
+      [id]
+    );
+    for (const lc of lineasCajas) {
+      const necCajas = parseFloat(lc.cantidad_cajas);
+      const { rows: [prodCaja] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [lc.caja_id]
+      );
+      let stockCaja = parseFloat(prodCaja?.stock_actual ?? '0');
+      if (stockCaja < necCajas - 0.001) {
+        await client.query('ROLLBACK');
+        return next(new AppError(
+          'STOCK_INSUFICIENTE',
+          `Caja ${lc.caja_nombre}: stock ${stockCaja.toFixed(2)} ud, necesario ${necCajas} cajas para ${lc.producto_nombre}`,
+          { producto_id: lc.caja_id, producto: lc.caja_nombre, faltante: necCajas - stockCaja, es_caja: true }
+        ));
+      }
+      const { rows: lotesCaja } = await client.query<{ id: string; cantidad_actual: string }>(
+        `SELECT id, cantidad_actual FROM lotes
+         WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
+         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
+        [lc.caja_id]
+      );
+      let restanteCaja = necCajas;
+      for (const l of lotesCaja) {
+        if (restanteCaja <= 0) break;
+        const disp = parseFloat(l.cantidad_actual);
+        const usar = Math.min(disp, restanteCaja);
+        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1::NUMERIC WHERE id = $2`,
+          [usar.toFixed(6), l.id]);
+        const stockDespues = stockCaja - usar;
+        await client.query(
+          `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, 'PED-CAJA:' || $7, $6)`,
+          [lc.caja_id, l.id, (-usar).toFixed(6), stockCaja.toFixed(6), stockDespues.toFixed(6),
+           `Caja ${lc.caja_nombre} para línea ${lc.producto_nombre} en pedido ${pedido.numero_pedido}`, pedido.id]
+        );
+        stockCaja = stockDespues;
+        restanteCaja -= usar;
+      }
+      if (restanteCaja > 0.001) {
+        // Sin lotes suficientes — descuento sin lote
+        await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
+          [restanteCaja.toFixed(6), lc.caja_id]);
+        await client.query(
+          `INSERT INTO stock_moves (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+           VALUES ($1, 'salida', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC, 'PED-CAJA:' || $6, $5)`,
+          [lc.caja_id, (-restanteCaja).toFixed(6), stockCaja.toFixed(6), (stockCaja - restanteCaja).toFixed(6),
+           `Caja ${lc.caja_nombre} sin lote para ${lc.producto_nombre}`, pedido.id]
+        );
+      }
+      consumidos.push(`${lc.caja_nombre} (caja): ${necCajas} ud`);
+    }
+
+    // Extras de embalaje del pedido (palets, film...) — descontar FIFO.
+    // No están en líneas (no van al cliente), pero al completar consumimos su
+    // stock e insertamos stock_moves tipo='salida' para trazabilidad.
+    const { rows: extras } = await client.query<{
+      id: string; producto_id: string; cantidad: string; nombre: string; unidad_medida: string;
+    }>(
+      `SELECT pe.id, pe.producto_id, pe.cantidad, p.nombre, p.unidad_medida
+         FROM pedido_embalajes_extra pe JOIN productos p ON p.id = pe.producto_id
+        WHERE pe.pedido_id = $1`,
+      [id]
+    );
+    for (const ex of extras) {
+      const cantNec = parseFloat(ex.cantidad);
+      // Lock + lectura stock del producto extra
+      const { rows: [prodEx] } = await client.query<{ stock_actual: string }>(
+        `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [ex.producto_id]
+      );
+      let stockEx = parseFloat(prodEx?.stock_actual ?? '0');
+      if (stockEx < cantNec - 0.001) {
+        await client.query('ROLLBACK');
+        return next(new AppError(
+          'STOCK_INSUFICIENTE',
+          `Extra ${ex.nombre}: stock ${stockEx.toFixed(2)} ${ex.unidad_medida}, necesario ${cantNec.toFixed(2)}`,
+          { producto_id: ex.producto_id, producto: ex.nombre, faltante: cantNec - stockEx, es_extra: true }
+        ));
+      }
+      // FIFO sobre lotes aprobados (caducidad asc, entrada asc)
+      const { rows: lotesEx } = await client.query<{ id: string; cantidad_actual: string }>(
+        `SELECT id, cantidad_actual FROM lotes
+         WHERE producto_id = $1 AND estado = 'aprobado' AND cantidad_actual > 0
+         ORDER BY fecha_caducidad ASC NULLS LAST, fecha_entrada ASC FOR UPDATE`,
+        [ex.producto_id]
+      );
+      let restante = cantNec;
+      for (const l of lotesEx) {
+        if (restante <= 0) break;
+        const disp = parseFloat(l.cantidad_actual);
+        const usar = Math.min(disp, restante);
+        await client.query(`UPDATE lotes SET cantidad_actual = cantidad_actual - $1::NUMERIC WHERE id = $2`,
+          [usar.toFixed(6), l.id]);
+        const stockDespues = stockEx - usar;
+        await client.query(
+          `INSERT INTO stock_moves (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+           VALUES ($1, $2, 'salida', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC, 'PED-EXTRA:' || $7, $6)`,
+          [ex.producto_id, l.id, (-usar).toFixed(6), stockEx.toFixed(6), stockDespues.toFixed(6),
+           `Extra pedido ${pedido.numero_pedido}: ${usar.toFixed(2)} ${ex.unidad_medida} ${ex.nombre}`, pedido.id]
+        );
+        stockEx = stockDespues;
+        restante -= usar;
+      }
+      if (restante > 0.001) {
+        // Cubrir resto con descuento sin lote (raro: extras pueden no estar en lotes).
+        await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
+          [restante.toFixed(6), ex.producto_id]);
+        await client.query(
+          `INSERT INTO stock_moves (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
+           VALUES ($1, 'salida', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC, 'PED-EXTRA:' || $6, $5)`,
+          [ex.producto_id, (-restante).toFixed(6), stockEx.toFixed(6), (stockEx - restante).toFixed(6),
+           `Extra pedido ${pedido.numero_pedido}: ${restante.toFixed(2)} ${ex.unidad_medida} ${ex.nombre} (sin lote)`, pedido.id]
+        );
+      }
+      consumidos.push(`${ex.nombre} (extra): ${cantNec} ${ex.unidad_medida}`);
     }
 
     // Marcar reservas del pedido como consumidas (preserva auditoría +
@@ -896,9 +1084,9 @@ router.post('/:id/consumir', async (req, res) => {
     ).catch(() => undefined);
 
     return res.json({ ok: true, consumidos });
-  } catch (err: unknown) {
-    await client.query('ROLLBACK');
-    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    return next(err);
   } finally {
     client.release();
   }
@@ -1178,6 +1366,74 @@ export async function webhookHandler(req: Request, res: Response) {
 // Also keep it on the router for backwards compat (will be behind auth when mounted via router)
 router.post('/webhook', async (req: Request, res: Response) => {
   return webhookHandler(req, res);
+});
+
+// ── Material de embalaje EXTRA por pedido ──────────────────────────────────
+// No aparece en albarán ni factura. Solo se suma en /finanzas/informe-materiales.
+// Caso típico: 2 palets para transporte, film, sacos extra. Editable por
+// cualquier usuario (trabajador puede ajustar lo que carga al transportar).
+
+router.get('/:id/embalajes-extra', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT pe.id, pe.producto_id, pe.cantidad, pe.notas, pe.created_at,
+              p.codigo, p.nombre, p.material_embalaje, p.peso_material_vacio_kg, p.unidad_medida,
+              p.stock_actual
+         FROM pedido_embalajes_extra pe
+         JOIN productos p ON p.id = pe.producto_id
+        WHERE pe.pedido_id = $1
+        ORDER BY pe.created_at`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post('/:id/embalajes-extra', async (req, res, next) => {
+  try {
+    const { producto_id, cantidad, notas } = req.body ?? {};
+    if (!producto_id || !Number.isFinite(Number(cantidad)) || Number(cantidad) <= 0) {
+      return next(AppError.validacion('producto_id y cantidad>0 obligatorios', { campo: 'cantidad' }));
+    }
+    // El producto debe ser tipo material_embalaje (no PE/PF: para esos hay líneas).
+    const { rows: [prod] } = await pool.query<{ tipo: string; activo: boolean }>(
+      `SELECT tipo::text AS tipo, activo FROM productos WHERE id = $1`,
+      [producto_id]
+    );
+    if (!prod || !prod.activo) return next(AppError.notFound('Producto', producto_id));
+    if (prod.tipo !== 'material_embalaje') {
+      return next(AppError.validacion('Solo material_embalaje puede ir como extra de pedido', { tipo: prod.tipo }));
+    }
+    // Verifica pedido existe (FK ya lo hace, pero error más limpio).
+    const { rows: [ped] } = await pool.query(`SELECT id FROM pedidos WHERE id = $1`, [req.params.id]);
+    if (!ped) return next(AppError.notFound('Pedido', req.params.id));
+
+    const userId = (req as any).user?.id ?? null;
+    const { rows: [extra] } = await pool.query(
+      `INSERT INTO pedido_embalajes_extra (pedido_id, producto_id, cantidad, notas, creado_por)
+       VALUES ($1, $2, $3::NUMERIC, $4, $5)
+       RETURNING id, pedido_id, producto_id, cantidad, notas, created_at`,
+      [req.params.id, producto_id, Number(cantidad).toFixed(6), notas ?? null, userId]
+    );
+    return res.status(201).json(extra);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.delete('/:id/embalajes-extra/:extraId', async (req, res, next) => {
+  try {
+    const { rows: [del] } = await pool.query(
+      `DELETE FROM pedido_embalajes_extra WHERE id = $1 AND pedido_id = $2 RETURNING id`,
+      [req.params.extraId, req.params.id]
+    );
+    if (!del) return next(AppError.notFound('Extra', req.params.extraId));
+    return res.json({ ok: true });
+  } catch (err) {
+    return next(err);
+  }
 });
 
 export default router;

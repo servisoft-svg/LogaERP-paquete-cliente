@@ -51,7 +51,7 @@ const EMPTY = {
   nombre: '',
   producto_envasado_id: '',
   liquido_id: '', liquido_cantidad: '',
-  envase_id: '',
+  envase_id: '', envases_por_bote: 1,
   etiqueta_id: '', etiquetas_por_bote: 1,
   lleva_caja: false, caja_id: '',
   // Packaging para cálculo de porte
@@ -124,7 +124,7 @@ export default function Escandallo() {
       nombre: r.nombre,
       producto_envasado_id: r.producto_envasado_id,
       liquido_id: r.liquido_id, liquido_cantidad: String(parseFloat(r.liquido_cantidad)),
-      envase_id: r.envase_id,
+      envase_id: r.envase_id, envases_por_bote: r.envases_por_bote ?? 1,
       etiqueta_id: r.etiqueta_id ?? '', etiquetas_por_bote: r.etiquetas_por_bote,
       lleva_caja: r.lleva_caja, caja_id: r.caja_id ?? '',
       peso_envase_vacio_kg: numStr(r.peso_envase_vacio_kg),
@@ -162,7 +162,7 @@ export default function Escandallo() {
         nombre: form.nombre.trim(),
         producto_envasado_id: form.producto_envasado_id,
         liquido_id: form.liquido_id, liquido_cantidad: Number(form.liquido_cantidad), liquido_unidad: 'kg',
-        envase_id: form.envase_id, envases_por_bote: 1,
+        envase_id: form.envase_id, envases_por_bote: Math.max(1, Number(form.envases_por_bote) || 1),
         etiqueta_id: form.etiqueta_id || null, etiquetas_por_bote: Number(form.etiquetas_por_bote) || 1,
         lleva_caja: form.lleva_caja, caja_id: form.lleva_caja ? form.caja_id : null,
         peso_envase_vacio_kg: Number(form.peso_envase_vacio_kg) || 0,
@@ -411,6 +411,11 @@ export default function Escandallo() {
                     }}
                     createLabel="Crear envase"
                   />
+                  {form.lleva_caja && cajaSel?.unidades_por_envase && Number(cajaSel.unidades_por_envase) > 1 && (
+                    <p className="mt-2 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">
+                      <strong>×{cajaSel.unidades_por_envase}</strong> envases por unidad PE (multiplicador automático desde la caja "{cajaSel.nombre}"). El consumo de líquido, envases y etiquetas se multiplica por este valor.
+                    </p>
+                  )}
                   <div className="mt-2 grid grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[9px] uppercase tracking-wider font-bold text-gray-500 mb-0.5">
@@ -603,6 +608,39 @@ export default function Escandallo() {
                     </div>
                   )}
                 </Step>
+
+                {/* Resumen — qué consume cada unidad PE de esta fórmula */}
+                {form.envase_id && form.liquido_cantidad && (() => {
+                  const M = (form.lleva_caja && cajaSel?.unidades_por_envase && Number(cajaSel.unidades_por_envase) > 1)
+                    ? Number(cajaSel.unidades_por_envase)
+                    : 1;
+                  const liq = Number(form.liquido_cantidad) * M;
+                  const etiq = Number(form.etiquetas_por_bote || 0);
+                  const pesoEnv = Number(form.peso_envase_vacio_kg || 0) * M;
+                  const pesoCaja = Number(form.peso_caja_vacia_kg || 0);
+                  const brutoUd = liq + pesoEnv + (form.lleva_caja ? pesoCaja : 0);
+                  return (
+                    <div className="rounded-lg border-2 border-indigo-200 bg-indigo-50/50 p-3 space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-indigo-800 mb-1">
+                        Por cada unidad PE ({PE?.nombre ?? 'producto'}) →
+                      </p>
+                      <ul className="text-[11px] text-gray-800 space-y-0.5 font-mono">
+                        {liquidoSel && <li><span className="font-bold">{liq.toLocaleString('es-ES', { maximumFractionDigits: 3 })} kg</span> · {liquidoSel.nombre}</li>}
+                        {envaseSel && <li><span className="font-bold">{M.toLocaleString('es-ES')} ud</span> · {envaseSel.nombre}</li>}
+                        {etiquetaSel && etiq > 0 && <li><span className="font-bold">{etiq.toLocaleString('es-ES')} ud</span> · {etiquetaSel.nombre}</li>}
+                        {form.lleva_caja && cajaSel && <li><span className="font-bold">1 ud</span> · {cajaSel.nombre}{M > 1 && <span className="text-gray-500"> (contiene {M} envases)</span>}</li>}
+                        {form.extras.filter(e => e.producto_id && Number(e.cantidad_por_bote) > 0).map((e, i) => {
+                          const ex = productos.find(p => p.id === e.producto_id);
+                          return <li key={i}><span className="font-bold">{(Number(e.cantidad_por_bote) * M).toLocaleString('es-ES', { maximumFractionDigits: 3 })}</span> · {ex?.nombre ?? '?'}</li>;
+                        })}
+                      </ul>
+                      <div className="pt-1.5 mt-1.5 border-t border-indigo-200 flex items-baseline gap-3 text-[10px] text-gray-600">
+                        <span>Peso bruto por ud: <span className="font-bold text-gray-900">{brutoUd.toLocaleString('es-ES', { maximumFractionDigits: 3 })} kg</span></span>
+                        {M > 1 && <span>Multiplicador: <span className="font-bold text-indigo-700">×{M}</span></span>}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Footer */}

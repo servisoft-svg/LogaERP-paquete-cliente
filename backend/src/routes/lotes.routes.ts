@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { nextLoteCode } from '../lib/loteCode';
+import { AppError } from '../lib/AppError';
 
 const router = Router();
 
@@ -537,15 +538,15 @@ router.get('/:id/trazabilidad', async (req, res) => {
   }
 });
 
-router.patch('/:id/estado', async (req, res) => {
+router.patch('/:id/estado', async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
     const { estado, motivo } = req.body;
     if (!['cuarentena', 'aprobado', 'rechazado'].includes(estado)) {
-      return res.status(400).json({ error: 'Estado inválido' });
+      return next(AppError.validacion('Estado inválido', { valor: estado, validos: ['cuarentena', 'aprobado', 'rechazado'] }));
     }
-    if (!motivo) return res.status(400).json({ error: 'motivo es obligatorio para cambios de estado' });
+    if (!motivo) return next(AppError.validacion('motivo es obligatorio para cambios de estado', { campo: 'motivo' }));
 
     await client.query('BEGIN');
 
@@ -557,12 +558,16 @@ router.patch('/:id/estado', async (req, res) => {
     );
     if (!actual) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Lote no encontrado' });
+      return next(AppError.notFound('Lote', id));
     }
     const TRANS_LOTE: Record<string, string[]> = { cuarentena: ['aprobado', 'rechazado'], aprobado: ['cuarentena', 'rechazado'], rechazado: [] };
     if (!(TRANS_LOTE[actual.estado] ?? []).includes(estado)) {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: `No se puede cambiar de "${actual.estado}" a "${estado}"` });
+      return next(new AppError(
+        'ESTADO_LOTE_INVALIDO',
+        `No se puede cambiar de "${actual.estado}" a "${estado}"`,
+        { desde: actual.estado, hacia: estado }
+      ));
     }
 
     const userId = (req as any).user?.id ?? null;
@@ -576,20 +581,19 @@ router.patch('/:id/estado', async (req, res) => {
     if (esAprobacionDeCuarentena) {
       if (userRol !== 'admin') {
         await client.query('ROLLBACK');
-        return res.status(403).json({
-          error: 'Solo un administrador (responsable de calidad) puede aprobar un lote en cuarentena. Esta restricción cumple normativa REACH.',
-        });
+        return next(new AppError('REACH'));
       }
       const motivoTrim = String(motivo).trim();
       if (motivoTrim.length < 10) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: 'Aprobar un lote en cuarentena requiere motivo de al menos 10 caracteres explicando por qué se aprueba pese a la desviación QC.',
-        });
+        return next(AppError.validacion(
+          'Aprobar un lote en cuarentena requiere motivo de al menos 10 caracteres explicando por qué se aprueba pese a la desviación QC.',
+          { campo: 'motivo', minLength: 10, recibido: motivoTrim.length }
+        ));
       }
       if (!userId) {
         await client.query('ROLLBACK');
-        return res.status(401).json({ error: 'Sesión no identificada — no se puede registrar revisor.' });
+        return next(AppError.unauthorized('Sesión no identificada — no se puede registrar revisor.'));
       }
     }
 
@@ -617,7 +621,7 @@ router.patch('/:id/estado', async (req, res) => {
         );
     if (!lote) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Lote no encontrado' });
+      return next(AppError.notFound('Lote', id));
     }
 
     // [H2.1 audit v3] Eliminado UPDATE defensivo: trigger 025 ya recalcula stock_actual al cambiar estado del lote.
@@ -663,10 +667,9 @@ router.patch('/:id/estado', async (req, res) => {
     await client.query('COMMIT');
     invalidarCacheFinanzas(); // estado lote afecta inmovilizado (sólo aprobado cuenta)
     return res.json(lote);
-  } catch (err: unknown) {
+  } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
-    const msg = err instanceof Error ? err.message : 'Error';
-    return res.status(500).json({ error: msg });
+    return next(err);
   } finally {
     client.release();
   }

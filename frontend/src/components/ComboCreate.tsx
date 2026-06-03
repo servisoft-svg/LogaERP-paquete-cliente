@@ -144,16 +144,6 @@ export default function ComboCreate({
           }}
           className="max-h-72 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-2xl"
         >
-          {puedeCrear && (
-            <button type="button" onMouseDown={e => e.preventDefault()} onClick={handleCreate} disabled={creating}
-              className="w-full px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-left border-b border-gray-100 bg-emerald-50/50 hover:bg-emerald-50 disabled:opacity-50">
-              <div className="rounded p-0.5 bg-emerald-600 text-white"><Plus size={10} /></div>
-              <span className="text-gray-700">
-                {createLabel} <span className="font-bold text-emerald-700">"{query.trim()}"</span>
-              </span>
-              {creating && <span className="ml-auto text-[10px] text-emerald-600">creando…</span>}
-            </button>
-          )}
           {filtered.length === 0 && !puedeCrear && (
             <p className="px-2.5 py-3 text-[11px] text-gray-400 italic text-center">Sin resultados</p>
           )}
@@ -170,6 +160,27 @@ export default function ComboCreate({
               {o.right && <span className="text-[10px] text-gray-500 tabular-nums shrink-0">{o.right}</span>}
             </button>
           ))}
+          {/* Botón Crear AL FINAL para que el usuario vea primero las coincidencias.
+              Si hay matches, queda muy muted con aviso explícito anti-duplicado. */}
+          {puedeCrear && (
+            <button type="button" onMouseDown={e => e.preventDefault()} onClick={handleCreate} disabled={creating}
+              className={clsx(
+                'w-full px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-left border-t disabled:opacity-50',
+                filtered.length > 0
+                  ? 'border-gray-200 bg-gray-50 hover:bg-amber-50 text-gray-500'
+                  : 'border-gray-100 bg-emerald-50/50 hover:bg-emerald-50 text-gray-700'
+              )}>
+              <div className={clsx('rounded p-0.5 text-white', filtered.length > 0 ? 'bg-gray-400' : 'bg-emerald-600')}>
+                <Plus size={10} />
+              </div>
+              <span className="truncate">
+                {filtered.length > 0
+                  ? <>Crear <span className="font-bold">NUEVO</span> "{query.trim()}" <span className="text-amber-700">(¿no es uno de arriba?)</span></>
+                  : <>{createLabel} <span className="font-bold text-emerald-700">"{query.trim()}"</span></>}
+              </span>
+              {creating && <span className="ml-auto text-[10px] text-emerald-600">creando…</span>}
+            </button>
+          )}
         </div>,
         document.body
       )}

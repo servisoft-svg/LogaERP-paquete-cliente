@@ -17,6 +17,32 @@ router.get('/usuarios', async (_req, res) => {
   }
 });
 
+// Helper: resuelve `nombre + url` para un par (tipo, id) de referencia.
+// Devuelve null si el tipo no se reconoce o el recurso no existe.
+async function resolverReferencia(tipo: string | null, id: string | null): Promise<{ label: string; url: string } | null> {
+  if (!tipo || !id) return null;
+  switch (tipo) {
+    case 'producto': {
+      const { rows: [r] } = await pool.query('SELECT codigo, nombre FROM productos WHERE id = $1', [id]);
+      return r ? { label: `${r.codigo} · ${r.nombre}`, url: `/productos?q=${encodeURIComponent(r.codigo)}` } : null;
+    }
+    case 'lote': {
+      const { rows: [r] } = await pool.query('SELECT lote_interno FROM lotes WHERE id = $1', [id]);
+      return r ? { label: `Lote ${r.lote_interno}`, url: `/lotes?q=${encodeURIComponent(r.lote_interno)}` } : null;
+    }
+    case 'orden': {
+      const { rows: [r] } = await pool.query('SELECT numero_orden FROM ordenes_produccion WHERE id = $1', [id]);
+      return r ? { label: r.numero_orden, url: '/produccion' } : null;
+    }
+    case 'pedido': {
+      const { rows: [r] } = await pool.query('SELECT numero_pedido FROM pedidos WHERE id = $1', [id]);
+      return r ? { label: r.numero_pedido, url: '/pedidos' } : null;
+    }
+    default:
+      return null;
+  }
+}
+
 // GET /api/recordatorios — lista del mes del calendario, filtrada al usuario actual
 // El calendario muestra TODOS los recordatorios visibles para el user (destinatario o rol).
 router.get('/', async (req, res) => {
@@ -24,25 +50,33 @@ router.get('/', async (req, res) => {
     const user = (req as any).user as { id: string; rol?: string };
     const mes = String(req.query.mes ?? ''); // formato YYYY-MM
     let sql = `
-      SELECT id, TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha,
-             programado_para, titulo, descripcion, color, completado,
-             usuario_id, destinatarios, destinatario_roles,
-             con_sonido, con_notificacion, entregados_por, origen, created_at
-      FROM recordatorios
+      SELECT r.id, TO_CHAR(r.fecha, 'YYYY-MM-DD') AS fecha,
+             r.programado_para, r.titulo, r.descripcion, r.color, r.completado,
+             r.usuario_id, r.destinatarios, r.destinatario_roles,
+             r.con_sonido, r.con_notificacion, r.entregados_por, r.origen, r.created_at,
+             r.referencia_tipo, r.referencia_id,
+             u.nombre AS creador_nombre, u.rol::text AS creador_rol
+      FROM recordatorios r
+      LEFT JOIN usuarios u ON u.id = r.usuario_id
       WHERE (
         -- Visible para mí: soy destinatario directo, mi rol está en roles, o yo lo creé
-        $1::UUID = ANY(COALESCE(destinatarios, '{}'::UUID[]))
-        OR $2::TEXT = ANY(COALESCE(destinatario_roles, '{}'::TEXT[]))
-        OR usuario_id = $1::UUID
+        $1::UUID = ANY(COALESCE(r.destinatarios, '{}'::UUID[]))
+        OR ($2::TEXT = ANY(COALESCE(r.destinatario_roles, '{}'::TEXT[]))
+            OR ($2::TEXT = 'trabajador' AND 'operario' = ANY(COALESCE(r.destinatario_roles, '{}'::TEXT[]))))
+        OR r.usuario_id = $1::UUID
       )
     `;
     const params: unknown[] = [user.id, user.rol ?? ''];
     if (mes) {
-      sql += ` AND TO_CHAR(fecha, 'YYYY-MM') = $3`;
+      sql += ` AND TO_CHAR(r.fecha, 'YYYY-MM') = $3`;
       params.push(mes);
     }
-    sql += ` ORDER BY fecha ASC, programado_para ASC NULLS LAST`;
+    sql += ` ORDER BY r.fecha ASC, r.programado_para ASC NULLS LAST`;
     const { rows } = await pool.query(sql, params);
+    // Resolver labels de referencia (1 query por recordatorio con ref; OK por volumen)
+    for (const r of rows) {
+      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id);
+    }
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });
@@ -54,20 +88,27 @@ router.get('/pendientes', async (req, res) => {
   try {
     const user = (req as any).user as { id: string; rol?: string };
     const { rows } = await pool.query(
-      `SELECT id, programado_para, titulo, descripcion, color,
-              con_sonido, con_notificacion, origen
-       FROM recordatorios
-       WHERE programado_para IS NOT NULL
-         AND programado_para <= NOW()
-         AND NOT ($1::UUID = ANY(COALESCE(entregados_por, '{}'::UUID[])))
+      `SELECT r.id, r.programado_para, r.titulo, r.descripcion, r.color,
+              r.con_sonido, r.con_notificacion, r.origen,
+              r.referencia_tipo, r.referencia_id,
+              u.nombre AS creador_nombre, u.rol::text AS creador_rol
+       FROM recordatorios r
+       LEFT JOIN usuarios u ON u.id = r.usuario_id
+       WHERE r.programado_para IS NOT NULL
+         AND r.programado_para <= NOW()
+         AND NOT ($1::UUID = ANY(COALESCE(r.entregados_por, '{}'::UUID[])))
          AND (
-           $1::UUID = ANY(COALESCE(destinatarios, '{}'::UUID[]))
-           OR $2::TEXT = ANY(COALESCE(destinatario_roles, '{}'::TEXT[]))
+           $1::UUID = ANY(COALESCE(r.destinatarios, '{}'::UUID[]))
+           OR ($2::TEXT = ANY(COALESCE(r.destinatario_roles, '{}'::TEXT[]))
+            OR ($2::TEXT = 'trabajador' AND 'operario' = ANY(COALESCE(r.destinatario_roles, '{}'::TEXT[]))))
          )
-       ORDER BY programado_para ASC
+       ORDER BY r.programado_para ASC
        LIMIT 20`,
       [user.id, user.rol ?? '']
     );
+    for (const r of rows) {
+      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id);
+    }
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });
@@ -81,6 +122,7 @@ router.post('/', async (req, res) => {
     const {
       fecha, programado_para, titulo, descripcion, color,
       destinatarios, destinatario_roles, con_sonido, con_notificacion, origen,
+      referencia_tipo, referencia_id,
     } = req.body;
     if (!titulo || !String(titulo).trim()) {
       return res.status(400).json({ error: 'titulo obligatorio' });
@@ -98,9 +140,11 @@ router.post('/', async (req, res) => {
     const { rows: [r] } = await pool.query(
       `INSERT INTO recordatorios
          (fecha, programado_para, titulo, descripcion, color, usuario_id,
-          destinatarios, destinatario_roles, con_sonido, con_notificacion, origen)
+          destinatarios, destinatario_roles, con_sonido, con_notificacion, origen,
+          referencia_tipo, referencia_id)
        VALUES ($1::DATE, $2::TIMESTAMPTZ, $3, $4, COALESCE($5, 'indigo'), $6,
-               $7::UUID[], $8::TEXT[], COALESCE($9, TRUE), COALESCE($10, TRUE), COALESCE($11, 'manual'))
+               $7::UUID[], $8::TEXT[], COALESCE($9, TRUE), COALESCE($10, TRUE), COALESCE($11, 'manual'),
+               $12, $13::UUID)
        RETURNING *`,
       [
         fechaFinal,
@@ -114,6 +158,8 @@ router.post('/', async (req, res) => {
         con_sonido,
         con_notificacion,
         origen,
+        referencia_tipo ?? null,
+        referencia_id ?? null,
       ]
     );
     res.status(201).json(r);

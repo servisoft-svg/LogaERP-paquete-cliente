@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Bell, Volume2, BellRing, Users, Calendar as CalIcon } from 'lucide-react';
-import { recordatoriosApi } from '../api/client';
+import { X, Bell, Volume2, BellRing, Users, Calendar as CalIcon, Link2 } from 'lucide-react';
+import { recordatoriosApi, productosApi, lotesApi, produccionApi, pedidosApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { notify } from '../lib/notify';
 import clsx from 'clsx';
+
+type RefTipo = '' | 'producto' | 'lote' | 'orden' | 'pedido';
+interface RefOption { id: string; label: string }
 
 interface Props {
   abierto: boolean;
@@ -14,7 +17,7 @@ interface Props {
   fechaInicial?: string;
 }
 
-type Destino = 'yo' | 'admin' | 'operario' | 'personalizado';
+type Destino = 'yo' | 'admin' | 'trabajador' | 'personalizado';
 
 const COLORES = [
   { v: 'indigo',  c: 'bg-indigo-500'  },
@@ -38,6 +41,11 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
   const [destinatariosIds, setDestIds]  = useState<string[]>([]);
   const [usuarios, setUsuarios]         = useState<{ id: string; nombre: string; rol: string }[]>([]);
   const [guardando, setGuardando]       = useState(false);
+  const [refTipo, setRefTipo]           = useState<RefTipo>('');
+  const [refId, setRefId]               = useState<string>('');
+  const [refOptions, setRefOptions]     = useState<RefOption[]>([]);
+  const [refSearch, setRefSearch]       = useState('');
+  const [refLoading, setRefLoading]     = useState(false);
 
   useEffect(() => {
     if (!abierto) return;
@@ -50,6 +58,7 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
     setColor('indigo');
     setDestino('yo');
     setDestIds([]);
+    setRefTipo(''); setRefId(''); setRefOptions([]); setRefSearch('');
     recordatoriosApi['usuarios' as keyof typeof recordatoriosApi];
     // Carga lista de usuarios (solo para admin o selector personalizado)
     fetch('/api/recordatorios/usuarios', {
@@ -57,6 +66,40 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
       headers: { Authorization: `Bearer ${localStorage.getItem('loga_token') ?? ''}` },
     }).then(r => r.ok ? r.json() : []).then((data) => setUsuarios(data ?? [])).catch(() => {});
   }, [abierto, fechaInicial]);
+
+  // Cargar opciones de referencia según tipo seleccionado
+  useEffect(() => {
+    if (!refTipo) { setRefOptions([]); return; }
+    setRefLoading(true);
+    const cargar = async () => {
+      try {
+        if (refTipo === 'producto') {
+          const r = await productosApi.listar({ activo: 'true' });
+          setRefOptions((r.data as { id: string; codigo: string; nombre: string }[])
+            .map(p => ({ id: p.id, label: `${p.codigo} · ${p.nombre}` })));
+        } else if (refTipo === 'lote') {
+          const r = await lotesApi.listar();
+          setRefOptions((r.data as { id: string; lote_interno: string; producto_nombre?: string }[])
+            .map(l => ({ id: l.id, label: `${l.lote_interno}${l.producto_nombre ? ` · ${l.producto_nombre}` : ''}` })));
+        } else if (refTipo === 'orden') {
+          const r = await produccionApi.listar();
+          setRefOptions((r.data as { id: string; numero_orden: string; estado?: string }[])
+            .map(o => ({ id: o.id, label: `${o.numero_orden}${o.estado ? ` · ${o.estado}` : ''}` })));
+        } else if (refTipo === 'pedido') {
+          const r = await pedidosApi.listar();
+          setRefOptions((r.data as { id: string; numero_pedido: string; cliente_nombre_rel?: string; cliente_nombre?: string }[])
+            .map(p => ({ id: p.id, label: `${p.numero_pedido}${p.cliente_nombre_rel || p.cliente_nombre ? ` · ${p.cliente_nombre_rel ?? p.cliente_nombre}` : ''}` })));
+        }
+      } catch { setRefOptions([]); }
+      finally { setRefLoading(false); }
+    };
+    cargar();
+  }, [refTipo]);
+
+  // Filtrado client-side de las opciones de referencia
+  const refOptionsFiltered = refSearch.trim()
+    ? refOptions.filter(o => o.label.toLowerCase().includes(refSearch.toLowerCase())).slice(0, 50)
+    : refOptions.slice(0, 50);
 
   const handleGuardar = async () => {
     if (!titulo.trim()) { notify.error('Título obligatorio'); return; }
@@ -66,7 +109,7 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
       let destinatario_roles: string[] | undefined;
       if (destino === 'yo')              destinatarios = user ? [user.id] : undefined;
       else if (destino === 'admin')      destinatario_roles = ['admin'];
-      else if (destino === 'operario')   destinatario_roles = ['operario'];
+      else if (destino === 'trabajador') destinatario_roles = ['trabajador'];
       else                                destinatarios = destinatariosIds;
 
       const programado_para = hora ? `${fecha}T${hora}:00` : null;
@@ -81,6 +124,8 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
         con_sonido: conSonido,
         con_notificacion: conNotificacion,
         origen: 'manual',
+        referencia_tipo: refTipo || null,
+        referencia_id: refId || null,
       });
       notify.success('Recordatorio creado', { description: hora ? `Avisaré ${fecha} ${hora}` : `Fecha ${fecha}` });
       onCreado?.();
@@ -165,7 +210,7 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
                 {([
                   { v: 'yo',            l: 'Solo a mí' },
                   { v: 'admin',         l: 'Todos los admins' },
-                  { v: 'operario',      l: 'Todos los operarios' },
+                  { v: 'trabajador',    l: 'Todos los operarios' },
                   { v: 'personalizado', l: 'Personalizado…' },
                 ] as { v: Destino; l: string }[]).map((opt) => (
                   <button
@@ -200,6 +245,56 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
                       <span className="text-[10px] text-gray-400 uppercase">{u.rol}</span>
                     </label>
                   ))}
+                </div>
+              )}
+            </div>
+
+            {/* Referencia opcional: enlazar a producto / lote / OF / pedido */}
+            <div>
+              <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide flex items-center gap-1"><Link2 size={11} /> Enlazar a (opcional)</span>
+              <div className="mt-1 flex gap-1.5">
+                {([
+                  { v: '',         l: 'Nada' },
+                  { v: 'producto', l: 'Material/Producto' },
+                  { v: 'lote',     l: 'Lote' },
+                  { v: 'orden',    l: 'OF' },
+                  { v: 'pedido',   l: 'Pedido' },
+                ] as { v: RefTipo; l: string }[]).map((opt) => (
+                  <button key={opt.v} type="button"
+                    onClick={() => { setRefTipo(opt.v); setRefId(''); setRefSearch(''); }}
+                    className={clsx(
+                      'text-xs px-2.5 py-1 rounded-lg border transition-colors',
+                      refTipo === opt.v
+                        ? 'border-loga-red bg-red-50 text-loga-red font-semibold'
+                        : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                    )}>
+                    {opt.l}
+                  </button>
+                ))}
+              </div>
+              {refTipo && (
+                <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50/40 p-2 space-y-1">
+                  <input
+                    value={refSearch}
+                    onChange={e => setRefSearch(e.target.value)}
+                    placeholder={`Buscar ${refTipo}…`}
+                    className="w-full rounded border border-gray-200 px-2 py-1 text-xs outline-none focus:border-loga-red"
+                  />
+                  <div className="max-h-32 overflow-y-auto space-y-0.5">
+                    {refLoading && <p className="text-[10px] text-gray-400 italic py-1 text-center">Cargando…</p>}
+                    {!refLoading && refOptionsFiltered.length === 0 && (
+                      <p className="text-[10px] text-gray-400 italic py-1 text-center">Sin resultados.</p>
+                    )}
+                    {!refLoading && refOptionsFiltered.map(o => (
+                      <label key={o.id} className={clsx('flex items-center gap-2 cursor-pointer px-1.5 py-1 rounded',
+                        refId === o.id ? 'bg-red-50 border border-red-200' : 'hover:bg-white')}>
+                        <input type="radio" name="ref" checked={refId === o.id}
+                          onChange={() => setRefId(o.id)}
+                          className="accent-loga-red" />
+                        <span className="text-xs text-gray-800 truncate">{o.label}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

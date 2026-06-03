@@ -3,6 +3,8 @@ import { pool } from '../db/pool';
 import { invalidarCacheFinanzas } from './finanzas.routes';
 import { adminOnly } from '../middleware/auth';
 import { logger } from '../lib/logger';
+import { AppError } from '../lib/AppError';
+import { estimarEmbalaje } from '../lib/embalajeHeuristica';
 
 const router = Router();
 
@@ -617,6 +619,244 @@ router.delete('/:id/sds', adminOnly, async (req, res) => {
     return res.json({ ok: true });
   } catch (err: unknown) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
+  }
+});
+
+// ── BOTES COMPATIBLES con una caja ──────────────────────────────────────────
+// La caja ME tiene una lista de botes (PE o frasco-ME) que físicamente caben
+// en ella. Esto reemplaza el caja_id estático de la receta envasado: ahora una
+// caja sirve para cualquier bote compatible y el sistema autoenlaza al
+// momento del pedido.
+router.get('/:id/botes-compatibles', async (req, res, next) => {
+  try {
+    const { rows: [caja] } = await pool.query<{ id: string; tipo: string; nombre: string; codigo: string; botes_por_caja: number | null }>(
+      `SELECT id, tipo::text AS tipo, nombre, codigo, botes_por_caja
+       FROM productos WHERE id = $1`, [req.params.id]
+    );
+    if (!caja) return next(AppError.notFound('Producto', req.params.id));
+    if (caja.tipo !== 'material_embalaje') {
+      return next(AppError.validacion('Solo cajas (material_embalaje) tienen botes compatibles'));
+    }
+    const { rows: compatibles } = await pool.query(
+      `SELECT p.id, p.codigo, p.nombre, p.tipo::text AS tipo, p.unidad_medida
+       FROM caja_botes_compatibles cbc
+       JOIN productos p ON p.id = cbc.bote_id
+       WHERE cbc.caja_id = $1 AND p.activo = TRUE
+       ORDER BY p.nombre`,
+      [req.params.id]
+    );
+    return res.json({ caja, botes: compatibles });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PUT — reemplaza completamente la lista de botes compatibles + actualiza botes_por_caja.
+// Body: { bote_ids: string[], botes_por_caja?: number }
+router.put('/:id/botes-compatibles', adminOnly, async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { bote_ids, botes_por_caja } = req.body ?? {};
+    if (!Array.isArray(bote_ids)) {
+      await client.query('ROLLBACK');
+      return next(AppError.validacion('bote_ids debe ser array'));
+    }
+    // Verifica caja existe + es material_embalaje
+    const { rows: [caja] } = await client.query<{ tipo: string }>(
+      `SELECT tipo::text AS tipo FROM productos WHERE id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!caja) {
+      await client.query('ROLLBACK');
+      return next(AppError.notFound('Producto', req.params.id));
+    }
+    if (caja.tipo !== 'material_embalaje') {
+      await client.query('ROLLBACK');
+      return next(AppError.validacion('Solo cajas pueden tener botes compatibles'));
+    }
+    // Reemplazo atómico: borra todo lo previo + inserta nuevo set
+    await client.query(`DELETE FROM caja_botes_compatibles WHERE caja_id = $1`, [req.params.id]);
+    if (bote_ids.length > 0) {
+      // Validamos que todos los bote_ids son productos válidos (envasado o material_embalaje)
+      const { rows: validos } = await client.query<{ id: string }>(
+        `SELECT id FROM productos WHERE id = ANY($1::uuid[]) AND tipo IN ('producto_envasado','material_embalaje','producto_fabricado') AND activo = TRUE`,
+        [bote_ids]
+      );
+      for (const v of validos) {
+        await client.query(
+          `INSERT INTO caja_botes_compatibles (caja_id, bote_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [req.params.id, v.id]
+        );
+      }
+    }
+    if (botes_por_caja !== undefined && botes_por_caja !== null && Number(botes_por_caja) > 0) {
+      await client.query(
+        `UPDATE productos SET botes_por_caja = $1::INTEGER WHERE id = $2`,
+        [Math.floor(Number(botes_por_caja)), req.params.id]
+      );
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, vinculados: bote_ids.length });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// GET — cajas compatibles con un bote (para autoenlace al pedir)
+router.get('/:id/cajas-compatibles', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.codigo, p.nombre, p.botes_por_caja, p.unidades_por_envase,
+              p.material_embalaje, p.peso_material_vacio_kg, p.stock_actual
+       FROM caja_botes_compatibles cbc
+       JOIN productos p ON p.id = cbc.caja_id
+       WHERE cbc.bote_id = $1 AND p.activo = TRUE
+       ORDER BY p.nombre`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// ── AUTO-ASIGNAR material + peso a embalajes ────────────────────────────────
+//
+// Modo "preview" (dry_run=true, default): devuelve qué se asignaría sin
+// escribir. Útil para que el admin revise antes de ejecutar.
+// Modo real (dry_run=false): aplica los cambios. Sólo toca campos NULL —
+// nunca sobrescribe valores ya configurados a mano. Idempotente.
+router.post('/embalajes/auto-asignar', adminOnly, async (req, res, next) => {
+  try {
+    const dryRun = req.body?.dry_run !== false; // default true (seguro)
+    const sobreescribir = req.body?.sobreescribir === true; // explicit opt-in
+
+    // Sólo embalajes activos. Filtramos en BD lo que ya está completo cuando
+    // no se pide sobreescribir, para minimizar trabajo y respuesta.
+    const filtro = sobreescribir
+      ? ''
+      : `AND (material_embalaje IS NULL OR peso_material_vacio_kg IS NULL)`;
+
+    const { rows: embalajes } = await pool.query<{
+      id: string;
+      codigo: string;
+      nombre: string;
+      material_embalaje: string | null;
+      peso_material_vacio_kg: string | null;
+    }>(
+      `SELECT id, codigo, nombre, material_embalaje, peso_material_vacio_kg
+       FROM productos
+       WHERE tipo = 'material_embalaje' AND activo = TRUE ${filtro}
+       ORDER BY codigo`
+    );
+
+    const asignados: Array<{
+      id: string;
+      codigo: string;
+      nombre: string;
+      material_antes: string | null;
+      material_nuevo: string;
+      peso_antes: number | null;
+      peso_nuevo: number;
+      confianza: string;
+      fuente_material: string;
+      fuente_peso: string;
+    }> = [];
+    const omitidos: Array<{ id: string; codigo: string; nombre: string; motivo: string }> = [];
+
+    for (const p of embalajes) {
+      const est = estimarEmbalaje(p.nombre);
+      const tieneMaterial = p.material_embalaje != null;
+      const tienePeso = p.peso_material_vacio_kg != null;
+
+      // Si el material detectado es "Otros" y no hay nada antes, lo dejamos
+      // omitido — exige decisión humana (no queremos rellenar BD con basura).
+      if (est.material === 'Otros' && !tieneMaterial && !tienePeso) {
+        omitidos.push({
+          id: p.id, codigo: p.codigo, nombre: p.nombre,
+          motivo: 'sin coincidencia heurística — asignar manualmente',
+        });
+        continue;
+      }
+
+      const materialFinal = (sobreescribir || !tieneMaterial) ? est.material : p.material_embalaje!;
+      const pesoFinal = (sobreescribir || !tienePeso) ? est.peso_vacio_kg : parseFloat(p.peso_material_vacio_kg!);
+
+      asignados.push({
+        id: p.id,
+        codigo: p.codigo,
+        nombre: p.nombre,
+        material_antes: p.material_embalaje,
+        material_nuevo: materialFinal,
+        peso_antes: tienePeso ? parseFloat(p.peso_material_vacio_kg!) : null,
+        peso_nuevo: pesoFinal,
+        confianza: est.confianza,
+        fuente_material: est.fuente_material,
+        fuente_peso: est.fuente_peso,
+      });
+    }
+
+    if (!dryRun && asignados.length > 0) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const a of asignados) {
+          await client.query(
+            `UPDATE productos
+               SET material_embalaje      = $1,
+                   peso_material_vacio_kg = $2::NUMERIC
+             WHERE id = $3`,
+            [a.material_nuevo, a.peso_nuevo.toFixed(6), a.id]
+          );
+        }
+        await client.query('COMMIT');
+        invalidarCacheFinanzas();
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        client.release();
+      }
+
+      // Auditoría no bloqueante
+      pool.query(
+        `INSERT INTO auditoria (usuario_id, accion, tabla_afectada, registro_id, motivo)
+         VALUES ($1, 'AUTO_ASIGNAR_EMBALAJES', 'productos', NULL, $2)`,
+        [(req as any).user?.id ?? null, `Auto-asignados ${asignados.length} embalajes (sobreescribir=${sobreescribir})`]
+      ).catch(e => logger.warn('[auditoria AUTO_ASIGNAR_EMBALAJES]', { err: e instanceof Error ? e.message : e }));
+    }
+
+    return res.json({
+      ok: true,
+      dry_run: dryRun,
+      total_revisados: embalajes.length,
+      total_asignados: asignados.length,
+      total_omitidos: omitidos.length,
+      asignados,
+      omitidos,
+    });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET — Lista embalajes sin material o sin peso (para badge / filtro UI).
+router.get('/embalajes/pendientes', adminOnly, async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, codigo, nombre, material_embalaje, peso_material_vacio_kg
+       FROM productos
+       WHERE tipo = 'material_embalaje' AND activo = TRUE
+         AND (material_embalaje IS NULL OR peso_material_vacio_kg IS NULL)
+       ORDER BY codigo`
+    );
+    return res.json({ total: rows.length, productos: rows });
+  } catch (err) {
+    return next(err);
   }
 });
 

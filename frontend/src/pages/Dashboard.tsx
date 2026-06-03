@@ -57,7 +57,12 @@ export default function Dashboard() {
 
   // Calendar + recordatorios
   const [calMonth, setCalMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
-  const [recordatorios, setRecordatorios] = useState<{ id: string; fecha: string; titulo: string; descripcion?: string; color: string }[]>([]);
+  const [recordatorios, setRecordatorios] = useState<{
+    id: string; fecha: string; titulo: string; descripcion?: string; color: string;
+    creador_nombre?: string | null; creador_rol?: string | null;
+    referencia_tipo?: string | null;
+    referencia?: { label: string; url: string } | null;
+  }[]>([]);
   const [nuevoRec, setNuevoRec] = useState<{ fecha: string; titulo: string; color: string } | null>(null);
   const [diaSeleccionado, setDiaSeleccionado] = useState<string | null>(null);
   const [calFiltros, setCalFiltros] = useState<Set<string>>(() => {
@@ -518,19 +523,39 @@ export default function Dashboard() {
             )}
 
             {dayRecs.map(r => (
-              <div key={r.id} className={clsx('flex items-center gap-2 rounded-lg px-3 py-2 border',
+              <div key={r.id} className={clsx('rounded-lg px-3 py-2 border space-y-1',
                 r.color === 'red' ? 'border-red-200 bg-red-50' : r.color === 'green' ? 'border-emerald-200 bg-emerald-50' : 'border-indigo-200 bg-indigo-50'
               )}>
-                <span className="text-sm">📌</span>
-                <span className="text-xs font-semibold text-gray-800 flex-1">{r.titulo}</span>
-                <button onClick={() => {
-                  notify.promise(produccionApi.eliminarRecordatorio(r.id), {
-                    loading: 'Eliminando…',
-                    success: 'Recordatorio eliminado',
-                    error: 'No se pudo eliminar',
-                  }).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))).catch(() => {});
-                }}
-                  className="text-gray-400 hover:text-loga-red"><Trash2 size={12} /></button>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">📌</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-gray-800 truncate">{r.titulo}</p>
+                    {r.creador_nombre && (
+                      <p className="text-[10px] text-gray-600 flex items-center gap-1">
+                        👤 de parte de <b>{r.creador_nombre}</b>
+                        {r.creador_rol && <span className="opacity-60">({r.creador_rol})</span>}
+                      </p>
+                    )}
+                  </div>
+                  <button onClick={() => {
+                    notify.promise(produccionApi.eliminarRecordatorio(r.id), {
+                      loading: 'Eliminando…',
+                      success: 'Recordatorio eliminado',
+                      error: 'No se pudo eliminar',
+                    }).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))).catch(() => {});
+                  }}
+                    className="text-gray-400 hover:text-loga-red"><Trash2 size={12} /></button>
+                </div>
+                {r.descripcion && (
+                  <p className="text-[11px] text-gray-700 ml-6 whitespace-pre-line">{r.descripcion}</p>
+                )}
+                {r.referencia && (
+                  <button onClick={() => r.referencia && navigate(r.referencia.url)}
+                    className="ml-6 inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold bg-white border border-gray-300 hover:bg-gray-50 transition-colors">
+                    🔗 {r.referencia.label}
+                    <span className="text-[9px] text-gray-400 uppercase">{r.referencia_tipo}</span>
+                  </button>
+                )}
               </div>
             ))}
 

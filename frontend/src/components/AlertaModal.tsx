@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bell, Check } from 'lucide-react';
+import { Bell, Check, User, ExternalLink } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import type { AlertaPendiente } from '../hooks/useAlertas';
 
 interface Props {
@@ -9,7 +10,13 @@ interface Props {
 }
 
 export default function AlertaModal({ alerta, onCerrar }: Props) {
+  const navigate = useNavigate();
   if (!alerta) return null;
+  const irAReferencia = () => {
+    if (!alerta.referencia?.url) return;
+    onCerrar(alerta.id);
+    navigate(alerta.referencia.url);
+  };
   return createPortal(
     <AnimatePresence>
       <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
@@ -31,11 +38,27 @@ export default function AlertaModal({ alerta, onCerrar }: Props) {
             <div className="flex-1 min-w-0">
               <p className="text-[11px] uppercase tracking-wider text-white/70 font-semibold">Recordatorio</p>
               <h2 className="text-lg font-bold text-white truncate">{alerta.titulo}</h2>
+              {alerta.creador_nombre && (
+                <p className="text-[11px] text-white/80 mt-0.5 flex items-center gap-1">
+                  <User size={10} /> de parte de <b>{alerta.creador_nombre}</b>
+                  {alerta.creador_rol && <span className="opacity-70">({alerta.creador_rol})</span>}
+                </p>
+              )}
             </div>
           </div>
           {alerta.descripcion && (
             <div className="px-6 py-4 text-sm text-gray-700 whitespace-pre-line">
               {alerta.descripcion}
+            </div>
+          )}
+          {alerta.referencia && (
+            <div className="px-6 pb-3">
+              <button onClick={irAReferencia}
+                className="w-full inline-flex items-center gap-2 rounded-lg border-2 border-loga-red bg-red-50 hover:bg-red-100 px-3 py-2 text-sm font-semibold text-loga-red transition-colors">
+                <ExternalLink size={14} />
+                <span className="flex-1 text-left truncate">{alerta.referencia.label}</span>
+                <span className="text-[10px] uppercase opacity-60">{alerta.referencia_tipo}</span>
+              </button>
             </div>
           )}
           <div className="px-6 py-3 text-[11px] text-gray-400 border-t border-gray-100">
