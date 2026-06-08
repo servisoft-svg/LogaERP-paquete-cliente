@@ -74,8 +74,10 @@ async function getBackupPassword(): Promise<string> {
   // 1) Prioridad: contraseña guardada en BD (configurable desde la UI).
   try {
     const { pool } = await import('../db/pool');
+    const { decryptSecret } = await import('../lib/secretCrypto');
     const { rows: [c] } = await pool.query(`SELECT backup_password FROM configuracion_global WHERE id = 1`);
-    const fromDb = c?.backup_password as string | null;
+    const fromDbRaw = c?.backup_password as string | null;
+    const fromDb = fromDbRaw ? decryptSecret(fromDbRaw) : null;
     if (fromDb && fromDb.length >= 12) return fromDb;
   } catch { /* migración 048 puede no estar aplicada */ }
   // 2) Fallback: variable de entorno

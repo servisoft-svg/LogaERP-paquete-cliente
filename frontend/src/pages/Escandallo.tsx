@@ -113,6 +113,17 @@ export default function Escandallo() {
     if (peso > 0) setForm(f => ({ ...f, liquido_cantidad: String(peso) }));
   }, [form.envase_id, envaseSel]);
 
+  // ── Cajas compatibles con el PE (M2M vía caja_botes_compatibles) ─────────
+  const [cajasVinculadasIds, setCajasVinculadasIds] = useState<string[]>([]);
+  // Cargar cajas vinculadas al PE cuando cambia producto_envasado_id (editar)
+  useEffect(() => {
+    if (!form.producto_envasado_id) { setCajasVinculadasIds([]); return; }
+    productosApi.listarCajasCompatibles(form.producto_envasado_id).then(r => {
+      const data = r.data as { id: string }[];
+      setCajasVinculadasIds(data.map(c => c.id));
+    }).catch(() => setCajasVinculadasIds([]));
+  }, [form.producto_envasado_id]);
+
   const abrirNueva = () => {
     setSeleccionada(null); setForm({ ...EMPTY, extras: [] }); setModalOpen(true);
   };
@@ -175,6 +186,14 @@ export default function Escandallo() {
       };
       if (seleccionada) await recetasEnvasadoApi.editar(seleccionada.id, payload);
       else              await recetasEnvasadoApi.crear(payload);
+      // Persistir cajas vinculadas (M2M independiente de la receta).
+      // El producto envasado puede haberse creado en esta misma sesión, así
+      // que usamos form.producto_envasado_id (válido tras el crear/editar).
+      if (form.producto_envasado_id) {
+        await productosApi.setCajasCompatibles(form.producto_envasado_id, {
+          caja_ids: cajasVinculadasIds,
+        }).catch(e => console.error('cajas-compatibles falló', e));
+      }
       notify.success(seleccionada ? 'Fórmula actualizada' : 'Fórmula guardada');
       cerrarModal();
       cargar();
@@ -359,6 +378,12 @@ export default function Escandallo() {
               </div>
 
               <div ref={modalBodyRef} className="flex-1 overflow-y-auto p-3 space-y-2.5">
+                {/* Banner explicativo · qué va en escandallo vs. pedido */}
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-2.5 text-[11px] text-indigo-900 leading-relaxed">
+                  <p className="font-bold mb-1">📋 Solo lo necesario para hacer 1 bote.</p>
+                  <p>Aquí pones <b>cola + frasco + etiqueta</b> (lo que lleva dentro el bote) y las <b>cajas compatibles</b> para que se enlacen solas al hacer un pedido.</p>
+                  <p className="mt-1 text-indigo-700">El <b>palet, film , etiquetas de caja</b> y resto de embalaje de envío se añade <b>en cada pedido</b> como "Material de embalaje extra" — no aquí.</p>
+                </div>
                 {/* Producto envasado */}
                 <Step n={1} done={!!form.producto_envasado_id} title="Producto envasado">
                   <ComboCreate
@@ -464,90 +489,34 @@ export default function Escandallo() {
                   />
                 </Step>
 
-                {/* Caja */}
-                <Step n={5} done={!form.lleva_caja || !!form.caja_id} title="¿Lleva caja o palé?" Icon={Boxes}
-                  right={
-                    <div className="inline-flex rounded-md border border-gray-200 overflow-hidden text-[10px] font-bold">
-                      <button onClick={() => setForm({ ...form, lleva_caja: false, caja_id: '' })}
-                        className={clsx('px-2.5 py-0.5 transition-colors',
-                          !form.lleva_caja ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50')}>NO</button>
-                      <button onClick={() => setForm({ ...form, lleva_caja: true })}
-                        className={clsx('px-2.5 py-0.5 transition-colors border-l border-gray-200',
-                          form.lleva_caja ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50')}>SÍ</button>
-                    </div>
-                  }>
-                  {form.lleva_caja && (
-                    <>
-                      <ComboCreate
-                        options={cajas.map(p => ({ id: p.id, label: p.nombre,
-                          sub: `${p.codigo}${p.unidades_por_envase ? ` · ×${p.unidades_por_envase} uds` : ''}${p.subcategoria_me === 'Palé' ? ' · palé' : ''}`,
-                          right: `${parseFloat(p.stock_actual).toLocaleString('es-ES')} ud` }))}
-                        value={form.caja_id}
-                        onChange={id => setForm({ ...form, caja_id: id })}
-                        placeholder={`${cajas.length} cajas/palés o crear nueva...`}
-                        selectedLabel={cajaSel?.nombre}
-                        selectedSub={cajaSel ? `${cajaSel.codigo}${cajaSel.unidades_por_envase ? ` · ×${cajaSel.unidades_por_envase} uds` : ''}` : undefined}
-                        selectedRight={cajaSel ? `${parseFloat(cajaSel.stock_actual).toLocaleString('es-ES')} ud` : undefined}
-                        onCreate={async (nombre) => {
-                          const p = await crearProducto(nombre, 'material_embalaje', 'Caja', 'ud');
-                          return { id: p.id, label: p.nombre, sub: p.codigo };
-                        }}
-                        createLabel="Crear caja"
-                      />
-                      <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <div>
-                          <label className="block text-[9px] uppercase tracking-wider font-bold text-gray-500 mb-0.5">Uds / caja</label>
-                          <input type="number" min="1" step="1" value={form.unidades_por_caja}
-                            onChange={e => setForm({ ...form, unidades_por_caja: e.target.value })}
-                            placeholder="1" className="w-full rounded-md border border-gray-200 px-2 py-1 text-[11px] font-mono text-right outline-none focus:border-indigo-500" />
-                        </div>
-                        <div>
-                          <label className="block text-[9px] uppercase tracking-wider font-bold text-gray-500 mb-0.5">Peso caja vacía</label>
-                          <div className="flex items-stretch rounded-md border border-gray-200 focus-within:border-indigo-500 overflow-hidden">
-                            <input type="number" min="0" step="0.001" value={form.peso_caja_vacia_kg}
-                              onChange={e => setForm({ ...form, peso_caja_vacia_kg: e.target.value })}
-                              placeholder="0" className="flex-1 px-2 py-1 text-[11px] font-mono text-right outline-none min-w-0" />
-                            <span className="bg-gray-50 border-l border-gray-200 px-1.5 text-[10px] font-bold flex items-center text-gray-600">kg</span>
-                          </div>
-                        </div>
-                        <div>
-                          <label className="block text-[9px] uppercase tracking-wider font-bold text-gray-500 mb-0.5">Cajas / palé</label>
-                          <input type="number" min="0" step="1" value={form.cajas_por_pale}
-                            onChange={e => setForm({ ...form, cajas_por_pale: e.target.value })}
-                            placeholder="0" className="w-full rounded-md border border-gray-200 px-2 py-1 text-[11px] font-mono text-right outline-none focus:border-indigo-500" />
-                        </div>
-                        <div>
-                          <label className="block text-[9px] uppercase tracking-wider font-bold text-gray-500 mb-0.5">Peso palé vacío</label>
-                          <div className="flex items-stretch rounded-md border border-gray-200 focus-within:border-indigo-500 overflow-hidden">
-                            <input type="number" min="0" step="0.001" value={form.peso_pale_vacio_kg}
-                              onChange={e => setForm({ ...form, peso_pale_vacio_kg: e.target.value })}
-                              placeholder="0" className="flex-1 px-2 py-1 text-[11px] font-mono text-right outline-none min-w-0" />
-                            <span className="bg-gray-50 border-l border-gray-200 px-1.5 text-[10px] font-bold flex items-center text-gray-600">kg</span>
-                          </div>
-                        </div>
-                      </div>
-                      {/* Resumen peso bruto */}
-                      {(() => {
-                        const liq  = parseFloat(form.liquido_cantidad) || 0;
-                        const env  = parseFloat(form.peso_envase_vacio_kg) || 0;
-                        const udC  = Math.max(1, parseInt(form.unidades_por_caja || '1', 10));
-                        const cVac = parseFloat(form.peso_caja_vacia_kg) || 0;
-                        const cPal = parseInt(form.cajas_por_pale || '0', 10);
-                        const pVac = parseFloat(form.peso_pale_vacio_kg) || 0;
-                        const pesoUnidad = liq + env;
-                        const pesoCaja   = pesoUnidad * udC + cVac;
-                        const pesoPale   = cPal > 0 ? pesoCaja * cPal + pVac : 0;
-                        if (pesoUnidad <= 0) return null;
+                {/* Cajas compatibles · M2M con el PE (espejo de la ficha caja ME) */}
+                <Step n={5} done={cajasVinculadasIds.length > 0} title="Cajas compatibles" hint="opcional, autoenlace al pedir" Icon={Boxes}>
+                  <div className="rounded-lg border-2 border-amber-300 bg-amber-50/50 p-2 space-y-2">
+                    <p className="text-[10px] text-amber-900 leading-relaxed">
+                      📦 Marca qué <b>cajas</b> encajan con este bote. Al hacer un pedido, la caja se <b>autoenlaza</b> al bote. Si marcas varias, se mostrará desplegable para elegir.
+                    </p>
+                    <div className="max-h-56 overflow-y-auto bg-white rounded border border-amber-200 divide-y divide-amber-100">
+                      {cajas.length === 0 && (
+                        <p className="text-[11px] text-gray-400 italic p-2 text-center">No hay cajas/palés creados aún. Ve a Productos → Nuevo · material_embalaje · sub-categoría Caja.</p>
+                      )}
+                      {cajas.map(c => {
+                        const checked = cajasVinculadasIds.includes(c.id);
+                        const upe = (c as any).unidades_por_envase;
                         return (
-                          <div className="mt-2 rounded-md bg-indigo-50/50 border border-indigo-100 px-2 py-1.5 text-[10px] text-gray-700 grid grid-cols-3 gap-2 font-mono">
-                            <div><span className="text-gray-500">Bruto / ud:</span> <span className="font-bold text-indigo-700">{pesoUnidad.toFixed(3)} kg</span></div>
-                            <div><span className="text-gray-500">/ caja ({udC}u):</span> <span className="font-bold text-indigo-700">{pesoCaja.toFixed(2)} kg</span></div>
-                            <div><span className="text-gray-500">/ palé ({cPal || '—'}c):</span> <span className="font-bold text-indigo-700">{cPal > 0 ? pesoPale.toFixed(1) + ' kg' : '—'}</span></div>
-                          </div>
+                          <label key={c.id} className="flex items-center gap-2 px-2 py-1 text-xs hover:bg-amber-50 cursor-pointer">
+                            <input type="checkbox" checked={checked} onChange={() => {
+                              setCajasVinculadasIds(prev => checked ? prev.filter(x => x !== c.id) : [...prev, c.id]);
+                            }} className="accent-amber-600" />
+                            <span className="font-mono text-gray-400 shrink-0">{c.codigo}</span>
+                            <span className="flex-1 truncate">{c.nombre}</span>
+                            {upe && <span className="text-[10px] text-amber-700 font-bold tabular-nums">×{upe} botes</span>}
+                            <span className="text-[9px] text-gray-400 uppercase">{(c as any).subcategoria_me === 'Palé' ? 'PALÉ' : 'CAJA'}</span>
+                          </label>
                         );
-                      })()}
-                    </>
-                  )}
+                      })}
+                    </div>
+                    <p className="text-[10px] text-amber-700 italic">{cajasVinculadasIds.length} caja(s) vinculada(s) · se guarda al pulsar <b>Guardar fórmula</b>.</p>
+                  </div>
                 </Step>
 
                 {/* Extras */}

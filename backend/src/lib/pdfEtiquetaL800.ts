@@ -182,12 +182,17 @@ export async function buildEtiquetaL800Pdf(datos: EtiquetaL800Datos): Promise<PD
   doc.text(cantStr, 75, rowCenterY - 14, { lineBreak: false });
   const cantW = doc.widthOfString(cantStr);
   doc.font('Helvetica-Bold').fontSize(16);
-  doc.text(datos.unidad ?? 'Kg', 75 + cantW + 6, rowCenterY - 6, { lineBreak: false });
+  const unidadStr = datos.unidad ?? 'Kg';
+  const unidadX = 75 + cantW + 6;
+  doc.text(unidadStr, unidadX, rowCenterY - 6, { lineBreak: false });
+  const unidadW = doc.widthOfString(unidadStr);
 
-  // ── Centro: texto libre del contenedor (centrado en columna entre "Kg" y QR)
-  const centroX = 180;
-  const centroW = qrX - centroX - 8;          // hueco real entre cantidad y QR
+  // ── Centro: texto libre del contenedor — dinámico según ancho de cantidad.
+  // Ocupa el hueco entre el final de "Kg" y el QR, centrado en ese hueco.
   doc.font('Helvetica').fontSize(11).fillColor('#000');
+  const gap = 12;
+  const centroX = unidadX + unidadW + gap;
+  const centroW = qrX - centroX - gap;
   doc.text(contenedorText, centroX, rowCenterY - 4, { width: centroW, align: 'center', lineBreak: false });
   try {
     const qrPng = await generarQrPng(qrText || 'about:blank');

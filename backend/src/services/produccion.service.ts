@@ -18,6 +18,7 @@ import { alertaService } from './alerta.service';
 import { automatizacionesService } from './automatizaciones.service';
 import { fetchMeteoSnapshot } from './meteo.service';
 import { nextLoteCode } from '../lib/loteCode';
+import { AppError } from '../lib/AppError';
 
 interface LoteFIFO {
   id: string;
@@ -140,6 +141,12 @@ class ProduccionService {
       }
 
       const rendimiento = toNum(receta.rendimiento);
+      if (!(rendimiento > 0)) {
+        throw AppError.validacion(
+          `La receta "${receta.nombre ?? ''}" tiene rendimiento 0 o inválido. Edita la receta y pon un rendimiento mayor que 0.`,
+          { rendimiento, receta_id: receta.id }
+        );
+      }
       const multiplicador = cantidadPlanificada / rendimiento;
 
       const { rows: ingredientes } = await client.query<IngredienteConsumo>(

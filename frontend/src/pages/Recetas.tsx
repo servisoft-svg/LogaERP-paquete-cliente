@@ -362,6 +362,14 @@ export default function Recetas() {
       setErrorReceta('El nombre es obligatorio');
       return;
     }
+    // Validación rendimiento (sólo fabricación — envasado siempre rinde 1)
+    if (formReceta.tipo_receta !== 'envasado') {
+      const rNum = Number(formReceta.rendimiento);
+      if (!formReceta.rendimiento || !Number.isFinite(rNum) || rNum <= 0) {
+        setErrorReceta('No se puede crear una receta con rendimiento 0. Pon un valor mayor que 0.');
+        return;
+      }
+    }
     // Si se está editando, calculamos un diff y pedimos confirmación antes de guardar.
     if (editandoReceta) {
       const o = editandoReceta;
@@ -489,7 +497,7 @@ export default function Recetas() {
               <ToastField label="Producto" value={productoNombre} span={2} />
               <ToastField
                 label="Rendimiento"
-                value={formReceta.tipo_receta !== 'envasado' && formReceta.rendimiento ? `${Number(formReceta.rendimiento).toLocaleString('es-ES')} kg/tanda` : ''}
+                value={formReceta.tipo_receta !== 'envasado' && formReceta.rendimiento ? `${Number(formReceta.rendimiento).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} kg/tanda` : ''}
               />
               <ToastField label="Pasos definidos" value={numPasos > 0 ? numPasos : ''} />
               <ToastField label="Control de calidad" value={hasQC ? 'Activo' : ''} />
@@ -608,6 +616,18 @@ export default function Recetas() {
       return;
     }
     if (!expandida) return;
+    const mermaNum = Number(formIng.porcentaje_merma) || 0;
+    if (mermaNum < 0 || mermaNum > 100) {
+      setErrorIng('La merma debe estar entre 0 y 100 %');
+      return;
+    }
+    if (mermaNum > 50) {
+      const ok = window.confirm(
+        `Has puesto una merma de ${mermaNum}%, parece muy alta. ¿Es correcto?\n\n` +
+        `(la merma habitual es < 5%; >50% significa que se desperdicia más de la mitad de la materia prima al fabricar)`
+      );
+      if (!ok) return;
+    }
     setSavingIng(true);
     setErrorIng('');
     const expandidaId = expandida;
@@ -1031,7 +1051,7 @@ export default function Recetas() {
                           </span>
                         )}
                         {r.rendimiento && (
-                          <span>Rend: {parseFloat(r.rendimiento).toLocaleString('es-ES')} {r.unidad_medida}</span>
+                          <span>Rend: {parseFloat(r.rendimiento).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {r.unidad_medida}</span>
                         )}
                         <span>{r.num_ingredientes ?? 0} ingrediente{(parseInt(r.num_ingredientes ?? '0', 10)) !== 1 ? 's' : ''}</span>
                         {(r.pasos ?? []).length > 0 && (
@@ -1070,7 +1090,7 @@ export default function Recetas() {
                           'rounded-md px-2 py-0.5 text-[11px] font-medium',
                           maxProd > 0 ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'
                         )}>
-                          Max: {maxProd > 0 ? maxProd.toLocaleString('es-ES', { maximumFractionDigits: 1 }) : '0'} {r.unidad_medida}
+                          Max: {maxProd > 0 ? maxProd.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0,00'} {r.unidad_medida}
                         </span>
                         {r.ph_min && r.ph_max && (
                           <span className="rounded-md bg-purple-100 text-purple-700 px-2 py-0.5 text-[11px] font-medium">
@@ -1186,10 +1206,10 @@ export default function Recetas() {
                                           )}
                                         </td>
                                         <td className="px-3 py-2 tabular-nums text-gray-700">
-                                          {parseFloat(ing.cantidad).toLocaleString('es-ES')} {ing.unidad_medida}
+                                          {parseFloat(ing.cantidad).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {ing.unidad_medida}
                                         </td>
                                         <td className="px-3 py-2 tabular-nums text-gray-500">
-                                          {parseFloat(ing.porcentaje_merma).toLocaleString('es-ES')}%
+                                          {parseFloat(ing.porcentaje_merma).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%
                                         </td>
                                         <td className="px-3 py-2 tabular-nums">
                                           <span className={clsx(
@@ -1280,12 +1300,18 @@ export default function Recetas() {
           </FormField>
 
           {formReceta.tipo_receta === 'fabricacion' && (
-            <FormField label="Rendimiento (kg)" hint="Cantidad producida por tanda en el reactor">
+            <FormField label="Rendimiento (kg)" hint="Cantidad recibida por lote (2 decimales)">
               <Input
                 type="number" min="0" step="0.01"
                 value={formReceta.rendimiento}
                 onChange={e => setFormReceta(f => ({ ...f, rendimiento: e.target.value }))}
-                placeholder="1000"
+                onBlur={e => {
+                  const n = parseFloat(e.target.value);
+                  if (Number.isFinite(n) && n > 0) {
+                    setFormReceta(f => ({ ...f, rendimiento: n.toFixed(2) }));
+                  }
+                }}
+                placeholder="1000.00"
               />
             </FormField>
           )}
@@ -1745,7 +1771,7 @@ export default function Recetas() {
                               <div key={mpId} className="flex items-center gap-1.5 bg-white rounded px-2 py-1 border border-indigo-100">
                                 <span className="text-[10px] font-bold tabular-nums text-indigo-600 w-4">{idx + 1}.</span>
                                 <span className="flex-1 text-[11px] font-medium text-indigo-900 truncate">
-                                  {ing.nombre_mp} <span className="text-indigo-500 font-mono">({cantidadShown.toLocaleString('es-ES')} {ing.unidad_medida})</span>
+                                  {ing.nombre_mp} <span className="text-indigo-500 font-mono">({cantidadShown.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {ing.unidad_medida})</span>
                                 </span>
                                 <button
                                   type="button"
@@ -1817,7 +1843,7 @@ export default function Recetas() {
                                   }}
                                   className="rounded-md px-2 py-0.5 text-[10px] font-medium border border-gray-200 bg-white text-gray-500 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
                                 >
-                                  + {ing.nombre_mp} <span className="text-gray-400 font-mono">({cantidadMostrar.toLocaleString('es-ES')} {ing.unidad_medida})</span>
+                                  + {ing.nombre_mp} <span className="text-gray-400 font-mono">({cantidadMostrar.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {ing.unidad_medida})</span>
                                 </button>
                               );
                             });
@@ -1969,7 +1995,7 @@ export default function Recetas() {
                     </p>
                     <p className="text-[10px] text-gray-600 mt-0.5 font-mono">
                       <b>{s.nombre ?? '—'}</b>
-                      {s.rendimiento && <> · {parseFloat(s.rendimiento).toLocaleString('es-ES')} kg</>}
+                      {s.rendimiento && <> · {parseFloat(s.rendimiento).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} kg</>}
                       {' · '}{(s.ingredientes ?? []).length} ing
                       {(s.pasos ?? []).length > 0 && <> · {(s.pasos ?? []).length} pasos</>}
                     </p>
@@ -2012,7 +2038,7 @@ export default function Recetas() {
                                       )}
                                     </span>
                                     <span className="font-mono font-semibold text-gray-800 shrink-0">
-                                      {parseFloat(ing.cantidad ?? '0').toLocaleString('es-ES')} {ing.unidad_medida ?? 'kg'}
+                                      {parseFloat(ing.cantidad ?? '0').toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {ing.unidad_medida ?? 'kg'}
                                     </span>
                                   </li>
                                 );

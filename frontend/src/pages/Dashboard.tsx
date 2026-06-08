@@ -62,6 +62,9 @@ export default function Dashboard() {
     creador_nombre?: string | null; creador_rol?: string | null;
     referencia_tipo?: string | null;
     referencia?: { label: string; url: string } | null;
+    entregados_por?: string[] | null;
+    entregados_nombres?: string[] | null;
+    usuario_id?: string | null;
   }[]>([]);
   const [nuevoRec, setNuevoRec] = useState<{ fecha: string; titulo: string; color: string } | null>(null);
   const [diaSeleccionado, setDiaSeleccionado] = useState<string | null>(null);
@@ -459,15 +462,23 @@ export default function Dashboard() {
                       <p className={clsx('text-[11px] font-medium', isToday ? 'text-loga-red font-bold' : 'text-gray-500')}>{cell.day}</p>
                       {totalItems > 0 && <span className="w-4 h-4 rounded-full bg-gray-200 text-[8px] font-bold text-gray-600 flex items-center justify-center">{totalItems}</span>}
                     </div>
-                    {/* Recordatorios */}
-                    {calFiltros.has('recordatorios') && dayRecs.slice(0, 1).map(r => (
-                      <div key={r.id}
-                        draggable
-                        onDragStart={(e) => { e.stopPropagation(); setDragItem({ id: r.id, tipo: 'recordatorio' }); }}
-                        className={clsx('rounded px-1 py-0.5 mb-0.5 text-[9px] font-medium truncate cursor-grab active:cursor-grabbing leading-tight',
-                        r.color === 'red' ? 'bg-red-100 text-red-700' : r.color === 'green' ? 'bg-emerald-100 text-emerald-700' : 'bg-indigo-100 text-indigo-700'
-                      )}>📌 {r.titulo}</div>
-                    ))}
+                    {/* Recordatorios — gris = sin leer · morado = leído */}
+                    {calFiltros.has('recordatorios') && dayRecs.slice(0, 1).map(r => {
+                      const esCreadorR = !!(user && r.usuario_id === user.id);
+                      const yoLeidoR = !!(user && r.entregados_por && r.entregados_por.includes(user.id));
+                      // Para operario: leído si yo lo leí. Para admin: leído si alguien lo leyó.
+                      const leido = esCreadorR
+                        ? ((r.entregados_por?.length ?? 0) > 0)
+                        : yoLeidoR;
+                      return (
+                        <div key={r.id}
+                          draggable
+                          onDragStart={(e) => { e.stopPropagation(); setDragItem({ id: r.id, tipo: 'recordatorio' }); }}
+                          className={clsx('rounded px-1 py-0.5 mb-0.5 text-[9px] font-medium truncate cursor-grab active:cursor-grabbing leading-tight',
+                            leido ? 'bg-purple-100 text-purple-700 border border-purple-200' : 'bg-gray-200 text-gray-600 border border-gray-300'
+                          )}>📌 {r.titulo}</div>
+                      );
+                    })}
                     {/* Predicciones (solo activas) */}
                     {calFiltros.has('predicciones') && predicciones
                       .filter(p => p.estado === 'activo' && p.dias_restantes > 0 && p.fecha_estimada === cell.dateStr)
@@ -522,42 +533,112 @@ export default function Dashboard() {
               <p className="text-xs text-gray-400 text-center py-3">Sin actividad este día</p>
             )}
 
-            {dayRecs.map(r => (
-              <div key={r.id} className={clsx('rounded-lg px-3 py-2 border space-y-1',
-                r.color === 'red' ? 'border-red-200 bg-red-50' : r.color === 'green' ? 'border-emerald-200 bg-emerald-50' : 'border-indigo-200 bg-indigo-50'
-              )}>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm">📌</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-gray-800 truncate">{r.titulo}</p>
-                    {r.creador_nombre && (
-                      <p className="text-[10px] text-gray-600 flex items-center gap-1">
-                        👤 de parte de <b>{r.creador_nombre}</b>
-                        {r.creador_rol && <span className="opacity-60">({r.creador_rol})</span>}
-                      </p>
+            {dayRecs.map(r => {
+              const yoLeido = !!(user && r.entregados_por && r.entregados_por.includes(user.id));
+              const esCreador = !!(user && r.usuario_id === user.id);
+              const leidoresList = (r.entregados_nombres ?? []).filter(Boolean);
+              // Gris por defecto · morado cuando se ha leído.
+              // Operario: leído = yo lo marqué. Admin: leído = alguien lo marcó.
+              const leido = esCreador ? leidoresList.length > 0 : yoLeido;
+              const colorBar = leido ? 'bg-purple-500' : 'bg-gray-300';
+              const cardBg = leido ? 'bg-purple-50/40 border-purple-200' : 'bg-gray-50/60 border-gray-200';
+              return (
+                <div key={r.id} className={clsx('rounded-lg border shadow-sm overflow-hidden transition-colors', cardBg)}>
+                  {/* Color bar arriba */}
+                  <div className={clsx('h-1', colorBar)} />
+                  <div className="p-3 space-y-2">
+                    {/* Header: meta (creador) arriba pequeño · título debajo grande */}
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1 min-w-0 space-y-1">
+                        {r.creador_nombre && (
+                          <div className="flex items-center gap-1.5 text-[10px] text-gray-500">
+                            <span>de</span>
+                            <b className="text-gray-700">{r.creador_nombre}</b>
+                            {r.creador_rol && (
+                              <span className={clsx('rounded px-1 py-px text-[9px] font-bold uppercase tracking-wider',
+                                r.creador_rol === 'admin' ? 'bg-loga-red/10 text-loga-red' : 'bg-gray-200 text-gray-700'
+                              )}>{r.creador_rol}</span>
+                            )}
+                          </div>
+                        )}
+                        <p className="text-sm font-bold text-gray-900 leading-snug">{r.titulo}</p>
+                      </div>
+                      {esCreador && (
+                        <button onClick={() => {
+                          notify.promise(produccionApi.eliminarRecordatorio(r.id), {
+                            loading: 'Eliminando…',
+                            success: 'Recordatorio eliminado',
+                            error: 'No se pudo eliminar',
+                          }).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))).catch(() => {});
+                        }}
+                          className="text-gray-300 hover:text-loga-red p-1 rounded hover:bg-red-50 transition-colors shrink-0"
+                          title="Eliminar">
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Descripción */}
+                    {r.descripcion && (
+                      <p className="text-xs text-gray-700 whitespace-pre-line leading-relaxed">{r.descripcion}</p>
+                    )}
+
+                    {/* Chip referencia clickable */}
+                    {r.referencia && (
+                      <button onClick={() => r.referencia && navigate(r.referencia.url)}
+                        className="inline-flex items-center gap-1.5 rounded-md bg-indigo-50 border border-indigo-200 px-2 py-1 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100 transition-colors">
+                        <span>🔗</span>
+                        <span>{r.referencia.label}</span>
+                        <span className="text-[9px] text-indigo-400 uppercase tracking-wider">{r.referencia_tipo}</span>
+                      </button>
+                    )}
+
+                    {/* Footer: vista admin vs operario */}
+                    {esCreador ? (
+                      // Vista ADMIN: badge "Nota leída por X" destacado en morado
+                      <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+                        {leidoresList.length > 0 ? (
+                          <div className="inline-flex items-center gap-1.5 rounded-md bg-purple-100 border border-purple-200 px-2 py-1 text-[10px] font-semibold text-purple-800">
+                            <span>📬</span>
+                            <span>Nota leída por <b>{leidoresList.join(', ')}</b></span>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-gray-400 italic">Pendiente de leer</span>
+                        )}
+                      </div>
+                    ) : (
+                      // Vista OPERARIO: botón "Marcar leído" o "✓ Leído"
+                      <div className="flex items-center justify-between pt-2 border-t border-gray-200">
+                        <span className={clsx('text-[10px]',
+                          yoLeido ? 'text-purple-700 font-bold' : 'text-gray-500 italic'
+                        )}>
+                          {yoLeido ? '✓ Has leído esta nota' : 'Nota pendiente'}
+                        </span>
+                        {!yoLeido ? (
+                          <button onClick={async () => {
+                            try {
+                              await produccionApi.marcarRecordatorioLeido(r.id);
+                              setRecordatorios(prev => prev.map(x => x.id === r.id ? {
+                                ...x,
+                                entregados_por: [...(x.entregados_por ?? []), user!.id],
+                                entregados_nombres: [...(x.entregados_nombres ?? []), user!.nombre].sort(),
+                              } : x));
+                            } catch { notify.error('No se pudo marcar'); }
+                          }}
+                            className="inline-flex items-center gap-1 rounded-md bg-purple-600 px-3 py-1 text-[10px] font-bold text-white hover:bg-purple-700 shadow-sm transition-colors shrink-0">
+                            ✓ Marcar como leído
+                          </button>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-purple-100 border border-purple-200 px-2 py-1 text-[10px] font-bold text-purple-700 shrink-0">
+                            📖 Leído
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
-                  <button onClick={() => {
-                    notify.promise(produccionApi.eliminarRecordatorio(r.id), {
-                      loading: 'Eliminando…',
-                      success: 'Recordatorio eliminado',
-                      error: 'No se pudo eliminar',
-                    }).then(() => setRecordatorios(prev => prev.filter(x => x.id !== r.id))).catch(() => {});
-                  }}
-                    className="text-gray-400 hover:text-loga-red"><Trash2 size={12} /></button>
                 </div>
-                {r.descripcion && (
-                  <p className="text-[11px] text-gray-700 ml-6 whitespace-pre-line">{r.descripcion}</p>
-                )}
-                {r.referencia && (
-                  <button onClick={() => r.referencia && navigate(r.referencia.url)}
-                    className="ml-6 inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold bg-white border border-gray-300 hover:bg-gray-50 transition-colors">
-                    🔗 {r.referencia.label}
-                    <span className="text-[9px] text-gray-400 uppercase">{r.referencia_tipo}</span>
-                  </button>
-                )}
-              </div>
-            ))}
+              );
+            })}
 
             {dayOrds.map(o => (
               <div key={o.id} onClick={() => navigate(o.estado === 'completada' ? `/produccion?detalle_id=${o.id}` : `/produccion?orden_id=${o.id}`)}
@@ -943,7 +1024,11 @@ export default function Dashboard() {
             <p className="text-xs text-gray-400 text-center py-6">No hay ordenes</p>
           )}
           {ordenes.slice(0, 10).map(o => (
-            <div key={o.id} onClick={() => navigate(`/produccion?orden_id=${o.id}`)}
+            <div key={o.id} onClick={() => navigate(
+              ['borrador', 'confirmada'].includes(o.estado)
+                ? `/produccion?orden_id=${o.id}`
+                : `/produccion?detalle_id=${o.id}`
+            )}
               className="rounded-xl border border-gray-100 bg-white shadow-sm p-3 active:bg-gray-50">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
@@ -975,7 +1060,11 @@ export default function Dashboard() {
             </thead>
             <tbody className="bg-white divide-y divide-gray-50">
               {ordenes.slice(0, 10).map(o => (
-                <tr key={o.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => navigate(`/produccion?orden_id=${o.id}`)}>
+                <tr key={o.id} className="hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => navigate(
+                  ['borrador', 'confirmada'].includes(o.estado)
+                    ? `/produccion?orden_id=${o.id}`
+                    : `/produccion?detalle_id=${o.id}`
+                )}>
                   <td className="px-4 py-3 font-mono text-xs text-gray-600">{o.numero_orden}</td>
                   <td className="px-4 py-3 text-gray-900 text-xs">{o.receta_nombre ?? '—'}</td>
                   <td className="px-4 py-3 text-xs text-gray-500">{o.cliente ?? '—'}</td>

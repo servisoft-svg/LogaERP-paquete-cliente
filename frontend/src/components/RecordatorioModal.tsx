@@ -17,7 +17,7 @@ interface Props {
   fechaInicial?: string;
 }
 
-type Destino = 'yo' | 'admin' | 'trabajador' | 'personalizado';
+type Destino = 'yo' | 'admin' | 'trabajador' | 'todos' | 'personalizado';
 
 const COLORES = [
   { v: 'indigo',  c: 'bg-indigo-500'  },
@@ -110,6 +110,7 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
       if (destino === 'yo')              destinatarios = user ? [user.id] : undefined;
       else if (destino === 'admin')      destinatario_roles = ['admin'];
       else if (destino === 'trabajador') destinatario_roles = ['trabajador'];
+      else if (destino === 'todos')      destinatario_roles = ['admin', 'trabajador'];
       else                                destinatarios = destinatariosIds;
 
       const programado_para = hora ? `${fecha}T${hora}:00` : null;
@@ -209,8 +210,9 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {([
                   { v: 'yo',            l: 'Solo a mí' },
-                  { v: 'admin',         l: 'Todos los admins' },
-                  { v: 'trabajador',    l: 'Todos los operarios' },
+                  { v: 'admin',         l: 'Admins' },
+                  { v: 'trabajador',    l: 'Operarios' },
+                  { v: 'todos',         l: 'Todos' },
                   { v: 'personalizado', l: 'Personalizado…' },
                 ] as { v: Destino; l: string }[]).map((opt) => (
                   <button

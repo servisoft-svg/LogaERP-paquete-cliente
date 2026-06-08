@@ -19,6 +19,10 @@ export const productosApi = {
   listarBotesCompatibles: (cajaId: string) => api.get(`/productos/${cajaId}/botes-compatibles`),
   setBotesCompatibles: (cajaId: string, data: { bote_ids: string[]; botes_por_caja?: number }) =>
     api.put(`/productos/${cajaId}/botes-compatibles`, data),
+  // Inverso: cajas compatibles con un bote (PE o frasco-ME).
+  listarCajasCompatibles: (boteId: string) => api.get(`/productos/${boteId}/cajas-compatibles`),
+  setCajasCompatibles: (boteId: string, data: { caja_ids: string[] }) =>
+    api.put(`/productos/${boteId}/cajas-compatibles`, data),
 };
 
 export const recetasApi = {
@@ -158,6 +162,7 @@ export const produccionApi = {
   crearRecordatorio: (data: { fecha: string; titulo: string; descripcion?: string; color?: string }) => api.post('/recordatorios', data),
   moverRecordatorio: (id: string, fecha: string) => api.put(`/recordatorios/${id}`, { fecha }),
   eliminarRecordatorio: (id: string) => api.delete(`/recordatorios/${id}`),
+  marcarRecordatorioLeido: (id: string) => api.post(`/recordatorios/${id}/marcar-entregado`),
 };
 
 export const lotesApi = {
@@ -172,6 +177,7 @@ export const lotesApi = {
 
 export const pedidosApi = {
   listar:   (params?: Record<string, string>) => api.get('/pedidos', { params }),
+  porCliente: (clienteId: string, limit = 20) => api.get('/pedidos', { params: { cliente_id: clienteId, limit: String(limit) } }),
   crear:    (data: object) => api.post('/pedidos', data),
   editar:   (id: string, data: object) => api.put(`/pedidos/${id}`, data),
   consumir: (id: string, lotesOverride?: Record<string, string[] | Array<{ lote_id: string; cantidad: number }>>) =>
@@ -183,10 +189,22 @@ export const pedidosApi = {
   cajasCompatiblesPara: (boteId: string) => api.get(`/productos/${boteId}/cajas-compatibles`),
   descargarAlbaran: (id: string) => api.get(`/pedidos/${id}/albaran.pdf`, { responseType: 'blob' }),
   enviarAlbaran: (id: string, email: string) => api.post(`/pedidos/${id}/enviar-albaran`, { email }),
-  // Material de embalaje EXTRA (no aparece en albarán ni factura).
+  // Hoja de preparación PDF para el operario (checklist materiales).
+  descargarPreparacion: (id: string) => api.get(`/pedidos/${id}/preparacion.pdf`, { responseType: 'blob' }),
+  // Fotos del pedido empaquetado (respaldo ante incidencias).
+  listarFotos: (id: string) => api.get(`/pedidos/${id}/fotos`),
+  subirFotos: (id: string, files: File[]) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('fotos', f);
+    return api.post(`/pedidos/${id}/fotos`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  borrarFoto: (id: string, filename: string) => api.delete(`/pedidos/${id}/fotos/${filename}`),
+  // Material de embalaje EXTRA (precio>0 → aparece en albarán/factura como línea).
   listarEmbalajesExtra: (id: string) => api.get(`/pedidos/${id}/embalajes-extra`),
-  agregarEmbalajeExtra: (id: string, data: { producto_id: string; cantidad: number; notas?: string }) =>
+  agregarEmbalajeExtra: (id: string, data: { producto_id: string; cantidad: number; notas?: string; precio_unitario?: number }) =>
     api.post(`/pedidos/${id}/embalajes-extra`, data),
+  editarEmbalajeExtra: (id: string, extraId: string, data: { precio_unitario?: number; cantidad?: number; notas?: string }) =>
+    api.put(`/pedidos/${id}/embalajes-extra/${extraId}`, data),
   borrarEmbalajeExtra: (id: string, extraId: string) =>
     api.delete(`/pedidos/${id}/embalajes-extra/${extraId}`),
 };

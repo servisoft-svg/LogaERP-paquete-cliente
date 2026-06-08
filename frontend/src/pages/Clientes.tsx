@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
-import { Plus, Pencil, Users, Mail, Phone, MapPin, Search, Archive, ArchiveRestore } from 'lucide-react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Plus, Pencil, Users, Mail, Phone, MapPin, Search, Archive, ArchiveRestore, ChevronRight, ChevronDown, ShoppingBag } from 'lucide-react';
 import clsx from 'clsx';
-import { clientesApi } from '../api/client';
+import { clientesApi, pedidosApi } from '../api/client';
 import type { Cliente } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import Modal from '../components/Modal';
@@ -25,6 +25,49 @@ export default function Clientes() {
   const [saving, setSaving]           = useState(false);
   const [error, setError]             = useState('');
   const [confirmArchivar, setConfirmArchivar] = useState<Cliente | null>(null);
+
+  // ── Expandible pedidos por cliente ──────────────────────────────────────
+  type LineaPedido = { producto_nombre_rel?: string | null; producto_nombre?: string | null; cantidad?: string | number; unidad_medida?: string; precio_unitario?: string | number; subtotal?: string | number };
+  type PedidoLite = {
+    id: string;
+    numero_pedido: string;
+    estado: string;
+    fecha_entrega: string | null;
+    created_at: string;
+    cantidad?: string | null;
+    unidad_medida?: string | null;
+    subtotal?: string | null;
+    portes?: string | null;
+    iva_porcentaje?: string | null;
+    total?: string | null;
+    producto_nombre_rel?: string | null;
+    producto_nombre?: string | null;
+    lineas?: LineaPedido[];
+  };
+  const [expandidoId, setExpandidoId] = useState<string | null>(null);
+  const [pedidosPorCliente, setPedidosPorCliente] = useState<Record<string, PedidoLite[]>>({});
+  const [cargandoPedidos, setCargandoPedidos] = useState<string | null>(null);
+  const toggleExpand = async (clienteId: string) => {
+    if (expandidoId === clienteId) { setExpandidoId(null); return; }
+    setExpandidoId(clienteId);
+    if (!pedidosPorCliente[clienteId]) {
+      setCargandoPedidos(clienteId);
+      try {
+        const r = await pedidosApi.porCliente(clienteId, 20);
+        setPedidosPorCliente(prev => ({ ...prev, [clienteId]: r.data as PedidoLite[] }));
+      } catch { setPedidosPorCliente(prev => ({ ...prev, [clienteId]: [] })); }
+      finally { setCargandoPedidos(null); }
+    }
+  };
+  const estadoColor: Record<string, string> = {
+    nuevo: 'bg-gray-100 text-gray-600',
+    confirmado: 'bg-blue-100 text-blue-700',
+    en_produccion: 'bg-amber-100 text-amber-700',
+    fabricado: 'bg-indigo-100 text-indigo-700',
+    envasado: 'bg-purple-100 text-purple-700',
+    completado: 'bg-emerald-100 text-emerald-700',
+    cancelado: 'bg-red-100 text-red-700',
+  };
   const [archivando, setArchivando]   = useState(false);
 
   const cargar = useCallback(async () => {
@@ -352,6 +395,7 @@ export default function Clientes() {
         <table className="min-w-full divide-y divide-gray-100 text-sm">
           <thead className="bg-gray-50">
             <tr>
+              <th className="w-8 px-2 py-3"></th>
               {['Nombre', 'Consumo', 'Email', 'Telefono', 'CP / Provincia', 'NIF', 'Acciones'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
                   {h}
@@ -361,13 +405,20 @@ export default function Clientes() {
           </thead>
           <tbody className="bg-white divide-y divide-gray-50">
             {filtrados.map((c, i) => (
+              <Fragment key={c.id}>
               <motion.tr
-                key={c.id}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: i * 0.03 }}
-                className="hover:bg-gray-50 transition-colors"
+                className={clsx('hover:bg-gray-50 transition-colors', expandidoId === c.id && 'bg-indigo-50/30')}
               >
+                <td className="px-2 py-3 align-middle">
+                  <button onClick={() => toggleExpand(c.id)}
+                    title={expandidoId === c.id ? 'Ocultar pedidos' : 'Ver últimos pedidos'}
+                    className="text-gray-400 hover:text-indigo-600 p-1 rounded hover:bg-indigo-50 transition-colors">
+                    {expandidoId === c.id ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </button>
+                </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 shrink-0">
@@ -434,10 +485,91 @@ export default function Clientes() {
                   </div>
                 </td>
               </motion.tr>
+
+              {/* Sub-row expandible con últimos pedidos */}
+              <AnimatePresence>
+                {expandidoId === c.id && (
+                  <motion.tr
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                    className="bg-indigo-50/20"
+                  >
+                    <td colSpan={8} className="px-6 py-3">
+                      {cargandoPedidos === c.id ? (
+                        <p className="text-xs text-gray-400 italic text-center py-2">Cargando últimos pedidos…</p>
+                      ) : (pedidosPorCliente[c.id]?.length ?? 0) === 0 ? (
+                        <p className="text-xs text-gray-400 italic text-center py-2">Este cliente no tiene pedidos aún.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-[10px] uppercase tracking-wider font-bold text-indigo-700 flex items-center gap-1.5">
+                            <ShoppingBag size={11} /> Últimos {pedidosPorCliente[c.id]?.length} pedidos
+                          </p>
+                          <div className="overflow-x-auto">
+                            <table className="min-w-full text-[11px]">
+                              <thead className="bg-indigo-100/40">
+                                <tr className="text-left">
+                                  <th className="px-2 py-1 font-semibold text-indigo-800">Pedido</th>
+                                  <th className="px-2 py-1 font-semibold text-indigo-800">Fecha</th>
+                                  <th className="px-2 py-1 font-semibold text-indigo-800">Estado</th>
+                                  <th className="px-2 py-1 font-semibold text-indigo-800">Productos</th>
+                                  <th className="px-2 py-1 font-semibold text-indigo-800 text-right">Total</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-indigo-100/60">
+                                {pedidosPorCliente[c.id]?.map(p => {
+                                  const lineas = p.lineas ?? [];
+                                  const total = parseFloat(p.total ?? '0');
+                                  return (
+                                    <tr key={p.id} className="hover:bg-white">
+                                      <td className="px-2 py-1.5 font-mono text-indigo-700">{p.numero_pedido}</td>
+                                      <td className="px-2 py-1.5 text-gray-600">
+                                        {new Date(p.fecha_entrega ?? p.created_at).toLocaleDateString('es-ES')}
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <span className={clsx('inline-block rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider', estadoColor[p.estado] ?? 'bg-gray-100 text-gray-600')}>
+                                          {p.estado}
+                                        </span>
+                                      </td>
+                                      <td className="px-2 py-1.5 text-gray-700">
+                                        {lineas.length > 0 ? (
+                                          <div className="space-y-0.5">
+                                            {lineas.map((l, idx) => {
+                                              const c2 = Number(l.cantidad ?? 0);
+                                              const pu = Number(l.precio_unitario ?? 0);
+                                              const st = Number(l.subtotal ?? 0);
+                                              return (
+                                                <div key={idx} className="flex items-baseline gap-1.5 flex-wrap">
+                                                  <span className="text-gray-800">{l.producto_nombre_rel ?? l.producto_nombre ?? '—'}</span>
+                                                  <span className="text-gray-500 font-mono tabular-nums">{c2.toLocaleString('es-ES')} {l.unidad_medida ?? 'ud'}</span>
+                                                  {pu > 0 && <span className="text-gray-400 font-mono">× {pu.toFixed(2)} €</span>}
+                                                  {st > 0 && <span className="text-emerald-700 font-bold font-mono">= {st.toFixed(2)} €</span>}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        ) : (
+                                          <span className="text-gray-500">{p.producto_nombre_rel ?? p.producto_nombre ?? '—'} · {p.cantidad ?? '—'} {p.unidad_medida ?? ''}</span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-bold text-gray-900 tabular-nums">
+                                        {total > 0 ? `${total.toFixed(2)} €` : '—'}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                  </motion.tr>
+                )}
+              </AnimatePresence>
+              </Fragment>
             ))}
             {filtrados.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-12 text-center">
+                <td colSpan={8} className="px-4 py-12 text-center">
                   <Users size={32} className="mx-auto mb-2 text-gray-200" />
                   <p className="text-sm text-gray-400">
                     {busqueda.trim() ? 'Sin resultados para la busqueda' : 'No hay clientes. Crea el primero.'}

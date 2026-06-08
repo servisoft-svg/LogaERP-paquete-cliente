@@ -77,6 +77,13 @@
   line-height: 1.45;
 }
 
+/* Toasts SIEMPRE por encima de modales y lightboxes (modal=150-300).
+   z-index: 500 garantiza que mensajes de error/éxito sean visibles
+   incluso encima del backdrop con blur de modales. */
+[data-sileo-viewport] {
+  z-index: 500 !important;
+}
+
 /* Mobile: levantar el toast por encima de la tab bar (h-14 = 56px + safe-area).
    Sileo aplica su propio offset; lo sumamos vía margen para no tocar la prop. */
 @media (max-width: 767px) {

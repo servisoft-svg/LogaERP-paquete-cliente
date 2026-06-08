@@ -363,11 +363,13 @@ export default function Productos() {
       )
     );
   }, [productos]);
-  // Cargar lista compatibles al editar una caja
+  // Cargar lista compatibles al editar cualquier material_embalaje.
+  // Antes filtrábamos por subcategoría 'Caja'/'Palé' pero el usuario usa
+  // nombres libres ('Cartón', 'Madera', etc.). El backend ya solo permite
+  // M2M con material_embalaje, así que confiamos en el endpoint.
   useEffect(() => {
     if (!modalOpen || !editando) return;
-    const subcat = (editando as any).subcategoria_me ?? '';
-    if (editando.tipo !== 'material_embalaje' || !['Caja', 'Palé', 'Pale'].includes(subcat)) {
+    if (editando.tipo !== 'material_embalaje') {
       setBotesCompatibles([]);
       setBotesPorCaja('');
       return;
@@ -529,10 +531,10 @@ export default function Productos() {
             spec_id: s.spec_id, min_valor: s.min_valor, max_valor: s.max_valor, orden: i,
             parametros: s.parametros && Object.values(s.parametros).some((v) => v !== '' && v != null) ? s.parametros : null,
           })));
-          // Persistir botes compatibles si la caja se editó (rol agrupador).
-          // Solo se envía si subcategoria es Caja/Palé y hay edición real.
-          const subcat = form.subcategoria_me;
-          if (form.tipo === 'material_embalaje' && ['Caja', 'Palé', 'Pale'].includes(subcat)) {
+          // Persistir botes compatibles para cualquier material_embalaje.
+          // El usuario clasifica con nombres libres (Cartón, Madera...), así
+          // que no restringimos por subcategoría.
+          if (form.tipo === 'material_embalaje') {
             await productosApi.setBotesCompatibles(productoIdGuardado, {
               bote_ids: botesCompatibles,
               botes_por_caja: botesPorCaja ? Number(botesPorCaja) : undefined,

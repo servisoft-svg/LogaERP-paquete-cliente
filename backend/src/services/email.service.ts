@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { pool } from '../db/pool';
 import { crearSolicitudYRenderPDF } from '../lib/pdfSolicitudCompra';
+import { decryptSecret } from '../lib/secretCrypto';
 
 interface EmailPedidoPayload {
   destinatario:  string;
@@ -31,7 +32,7 @@ class EmailService {
       secure: false,
       auth: {
         user: cfg.smtp_user   || process.env.SMTP_USER,
-        pass: cfg.smtp_pass_enc || process.env.SMTP_PASS,
+        pass: cfg.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS,
       },
     });
   }

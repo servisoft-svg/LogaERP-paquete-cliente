@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Plus, Search, ShoppingBag, Clock, Check, X, Factory, Eye, Trash2, Send, Download, Pencil, ClipboardList,
+  Plus, Search, ShoppingBag, Clock, Check, X, Factory, Eye, Trash2, Send, Download, Pencil, ClipboardList, Package,
 } from 'lucide-react';
 import { pedidosApi, productosApi, clientesApi, recetasApi, recetasEnvasadoApi } from '../api/client';
+import FotosPedidoSection from '../components/FotosPedidoSection';
 import type { Pedido, Producto, Cliente, Receta } from '../types';
 import { cpAProvincia, cpAZona, ZONA_LABEL } from '../lib/provincia';
 
@@ -67,9 +68,11 @@ export default function Pedidos() {
     nombre: string;
     unidad_medida: string;
     stock_actual?: string | number;
+    precio_unitario?: string | number; // €/ud · si >0 sale en albarán
+    precio_venta?: string | number;    // del producto (default al añadir)
   };
   const [embExtras, setEmbExtras] = useState<EmbExtra[]>([]);
-  const [embExtraDraft, setEmbExtraDraft] = useState<{ producto_id: string; cantidad: string; notas: string }>({ producto_id: '', cantidad: '', notas: '' });
+  const [embExtraDraft, setEmbExtraDraft] = useState<{ producto_id: string; cantidad: string; notas: string; precio_unitario: string }>({ producto_id: '', cantidad: '', notas: '', precio_unitario: '' });
   const [embExtraBusy, setEmbExtraBusy] = useState(false);
   const materialesEmbalaje = useMemo(
     () => productos.filter(p => p.tipo === 'material_embalaje' && p.activo !== false),
@@ -88,16 +91,21 @@ export default function Pedidos() {
     }
     const prod = productos.find(p => p.id === embExtraDraft.producto_id);
     if (!prod) return;
+    // Precio: lo que tecleó el admin, o el precio_venta del producto si vacío.
+    const precioVenta = parseFloat((prod as any).precio_venta ?? '0') || 0;
+    const precioFinal = embExtraDraft.precio_unitario
+      ? (parseFloat(embExtraDraft.precio_unitario) || 0)
+      : precioVenta;
     if (editando) {
-      // Persistir inmediatamente
       setEmbExtraBusy(true);
       try {
         await pedidosApi.agregarEmbalajeExtra(editando.id, {
           producto_id: embExtraDraft.producto_id,
           cantidad: cant,
           notas: embExtraDraft.notas.trim() || undefined,
+          precio_unitario: precioFinal,
         });
-        setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '' });
+        setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '', precio_unitario: '' });
         await cargarEmbExtras(editando.id);
         notify.success('Extra añadido');
       } catch (e: any) {
@@ -113,9 +121,23 @@ export default function Pedidos() {
         codigo: prod.codigo,
         nombre: prod.nombre,
         unidad_medida: prod.unidad_medida ?? 'ud',
+        precio_unitario: precioFinal,
       }]);
-      setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '' });
+      setEmbExtraDraft({ producto_id: '', cantidad: '', notas: '', precio_unitario: '' });
     }
+  };
+
+  // Editar precio inline de un extra ya guardado (sólo en edición de pedido).
+  const cambiarPrecioExtra = async (extraId: string, nuevoPrecio: number) => {
+    if (!editando) {
+      // Buffer local
+      setEmbExtras(prev => prev.map(e => e.id === extraId ? { ...e, precio_unitario: nuevoPrecio } : e));
+      return;
+    }
+    try {
+      await pedidosApi.editarEmbalajeExtra(editando.id, extraId, { precio_unitario: nuevoPrecio });
+      setEmbExtras(prev => prev.map(e => e.id === extraId ? { ...e, precio_unitario: nuevoPrecio } : e));
+    } catch { notify.error('No se pudo actualizar precio'); }
   };
   const delEmbExtra = async (extraId: string) => {
     if (extraId.startsWith('tmp-')) {
@@ -307,12 +329,31 @@ export default function Pedidos() {
   // Detalle
   const [detalle, setDetalle]       = useState<Pedido | null>(null);
   const [detalleExtras, setDetalleExtras] = useState<EmbExtra[]>([]);
+  const [detalleFotos, setDetalleFotos] = useState<string[]>([]);
   useEffect(() => {
-    if (!detalle) { setDetalleExtras([]); return; }
+    if (!detalle) { setDetalleExtras([]); setDetalleFotos([]); return; }
     pedidosApi.listarEmbalajesExtra(detalle.id)
       .then(r => setDetalleExtras(r.data as EmbExtra[]))
       .catch(() => setDetalleExtras([]));
+    pedidosApi.listarFotos(detalle.id)
+      .then(r => setDetalleFotos((r.data as { fotos: string[] }).fotos ?? []))
+      .catch(() => setDetalleFotos([]));
   }, [detalle]);
+  // Descarga directa de una foto (force download via fetch+blob)
+  const descargarFoto = async (url: string) => {
+    const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
+    try {
+      const r = await fetch(`${url}?token=${encodeURIComponent(token)}`);
+      if (!r.ok) throw new Error('No se pudo descargar');
+      const blob = await r.blob();
+      const filename = url.split('/').pop() ?? 'foto.jpg';
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    } catch { notify.error('No se pudo descargar la foto'); }
+  };
 
   // Confirmar cancelar
   const [confirmCancel, setConfirmCancel] = useState<Pedido | null>(null);
@@ -544,7 +585,7 @@ export default function Pedidos() {
         error: editando ? 'No se pudo guardar' : 'No se pudo crear el pedido',
       });
 
-      // Si era pedido nuevo + hay extras bufferados, postearlos ahora.
+      // Si era pedido nuevo + hay extras bufferados, postearlos ahora con precio.
       if (!editando && embExtras.length > 0) {
         const nuevoPedidoId = (resp?.data?.id ?? resp?.data?.pedido?.id) as string | undefined;
         if (nuevoPedidoId) {
@@ -553,6 +594,7 @@ export default function Pedidos() {
               producto_id: e.producto_id,
               cantidad: Number(e.cantidad),
               notas: e.notas ?? undefined,
+              precio_unitario: Number(e.precio_unitario ?? 0),
             }).catch(err => console.error('extra falló', err))
           ));
         }
@@ -1879,27 +1921,66 @@ export default function Pedidos() {
             <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2">
               <div className="flex items-baseline justify-between">
                 <p className="text-xs font-bold text-amber-900">Material de embalaje extra para el pedido</p>
-                <span className="text-[10px] text-amber-700">No aparece en albarán/factura · cuenta en informe materiales</span>
+                <span className="text-[10px] text-amber-700">Con precio &gt; 0 sale en albarán/factura · siempre cuenta en informe materiales</span>
               </div>
               {embExtras.length > 0 && (
                 <ul className="space-y-1">
-                  {embExtras.map(e => (
-                    <li key={e.id} className="flex items-center gap-2 text-xs bg-white border border-amber-200 rounded px-2 py-1">
-                      <span className="font-mono text-gray-500">{e.codigo}</span>
-                      <span className="flex-1 text-gray-800">{e.nombre}</span>
-                      <span className="font-mono">{Number(e.cantidad).toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
-                      {e.notas && <span className="text-gray-500 italic max-w-[40%] truncate">· {e.notas}</span>}
-                      <button onClick={() => delEmbExtra(e.id)} className="text-gray-400 hover:text-red-600 p-1 rounded" title="Eliminar">
-                        <X size={11} />
-                      </button>
-                    </li>
-                  ))}
+                  {embExtras.map(e => {
+                    const cant = Number(e.cantidad);
+                    const precio = Number(e.precio_unitario ?? 0);
+                    const subtotal = cant * precio;
+                    const enAlbaran = precio > 0;
+                    return (
+                      <li key={e.id} className="flex items-center gap-2 text-xs bg-white border border-amber-200 rounded px-2 py-1">
+                        <span className="font-mono text-gray-500 shrink-0">{e.codigo}</span>
+                        <span className="flex-1 text-gray-800 truncate">{e.nombre}</span>
+                        <span className="font-mono shrink-0">{cant.toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
+                        <span className="text-gray-300 shrink-0">·</span>
+                        <span className="inline-flex items-center gap-0.5 shrink-0">
+                          <input type="number" min="0" step="0.01"
+                            value={precio || ''}
+                            onChange={ev => {
+                              const n = parseFloat(ev.target.value) || 0;
+                              cambiarPrecioExtra(e.id, n);
+                            }}
+                            placeholder="0"
+                            className="w-16 rounded border border-amber-300 px-1 py-0.5 text-[11px] font-mono text-right outline-none focus:border-amber-500" />
+                          <span className="text-[10px] text-gray-500">€/ud</span>
+                        </span>
+                        {subtotal > 0 && (
+                          <span className="font-bold text-emerald-700 tabular-nums shrink-0">= {subtotal.toFixed(2)} €</span>
+                        )}
+                        <span className={clsx('text-[9px] uppercase font-bold rounded px-1 py-0.5 shrink-0',
+                          enAlbaran ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                        )}>{enAlbaran ? 'Albarán' : 'Interno'}</span>
+                        <button onClick={() => delEmbExtra(e.id)} className="text-gray-400 hover:text-red-600 p-1 rounded shrink-0" title="Eliminar">
+                          <X size={11} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {/* Subtotal extras facturables */}
+                  {(() => {
+                    const subTotalExtras = embExtras.reduce((s, e) => s + Number(e.cantidad) * Number(e.precio_unitario ?? 0), 0);
+                    return subTotalExtras > 0 ? (
+                      <li className="flex items-center justify-between text-[11px] font-bold text-emerald-800 px-2 py-1 border-t border-amber-200 mt-1">
+                        <span>Subtotal extras facturables al cliente</span>
+                        <span className="font-mono tabular-nums">{subTotalExtras.toFixed(2)} €</span>
+                      </li>
+                    ) : null;
+                  })()}
                 </ul>
               )}
-              <div className="grid grid-cols-12 gap-2">
+              <div className="grid grid-cols-12 gap-1.5">
                 <select value={embExtraDraft.producto_id}
-                  onChange={e => setEmbExtraDraft({ ...embExtraDraft, producto_id: e.target.value })}
-                  className="col-span-6 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-amber-500">
+                  onChange={e => {
+                    const id = e.target.value;
+                    const prod = materialesEmbalaje.find(p => p.id === id);
+                    // Autocompletar precio con precio_venta del producto
+                    const pv = prod ? parseFloat((prod as any).precio_venta ?? '0') || 0 : 0;
+                    setEmbExtraDraft({ ...embExtraDraft, producto_id: id, precio_unitario: pv > 0 ? String(pv) : embExtraDraft.precio_unitario });
+                  }}
+                  className="col-span-4 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs outline-none focus:border-amber-500">
                   <option value="">Material…</option>
                   {materialesEmbalaje.map(p => (
                     <option key={p.id} value={p.id}>{p.codigo} · {p.nombre}</option>
@@ -1908,6 +1989,10 @@ export default function Pedidos() {
                 <input type="number" min="0" step="0.01" placeholder="Cantidad"
                   value={embExtraDraft.cantidad}
                   onChange={e => setEmbExtraDraft({ ...embExtraDraft, cantidad: e.target.value })}
+                  className="col-span-2 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-right font-mono outline-none focus:border-amber-500" />
+                <input type="number" min="0" step="0.01" placeholder="€/ud (0=interno)"
+                  value={embExtraDraft.precio_unitario}
+                  onChange={e => setEmbExtraDraft({ ...embExtraDraft, precio_unitario: e.target.value })}
                   className="col-span-2 rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs text-right font-mono outline-none focus:border-amber-500" />
                 <input type="text" placeholder="Notas (opcional)"
                   value={embExtraDraft.notas}
@@ -1969,19 +2054,53 @@ export default function Pedidos() {
             {detalleExtras.length > 0 && (
               <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
                 <p className="text-[11px] font-semibold text-amber-700 uppercase mb-2">Material embalaje extra</p>
-                <p className="text-[10px] text-amber-600 mb-2 italic">No incluido en albarán/factura · consumido del stock · contado en informe materiales</p>
+                <p className="text-[10px] text-amber-600 mb-2 italic">Aparece en albarán/factura · consumido del stock · contado en informe materiales</p>
                 <div className="space-y-1">
-                  {detalleExtras.map(e => (
-                    <div key={e.id} className="flex justify-between text-xs gap-2">
-                      <span className="font-mono text-gray-500 shrink-0">{e.codigo}</span>
-                      <span className="flex-1 text-gray-800 truncate">{e.nombre}</span>
-                      <span className="font-mono">{Number(e.cantidad).toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
-                      {e.notas && <span className="text-gray-500 italic max-w-[40%] truncate">· {e.notas}</span>}
-                    </div>
-                  ))}
+                  {detalleExtras.map(e => {
+                    const cant = Number(e.cantidad);
+                    const precio = Number(e.precio_unitario ?? 0);
+                    const subtotal = cant * precio;
+                    return (
+                      <div key={e.id} className="flex justify-between text-xs gap-2">
+                        <span className="font-mono text-gray-500 shrink-0">{e.codigo}</span>
+                        <span className="flex-1 text-gray-800 truncate">{e.nombre}</span>
+                        <span className="font-mono shrink-0">{cant.toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'}</span>
+                        {precio > 0 && (
+                          <span className="font-mono text-gray-500 shrink-0">× {precio.toFixed(2)} €</span>
+                        )}
+                        {subtotal > 0 && (
+                          <span className="font-bold text-emerald-700 tabular-nums shrink-0">= {subtotal.toFixed(2)} €</span>
+                        )}
+                        {e.notas && <span className="text-gray-500 italic max-w-[30%] truncate">· {e.notas}</span>}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
+            {/* Galería fotos del pedido empaquetado · click para descargar */}
+            {detalleFotos.length > 0 && (() => {
+              const token = localStorage.getItem('loga_token') || sessionStorage.getItem('loga_token') || '';
+              return (
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3">
+                  <p className="text-[11px] font-semibold text-indigo-700 uppercase mb-2">Fotos del pedido empaquetado</p>
+                  <p className="text-[10px] text-indigo-600 mb-2 italic">Click en cualquier foto para descargarla.</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                    {detalleFotos.map(url => (
+                      <button key={url} onClick={() => descargarFoto(url)}
+                        title="Descargar foto"
+                        className="group relative aspect-square rounded-lg overflow-hidden border-2 border-indigo-200 hover:border-indigo-500 transition-colors">
+                        <img src={`${url}?token=${encodeURIComponent(token)}`}
+                          alt="foto pedido" className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
+                          <Download size={20} className="text-white opacity-0 group-hover:opacity-100 drop-shadow-lg" />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             {detalle.total && parseFloat(detalle.total) > 0 && (
               <div className={clsx('rounded-lg border border-green-100 bg-green-50/30 p-3 space-y-1 text-xs', !isAdmin && 'hidden')}>
                 <p className="text-[11px] font-semibold text-green-700 uppercase mb-2">Totales</p>
@@ -2021,7 +2140,7 @@ export default function Pedidos() {
             </div>
           ) : (
             <div className="space-y-4">
-              <p className="text-xs text-gray-500">Se enviara el albaran PDF + trazabilidad + fotos adjuntas al email indicado.</p>
+              <p className="text-xs text-gray-500">Se enviará el albarán PDF al email indicado.</p>
               <FormField label="Email destinatario">
                 <Input type="email" value={emailDest} onChange={e => setEmailDest(e.target.value)} placeholder="cliente@empresa.com" autoFocus />
               </FormField>
@@ -2039,6 +2158,30 @@ export default function Pedidos() {
       {/* Modal seleccion de lotes para consumir */}
       <Modal open={!!consumirPedido} onClose={() => setConsumirPedido(null)} title="Consumir stock" subtitle={consumirPedido?.numero_pedido}>
         <div className="space-y-4">
+          {/* ── Acciones rápidas: descargar hoja preparación + galería fotos ── */}
+          {consumirPedido && (() => {
+            return (
+              <div className="rounded-lg border border-gray-200 bg-gray-50/60 p-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <button onClick={async () => {
+                    try {
+                      const r = await pedidosApi.descargarPreparacion(consumirPedido.id);
+                      const url = URL.createObjectURL(r.data as Blob);
+                      const a = document.createElement('a');
+                      a.href = url; a.download = `preparacion-${consumirPedido.numero_pedido}.pdf`;
+                      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    } catch { notify.error('No se pudo descargar'); }
+                  }}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 text-white text-xs font-bold px-3 py-1.5 hover:bg-indigo-700">
+                    <Download size={12} /> Descargar pedido (hoja preparación)
+                  </button>
+                  <FotosPedidoSection pedidoId={consumirPedido.id} numeroPedido={consumirPedido.numero_pedido ?? ''} />
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ── Preparación: desglose por línea (botes, etiquetas, cajas, líquido) ── */}
           {consumirPedido?.lineas && consumirPedido.lineas.length > 0 && (
             <div className="rounded-xl border-2 border-indigo-200 bg-indigo-50/50 overflow-hidden">
@@ -2069,64 +2212,199 @@ export default function Pedidos() {
                       </div>
                     );
                   }
-                  // Solo necesitamos saber si hay caja en receta legacy para el fallback
-                  // (el modelo nuevo PE=bote no consume cola/etiquetas al vender).
+                  // ── Renderizado visual cajas+sueltos ───────────────────
+                  const cajaId = (linea as any).caja_id;
+                  const necCajas = Number((linea as any).cantidad_cajas ?? 0);
+                  const necSueltos = Number((linea as any).cantidad_botes_sueltos ?? 0);
+                  const cajaProd = cajaId ? productos.find(p => p.id === cajaId) : null;
+                  const botesPorCaja = cajaProd ? Number((cajaProd as any).botes_por_caja ?? (cajaProd as any).unidades_por_envase ?? 0) : 0;
+                  const stockCaja = cajaProd ? parseFloat(cajaProd.stock_actual ?? '0') : 0;
+                  const okStockCaja = cajaProd ? stockCaja >= necCajas : true;
+                  // Caja legacy desde receta (modelo viejo)
+                  const cajaLegacyNombre = !cajaProd && rec.lleva_caja ? (rec as any).caja_nombre : null;
                   return (
-                    <div key={i} className="rounded-lg border border-indigo-200 bg-white p-3 space-y-2">
-                      <div className="flex items-baseline justify-between gap-2 pb-2 border-b border-indigo-100">
-                        <p className="text-xs font-bold text-indigo-900">{prod.nombre}</p>
-                        <p className="text-xs font-mono text-indigo-600">{cant.toLocaleString('es-ES')} ud (botes ya envasados)</p>
+                    <div key={i} className="rounded-xl border-2 border-indigo-200 bg-white shadow-sm overflow-hidden">
+                      {/* Encabezado total botes */}
+                      <div className="bg-indigo-50 px-3 py-2 border-b border-indigo-100">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <p className="text-sm font-bold text-indigo-900 truncate">{prod.nombre}</p>
+                          <p className="text-lg font-mono font-bold text-indigo-700 tabular-nums shrink-0">
+                            {cant.toLocaleString('es-ES')} <span className="text-[10px] uppercase font-semibold">botes</span>
+                          </p>
+                        </div>
                       </div>
-                      <ul className="text-[11px] space-y-1 font-mono">
-                        {/* Caja del nuevo modelo (línea.caja_id) tiene prioridad */}
-                        {(linea as any).caja_id && Number((linea as any).cantidad_cajas) > 0 && (() => {
-                          const cajaProd = productos.find(p => p.id === (linea as any).caja_id);
-                          if (!cajaProd) return null;
-                          const stockCaja = parseFloat(cajaProd.stock_actual ?? '0');
-                          const necCajas = Number((linea as any).cantidad_cajas);
-                          const okStock = stockCaja >= necCajas;
-                          return (
-                            <li className={clsx('flex justify-between gap-2', !okStock && 'text-red-700 bg-red-50 px-1 rounded')}>
-                              <span className="text-gray-600">{okStock ? '✓' : '⚠'} Cajas · {cajaProd.nombre}</span>
-                              <span className="font-bold tabular-nums">{necCajas.toLocaleString('es-ES')} ud {!okStock && <span className="text-[10px]">(stock: {stockCaja.toFixed(0)})</span>}</span>
-                            </li>
-                          );
-                        })()}
-                        {/* Sueltos (botes que no entran en caja completa) */}
-                        {(linea as any).caja_id && Number((linea as any).cantidad_botes_sueltos) > 0 && (
-                          <li className="flex justify-between gap-2 text-amber-700">
-                            <span>Botes sueltos (sin caja)</span>
-                            <span className="font-bold tabular-nums">{Number((linea as any).cantidad_botes_sueltos).toLocaleString('es-ES')} ud</span>
-                          </li>
-                        )}
-                        {/* Modelo legacy: caja viene de receta */}
-                        {!(linea as any).caja_id && rec.lleva_caja && (rec as any).caja_nombre && (
-                          <li className="flex justify-between gap-2">
-                            <span className="text-gray-600">Cajas · {(rec as any).caja_nombre}</span>
-                            <span className="font-bold text-gray-900 tabular-nums">{cant.toLocaleString('es-ES')} ud</span>
-                          </li>
-                        )}
-                      </ul>
-                      <p className="text-[9px] text-gray-400 italic mt-1">Cola, frascos y etiquetas de bote ya estaban dentro de los botes envasados. Si se etiqueta la caja, añádelo como "Material extra".</p>
+
+                      {/* Desglose visual (cajas + sueltos) */}
+                      {cajaProd && (necCajas > 0 || necSueltos > 0) ? (
+                        <div className="p-3 space-y-2">
+                          <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">Cómo se reparte</p>
+
+                          {necCajas > 0 && (
+                            <div className={clsx(
+                              'rounded-lg border p-2.5 flex items-center gap-3',
+                              okStockCaja ? 'border-loga-red/30 bg-loga-red/5' : 'border-red-400 bg-red-100'
+                            )}>
+                              {/* Icono minimalista de caja (Lucide Package) */}
+                              <Package size={28} strokeWidth={1.5} className="text-loga-red shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-bold text-gray-900">
+                                  {necCajas} caja{necCajas !== 1 ? 's' : ''} completa{necCajas !== 1 ? 's' : ''}
+                                </p>
+                                <p className="text-[11px] text-gray-600 truncate">
+                                  {cajaProd.nombre}
+                                  {botesPorCaja > 0 && <span className="text-gray-400"> · {botesPorCaja} botes/caja</span>}
+                                </p>
+                                {!okStockCaja && (
+                                  <p className="text-[10px] text-red-700 font-bold mt-0.5">⚠ Stock: {stockCaja.toFixed(0)} ud · faltan {(necCajas - stockCaja).toFixed(0)}</p>
+                                )}
+                              </div>
+                              <div className="text-right shrink-0">
+                                {okStockCaja
+                                  ? <span className="text-emerald-600 font-bold text-lg">✓</span>
+                                  : <span className="text-red-700 font-bold text-lg">⚠</span>}
+                                {botesPorCaja > 0 && (
+                                  <p className="text-[10px] text-gray-500 tabular-nums">= {necCajas * botesPorCaja} botes</p>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {necSueltos > 0 && (
+                            <div className="rounded-lg border border-loga-red/30 bg-loga-red/5 p-2.5 flex items-center gap-3">
+                              {/* Icono SVG inline · bote de cola estilizado */}
+                              <svg width="24" height="32" viewBox="0 0 24 32" fill="none" strokeWidth="1.5" stroke="currentColor" className="text-loga-red shrink-0">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 2h6v3h-1v2c0 1.5 1 2 2 3 1.5 1.5 2 3 2 5v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V15c0-2 .5-3.5 2-5 1-1 2-1.5 2-3V5H9V2z"/>
+                                <line x1="6" y1="14" x2="18" y2="14"/>
+                              </svg>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-bold text-gray-900">
+                                  {necSueltos} bote{necSueltos !== 1 ? 's' : ''} suelto{necSueltos !== 1 ? 's' : ''}
+                                </p>
+                                <p className="text-[11px] text-gray-600">sin caja · entregar individual</p>
+                              </div>
+                              <p className="text-[10px] text-gray-500 tabular-nums shrink-0">= {necSueltos} botes</p>
+                            </div>
+                          )}
+
+                          {/* Suma visual */}
+                          {botesPorCaja > 0 && (
+                            <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-1.5 text-center">
+                              <p className="text-[11px] text-gray-600 font-mono">
+                                {necCajas > 0 && <span>{necCajas} × {botesPorCaja}</span>}
+                                {necCajas > 0 && necSueltos > 0 && <span className="text-gray-400 mx-1">+</span>}
+                                {necSueltos > 0 && <span>{necSueltos}</span>}
+                                <span className="text-gray-400 mx-1.5">=</span>
+                                <b className="text-indigo-700">{cant.toLocaleString('es-ES')} botes</b>
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ) : cajaLegacyNombre ? (
+                        <div className="p-3">
+                          <div className="rounded-lg border border-loga-red/30 bg-loga-red/5 p-2.5 flex items-center gap-3">
+                            <Package size={28} strokeWidth={1.5} className="text-loga-red shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-gray-900">{cant.toLocaleString('es-ES')} caja{cant !== 1 ? 's' : ''}</p>
+                              <p className="text-[11px] text-gray-600 truncate">{cajaLegacyNombre}</p>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="p-3">
+                          <p className="text-[11px] text-gray-500 italic text-center">Sin caja vinculada — entregar como botes sueltos.</p>
+                        </div>
+                      )}
+
+                      {/* Nota: botes ya envasados */}
+                      <p className="text-[10px] text-gray-400 italic px-3 pb-2 border-t border-gray-100 pt-2">
+                        💡 Los botes ya vienen llenos de cola con su frasco y etiqueta. Solo hay que empaquetar.
+                      </p>
                     </div>
                   );
                 })}
                 {consumirExtras.length > 0 && (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
-                    <p className="text-[10px] uppercase tracking-wider font-bold text-amber-700 mb-1.5">Material extra (preparar también)</p>
-                    <ul className="text-[11px] space-y-0.5 font-mono">
+                  <div className="rounded-xl border-2 border-loga-red/20 bg-white shadow-sm overflow-hidden">
+                    <div className="bg-loga-red/5 px-3 py-2 border-b border-loga-red/10">
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-loga-red">Material extra (preparar también)</p>
+                    </div>
+                    <div className="p-3 space-y-2">
                       {consumirExtras.map(e => {
                         const necesario = Number(e.cantidad);
                         const stock = parseFloat(String(e.stock_actual ?? 0));
                         const okStock = stock >= necesario;
+                        const nombreL = e.nombre.toLowerCase();
+                        // Icono según tipo del extra
+                        const Icono = () => {
+                          if (/palet|palé|pale|tarima/.test(nombreL)) {
+                            // SVG palet: 3 horizontal planks
+                            return (
+                              <svg width="28" height="28" viewBox="0 0 32 32" fill="none" strokeWidth="1.5" stroke="currentColor" className="text-loga-red shrink-0">
+                                <rect x="3" y="6" width="26" height="3" rx="0.5"/>
+                                <rect x="3" y="13" width="26" height="3" rx="0.5"/>
+                                <rect x="3" y="20" width="26" height="3" rx="0.5"/>
+                                <line x1="7" y1="6" x2="7" y2="26"/>
+                                <line x1="16" y1="6" x2="16" y2="26"/>
+                                <line x1="25" y1="6" x2="25" y2="26"/>
+                              </svg>
+                            );
+                          }
+                          if (/film|stretch|retract|envolver/.test(nombreL)) {
+                            // SVG film stretch: rollo
+                            return (
+                              <svg width="28" height="28" viewBox="0 0 32 32" fill="none" strokeWidth="1.5" stroke="currentColor" className="text-loga-red shrink-0">
+                                <ellipse cx="16" cy="8" rx="10" ry="3"/>
+                                <path d="M6 8v16c0 1.66 4.48 3 10 3s10-1.34 10-3V8"/>
+                                <path d="M6 16c0 1.66 4.48 3 10 3s10-1.34 10-3"/>
+                              </svg>
+                            );
+                          }
+                          if (/etiqueta|sticker|pegatina/.test(nombreL)) {
+                            // SVG etiqueta: tag
+                            return (
+                              <svg width="28" height="28" viewBox="0 0 32 32" fill="none" strokeWidth="1.5" stroke="currentColor" className="text-loga-red shrink-0">
+                                <path d="M5 5h14l8 8-14 14L5 19V5z"/>
+                                <circle cx="11" cy="11" r="1.5"/>
+                              </svg>
+                            );
+                          }
+                          if (/saco|bolsa/.test(nombreL)) {
+                            // SVG saco
+                            return (
+                              <svg width="28" height="28" viewBox="0 0 32 32" fill="none" strokeWidth="1.5" stroke="currentColor" className="text-loga-red shrink-0">
+                                <path d="M10 7l2-4h8l2 4M8 7h16l2 18a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3L8 7z"/>
+                              </svg>
+                            );
+                          }
+                          // default: Package de Lucide
+                          return <Package size={28} strokeWidth={1.5} className="text-loga-red shrink-0" />;
+                        };
                         return (
-                          <li key={e.id} className={clsx('flex justify-between gap-2', !okStock && 'text-red-700 bg-red-50 px-1 rounded')}>
-                            <span className="text-gray-600">{okStock ? '✓' : '⚠'} {e.codigo} · {e.nombre}{e.notas && <span className="text-gray-400 italic"> · {e.notas}</span>}</span>
-                            <span className="font-bold tabular-nums">{necesario.toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'} {!okStock && <span className="text-[10px]">(stock: {stock.toFixed(0)})</span>}</span>
-                          </li>
+                          <div key={e.id} className={clsx(
+                            'rounded-lg border p-2.5 flex items-center gap-3',
+                            okStock ? 'border-loga-red/30 bg-loga-red/5' : 'border-red-400 bg-red-100'
+                          )}>
+                            <Icono />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-bold text-gray-900">
+                                {necesario.toLocaleString('es-ES')} {e.unidad_medida ?? 'ud'} · {e.nombre}
+                              </p>
+                              <p className="text-[11px] text-gray-500">
+                                <span className="font-mono text-gray-400">{e.codigo}</span>
+                                {e.notas && <span className="italic"> · {e.notas}</span>}
+                              </p>
+                              {!okStock && (
+                                <p className="text-[10px] text-red-700 font-bold mt-0.5">⚠ Stock: {stock.toFixed(0)} · faltan {(necesario - stock).toFixed(0)}</p>
+                              )}
+                            </div>
+                            <div className="shrink-0">
+                              {okStock
+                                ? <span className="text-emerald-600 font-bold text-lg">✓</span>
+                                : <span className="text-red-700 font-bold text-lg">⚠</span>}
+                            </div>
+                          </div>
                         );
                       })}
-                    </ul>
+                    </div>
                   </div>
                 )}
 

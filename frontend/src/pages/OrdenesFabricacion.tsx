@@ -508,6 +508,7 @@ export default function OrdenesFabricacion() {
     const cantidad = parseFloat(o.cantidad_planificada).toLocaleString('es-ES', { maximumFractionDigits: 0 });
     return norm(o.numero_orden).includes(q)
       || (qDigits.length > 0 && numPart.endsWith(qDigits))
+      || norm(o.lote_producido_codigo ?? '').includes(q)
       || norm(o.receta_nombre ?? '').includes(q)
       || norm(o.producto_nombre ?? '').includes(q)
       || norm(o.cliente ?? '').includes(q)
@@ -635,18 +636,24 @@ export default function OrdenesFabricacion() {
                         Seleccionar Receta *
                       </label>
                       {recetas.length > 0 ? (
-                        <select
-                          value={form.receta_id}
-                          onChange={(e) => setForm((f) => ({ ...f, receta_id: e.target.value }))}
-                          className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
-                        >
-                          <option value="">— Seleccionar {tabProd === 'envasado' ? 'envasado' : 'receta'} —</option>
-                          {recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === tabProd).map((r) => (
-                            <option key={r.id} value={r.id}>
-                              {r.nombre} → {r.producto_nombre}
-                            </option>
-                          ))}
-                        </select>
+                        (() => {
+                          const recetasTab = recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === tabProd);
+                          const sel = recetasTab.find(r => r.id === form.receta_id);
+                          return (
+                            <SearchSelect
+                              options={recetasTab.map(r => ({
+                                id: r.id,
+                                label: r.nombre,
+                                sub: r.producto_nombre,
+                              }))}
+                              value={form.receta_id}
+                              onChange={(id) => setForm((f) => ({ ...f, receta_id: id }))}
+                              placeholder={`Buscar ${tabProd === 'envasado' ? 'envasado' : 'receta'}...`}
+                              selectedLabel={sel?.nombre}
+                              selectedSub={sel?.producto_nombre}
+                            />
+                          );
+                        })()
                       ) : (
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs text-gray-400 text-center">
                           <p>No hay recetas activas. Crea una receta antes de fabricar.</p>

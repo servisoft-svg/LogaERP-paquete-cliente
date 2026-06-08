@@ -9,6 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
+import { decryptSecret } from '../lib/secretCrypto';
 
 interface ConfigEmail {
   smtp_host: string;
@@ -83,7 +84,7 @@ class PedidoAlbaranService {
       host: cfg?.smtp_host || process.env.SMTP_HOST,
       port: cfg?.smtp_port || Number(process.env.SMTP_PORT) || 587,
       secure: false,
-      auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc || process.env.SMTP_PASS },
+      auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS },
     });
 
     const items = lineas.length > 0 ? lineas : [{ producto_nombre_rel: pedido.producto_nombre, cantidad: pedido.cantidad, unidad_medida: pedido.unidad_medida }];
@@ -137,7 +138,7 @@ class PedidoAlbaranService {
         host: cfg?.smtp_host || process.env.SMTP_HOST,
         port: cfg?.smtp_port || Number(process.env.SMTP_PORT) || 587,
         secure: false,
-        auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc || process.env.SMTP_PASS },
+        auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS },
       });
       await transporter.sendMail({
         from: cfg?.email_remitente || process.env.EMAIL_FROM || 'Colas Loga <erp@loga.es>',
@@ -192,7 +193,7 @@ class PedidoAlbaranService {
       host: cfg?.smtp_host || process.env.SMTP_HOST,
       port: cfg?.smtp_port || Number(process.env.SMTP_PORT) || 587,
       secure: false,
-      auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc || process.env.SMTP_PASS },
+      auth: { user: cfg?.smtp_user || process.env.SMTP_USER, pass: cfg?.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS },
     });
 
     const saludo = pedido.cliente_nombre ? `Estimado/a ${pedido.cliente_nombre}` : 'Estimado cliente';

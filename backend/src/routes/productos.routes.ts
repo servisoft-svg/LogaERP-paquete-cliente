@@ -711,7 +711,8 @@ router.get('/:id/cajas-compatibles', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT p.id, p.codigo, p.nombre, p.botes_por_caja, p.unidades_por_envase,
-              p.material_embalaje, p.peso_material_vacio_kg, p.stock_actual
+              p.material_embalaje, p.peso_material_vacio_kg, p.stock_actual,
+              p.subcategoria_me
        FROM caja_botes_compatibles cbc
        JOIN productos p ON p.id = cbc.caja_id
        WHERE cbc.bote_id = $1 AND p.activo = TRUE
@@ -721,6 +722,54 @@ router.get('/:id/cajas-compatibles', async (req, res, next) => {
     return res.json(rows);
   } catch (err) {
     return next(err);
+  }
+});
+
+// PUT — reemplaza la lista de cajas vinculadas para un bote (vista desde el PE).
+// Mismo M2M que el endpoint inverso de la caja — bidireccional automático.
+// Body: { caja_ids: string[] }
+router.put('/:id/cajas-compatibles', adminOnly, async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { caja_ids } = req.body ?? {};
+    if (!Array.isArray(caja_ids)) {
+      await client.query('ROLLBACK');
+      return next(AppError.validacion('caja_ids debe ser array'));
+    }
+    const { rows: [bote] } = await client.query<{ tipo: string }>(
+      `SELECT tipo::text AS tipo FROM productos WHERE id = $1 FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!bote) {
+      await client.query('ROLLBACK');
+      return next(AppError.notFound('Producto', req.params.id));
+    }
+    // Borra todas las vinculaciones previas DESDE este bote
+    await client.query(`DELETE FROM caja_botes_compatibles WHERE bote_id = $1`, [req.params.id]);
+    if (caja_ids.length > 0) {
+      // Cualquier material_embalaje activo (no restringimos por subcategoría —
+      // el usuario clasifica con nombres libres como "Cartón", "Madera", etc.).
+      const { rows: validas } = await client.query<{ id: string }>(
+        `SELECT id FROM productos
+          WHERE id = ANY($1::uuid[])
+            AND tipo = 'material_embalaje' AND activo = TRUE`,
+        [caja_ids]
+      );
+      for (const v of validas) {
+        await client.query(
+          `INSERT INTO caja_botes_compatibles (caja_id, bote_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [v.id, req.params.id]
+        );
+      }
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, vinculadas: caja_ids.length });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    return next(err);
+  } finally {
+    client.release();
   }
 });
 

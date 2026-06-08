@@ -64,6 +64,8 @@ export async function uploadsAuthMiddleware(req: Request, res: Response, next: N
        WHERE archivos @> jsonb_build_array(jsonb_build_object('url', $1::text))
      UNION ALL
      SELECT 'producto_sds' FROM productos WHERE sds_url = $1
+     UNION ALL
+     SELECT 'pedido_foto' FROM pedidos WHERE foto_urls @> to_jsonb($1::text)
      LIMIT 1`,
     [path]
   );

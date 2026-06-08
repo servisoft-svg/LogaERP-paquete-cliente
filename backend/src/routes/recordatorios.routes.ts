@@ -55,7 +55,12 @@ router.get('/', async (req, res) => {
              r.usuario_id, r.destinatarios, r.destinatario_roles,
              r.con_sonido, r.con_notificacion, r.entregados_por, r.origen, r.created_at,
              r.referencia_tipo, r.referencia_id,
-             u.nombre AS creador_nombre, u.rol::text AS creador_rol
+             u.nombre AS creador_nombre, u.rol::text AS creador_rol,
+             COALESCE(
+               (SELECT array_agg(uu.nombre ORDER BY uu.nombre)
+                FROM usuarios uu WHERE uu.id = ANY(COALESCE(r.entregados_por, '{}'::UUID[]))),
+               '{}'::TEXT[]
+             ) AS entregados_nombres
       FROM recordatorios r
       LEFT JOIN usuarios u ON u.id = r.usuario_id
       WHERE (
@@ -132,10 +137,15 @@ router.post('/', async (req, res) => {
     }
     // Si fecha no viene, deriva del timestamp
     const fechaFinal = fecha ?? String(programado_para).slice(0, 10);
-    // Default destinatarios: el creador
-    const destFinal: string[] = Array.isArray(destinatarios) && destinatarios.length > 0
-      ? destinatarios : [user.id];
-    const rolesFinal: string[] = Array.isArray(destinatario_roles) ? destinatario_roles : [];
+    // Si el cliente especificó roles (ej. "Operarios" o "Todos"), respetamos
+    // SOLO ese filtro — no añadimos al creador como destinatario. Solo cuando
+    // no hay ni roles ni destinatarios explícitos caemos al fallback "para mí"
+    // (creador como único destinatario), comportamiento clásico de "Solo a mí".
+    const tieneDest = Array.isArray(destinatarios) && destinatarios.length > 0;
+    const tieneRoles = Array.isArray(destinatario_roles) && destinatario_roles.length > 0;
+    const destFinal: string[] = tieneDest ? destinatarios
+      : (tieneRoles ? [] : [user.id]);
+    const rolesFinal: string[] = tieneRoles ? destinatario_roles : [];
 
     const { rows: [r] } = await pool.query(
       `INSERT INTO recordatorios

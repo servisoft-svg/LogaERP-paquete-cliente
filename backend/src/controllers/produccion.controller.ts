@@ -11,6 +11,7 @@ import { alertaService }          from '../services/alerta.service';
 import { logger }                 from '../lib/logger';
 import { buildEtiquetaL800Pdf }   from '../lib/pdfEtiquetaL800';
 import { buildEtiquetaL800Ezpx }  from '../lib/ezpxEtiquetaL800';
+import { decryptSecret }          from '../lib/secretCrypto';
 
 export const produccionController = {
   async crear(req: Request, res: Response) {
@@ -1164,7 +1165,7 @@ export const produccionController = {
         secure: false,
         auth: {
           user: cfg.smtp_user || process.env.SMTP_USER,
-          pass: cfg.smtp_pass_enc || process.env.SMTP_PASS,
+          pass: cfg.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS,
         },
       });
 
@@ -1493,7 +1494,7 @@ export const produccionController = {
       // y el lote.producto_id debe matchear el producto de la receta (PT, no MPs).
       // En envasado, prioriza op.producto_envasado_id (el PE producido, no el granel).
       const { rows: [orden] } = await pool.query(
-        `SELECT op.id, op.cantidad_planificada, op.estado, op.tipo_orden, op.producto_envasado_id,
+        `SELECT op.id, op.cantidad_planificada, op.cantidad_real_producida, op.estado, op.tipo_orden, op.producto_envasado_id,
                 COALESCE(pe.id, p.id)           AS producto_id,
                 COALESCE(pe.codigo, p.codigo)   AS producto_codigo,
                 COALESCE(pe.nombre, p.nombre)   AS producto_nombre,
@@ -1517,10 +1518,15 @@ export const produccionController = {
         [id, orden.producto_id]
       );
 
-      // Permite overrides desde query: lote / cantidad / contenedor / ean / qr
-      // Útil cuando el operario quiere imprimir variante manual (corrección, prueba…).
+      // Cantidad a imprimir: real producida (si el operario la reportó) >
+      // cantidad_inicial del lote (lo que se grabó al crearlo) > planificada.
+      // NUNCA caer a `cantidad_planificada` si hay lote: el lote refleja lo
+      // realmente fabricado.
       const loteAuto = lote?.lote_interno ?? 'PENDIENTE';
-      const cantidadAuto = lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada);
+      const cantidadAuto =
+        orden.cantidad_real_producida != null && parseFloat(orden.cantidad_real_producida) > 0
+          ? parseFloat(orden.cantidad_real_producida)
+          : (lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada));
 
       // URL del QR → abre la orden en la app de fabricación.
       // Prioridad: CORS_ORIGIN (primer valor) → header Origin → host del request.
@@ -1591,7 +1597,7 @@ export const produccionController = {
       const { id } = req.params;
 
       const { rows: [orden] } = await pool.query(
-        `SELECT op.id, op.cantidad_planificada, op.estado, op.tipo_orden, op.producto_envasado_id,
+        `SELECT op.id, op.cantidad_planificada, op.cantidad_real_producida, op.estado, op.tipo_orden, op.producto_envasado_id,
                 COALESCE(pe.id, p.id)           AS producto_id,
                 COALESCE(pe.codigo, p.codigo)   AS producto_codigo,
                 COALESCE(pe.nombre, p.nombre)   AS producto_nombre,
@@ -1616,7 +1622,10 @@ export const produccionController = {
       );
 
       const loteAuto = lote?.lote_interno ?? 'PENDIENTE';
-      const cantidadAuto = lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada);
+      const cantidadAuto =
+        orden.cantidad_real_producida != null && parseFloat(orden.cantidad_real_producida) > 0
+          ? parseFloat(orden.cantidad_real_producida)
+          : (lote ? parseFloat(lote.cantidad_inicial) : parseFloat(orden.cantidad_planificada));
       const nombreCom = (orden.producto_nombre_comercial ?? '').trim();
       const nombre = (orden.producto_nombre ?? '').trim();
 

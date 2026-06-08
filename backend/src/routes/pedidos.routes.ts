@@ -1,5 +1,8 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
 import { pool, acquireProductLocks, withSerializableTransaction } from '../db/pool';
 import { AppError } from '../lib/AppError';
 import { invalidarCacheFinanzas } from './finanzas.routes';
@@ -8,6 +11,7 @@ import { automatizacionesService } from '../services/automatizaciones.service';
 import { pedidoAlbaranService } from '../services/pedido-albaran.service';
 import { adminOnly } from '../middleware/auth';
 import { logger } from '../lib/logger';
+import { decryptSecret } from '../lib/secretCrypto';
 
 const router = Router();
 
@@ -17,6 +21,7 @@ router.get('/', async (req, res) => {
     const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10) || 1);
     const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? '200'), 10) || 200));
     const offset = (page - 1) * limit;
+    const clienteId = String(req.query.cliente_id ?? '').trim() || null;
     // Subquery `coste_real`: suma de (cantidad consumida × precio_compra del lote)
     // a partir de reservas_stock con estado='consumida' (lo que realmente se gastó
     // de cada lote concreto). Solo lectura — NO modifica nada de stock ni reservas.
@@ -45,9 +50,10 @@ router.get('/', async (req, res) => {
       LEFT JOIN clientes c ON c.id = pd.cliente_id
       LEFT JOIN productos p ON p.id = pd.producto_id
       LEFT JOIN ordenes_produccion op ON op.id = pd.orden_produccion_id
+      ${clienteId ? 'WHERE pd.cliente_id = $3::UUID' : ''}
       ORDER BY pd.created_at DESC
       LIMIT $1 OFFSET $2
-    `, [limit, offset]);
+    `, clienteId ? [limit, offset, clienteId] : [limit, offset]);
     // Load lineas in a single batch query (fix N+1)
     const pedidoIds = rows.map(r => r.id);
     if (pedidoIds.length > 0) {
@@ -533,6 +539,8 @@ router.delete('/:id', adminOnly, async (req, res) => {
       // Recuperar los stock_moves de tipo 'salida' generados por este pedido.
       // Filtra por referencia_externa precisa y, como fallback, por motivo
       // legacy (pedidos consumidos antes de la introducción de referencia_externa).
+      // Captura TRES patrones: PED:<id> (líneas), PED-CAJA:<id> y PED-EXTRA:<id>.
+      // Antes solo `PED:` → cajas y extras quedaban descontados al cancelar.
       const { rows: salidas } = await client.query<{
         id: string; producto_id: string; lote_id: string | null; cantidad: string;
       }>(`SELECT id, producto_id, lote_id, cantidad
@@ -541,39 +549,64 @@ router.delete('/:id', adminOnly, async (req, res) => {
             AND cantidad < 0
             AND (
               referencia_externa = 'PED:' || $1::text
+              OR referencia_externa = 'PED-CAJA:' || $1::text
+              OR referencia_externa = 'PED-EXTRA:' || $1::text
               OR motivo LIKE 'Pedido ' || $2 || ' -%'
             )
           ORDER BY created_at ASC`,
          [pedido.id, pedido.numero_pedido]);
 
       for (const mov of salidas) {
-        if (!mov.lote_id) continue; // sin lote no sabemos a dónde devolver
         const devolverCant = Math.abs(parseFloat(mov.cantidad));
         if (devolverCant <= 0) continue;
 
-        // Bloquear lote y devolver. El trigger 025 recalcula productos.stock_actual.
-        const { rows: [loteActual] } = await client.query<{ cantidad_actual: string }>(
-          `SELECT cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`, [mov.lote_id]
-        );
-        if (!loteActual) continue;
-        const antes = parseFloat(loteActual.cantidad_actual);
-        const despues = antes + devolverCant;
-        await client.query(
-          `UPDATE lotes SET cantidad_actual = $1::NUMERIC WHERE id = $2`,
-          [despues.toFixed(6), mov.lote_id]
-        );
-
-        await client.query(
-          `INSERT INTO stock_moves
-             (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues,
-              referencia_externa, usuario_id, motivo)
-           VALUES ($1, $2, 'entrada', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC,
-                   'PED-REV:' || $6, $7, $8)`,
-          [mov.producto_id, mov.lote_id,
-           devolverCant.toFixed(6), antes.toFixed(6), despues.toFixed(6),
-           pedido.id, (req as any).user?.id ?? null,
-           `Reversión cancelación Pedido ${pedido.numero_pedido}${pedido.cliente_nombre ? ' - ' + pedido.cliente_nombre : ''}`]
-        );
+        if (mov.lote_id) {
+          // Caso normal: devolver al lote. Trigger 025 recalcula productos.stock_actual.
+          const { rows: [loteActual] } = await client.query<{ cantidad_actual: string }>(
+            `SELECT cantidad_actual FROM lotes WHERE id = $1 FOR UPDATE`, [mov.lote_id]
+          );
+          if (!loteActual) continue;
+          const antes = parseFloat(loteActual.cantidad_actual);
+          const despues = antes + devolverCant;
+          await client.query(
+            `UPDATE lotes SET cantidad_actual = $1::NUMERIC WHERE id = $2`,
+            [despues.toFixed(6), mov.lote_id]
+          );
+          await client.query(
+            `INSERT INTO stock_moves
+               (producto_id, lote_id, tipo, cantidad, cantidad_antes, cantidad_despues,
+                referencia_externa, usuario_id, motivo)
+             VALUES ($1, $2, 'entrada', $3::NUMERIC, $4::NUMERIC, $5::NUMERIC,
+                     'PED-REV:' || $6, $7, $8)`,
+            [mov.producto_id, mov.lote_id,
+             devolverCant.toFixed(6), antes.toFixed(6), despues.toFixed(6),
+             pedido.id, (req as any).user?.id ?? null,
+             `Reversión cancelación Pedido ${pedido.numero_pedido}${pedido.cliente_nombre ? ' - ' + pedido.cliente_nombre : ''}`]
+          );
+        } else {
+          // Salida "sin lote" (cajas/extras descontados directamente de stock_actual):
+          // devolver al stock del producto directamente.
+          const { rows: [prodNow] } = await client.query<{ stock_actual: string }>(
+            `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [mov.producto_id]
+          );
+          if (!prodNow) continue;
+          const antes = parseFloat(prodNow.stock_actual);
+          const despues = antes + devolverCant;
+          await client.query(
+            `UPDATE productos SET stock_actual = stock_actual + $1::NUMERIC WHERE id = $2`,
+            [devolverCant.toFixed(6), mov.producto_id]
+          );
+          await client.query(
+            `INSERT INTO stock_moves
+               (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues,
+                referencia_externa, usuario_id, motivo)
+             VALUES ($1, 'entrada', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC,
+                     'PED-REV:' || $5, $6, $7)`,
+            [mov.producto_id, devolverCant.toFixed(6), antes.toFixed(6), despues.toFixed(6),
+             pedido.id, (req as any).user?.id ?? null,
+             `Reversión cancelación Pedido ${pedido.numero_pedido} (sin lote)`]
+          );
+        }
         reversiones++;
       }
     }
@@ -970,13 +1003,21 @@ router.post('/:id/consumir', async (req, res, next) => {
         restanteCaja -= usar;
       }
       if (restanteCaja > 0.001) {
-        // Sin lotes suficientes — descuento sin lote
+        // Sin lotes suficientes — descuento sin lote.
+        // Re-leemos stock real de productos (con FOR UPDATE) por si el trigger
+        // de lotes lo dejó en valor distinto del `stockCaja` local: así
+        // cantidad_antes/cantidad_despues en stock_moves reflejan estado real.
+        const { rows: [prodCajaNow] } = await client.query<{ stock_actual: string }>(
+          `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [lc.caja_id]
+        );
+        const antes = parseFloat(prodCajaNow?.stock_actual ?? '0');
+        const despues = antes - restanteCaja;
         await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
           [restanteCaja.toFixed(6), lc.caja_id]);
         await client.query(
           `INSERT INTO stock_moves (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
            VALUES ($1, 'salida', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC, 'PED-CAJA:' || $6, $5)`,
-          [lc.caja_id, (-restanteCaja).toFixed(6), stockCaja.toFixed(6), (stockCaja - restanteCaja).toFixed(6),
+          [lc.caja_id, (-restanteCaja).toFixed(6), antes.toFixed(6), despues.toFixed(6),
            `Caja ${lc.caja_nombre} sin lote para ${lc.producto_nombre}`, pedido.id]
         );
       }
@@ -1035,12 +1076,19 @@ router.post('/:id/consumir', async (req, res, next) => {
       }
       if (restante > 0.001) {
         // Cubrir resto con descuento sin lote (raro: extras pueden no estar en lotes).
+        // Re-leemos stock real (FOR UPDATE) para que stock_moves refleje
+        // exactamente el estado del producto antes/después del UPDATE.
+        const { rows: [prodExNow] } = await client.query<{ stock_actual: string }>(
+          `SELECT stock_actual FROM productos WHERE id = $1 FOR UPDATE`, [ex.producto_id]
+        );
+        const antes = parseFloat(prodExNow?.stock_actual ?? '0');
+        const despues = antes - restante;
         await client.query(`UPDATE productos SET stock_actual = stock_actual - $1::NUMERIC WHERE id = $2`,
           [restante.toFixed(6), ex.producto_id]);
         await client.query(
           `INSERT INTO stock_moves (producto_id, tipo, cantidad, cantidad_antes, cantidad_despues, referencia_externa, motivo)
            VALUES ($1, 'salida', $2::NUMERIC, $3::NUMERIC, $4::NUMERIC, 'PED-EXTRA:' || $6, $5)`,
-          [ex.producto_id, (-restante).toFixed(6), stockEx.toFixed(6), (stockEx - restante).toFixed(6),
+          [ex.producto_id, (-restante).toFixed(6), antes.toFixed(6), despues.toFixed(6),
            `Extra pedido ${pedido.numero_pedido}: ${restante.toFixed(2)} ${ex.unidad_medida} ${ex.nombre} (sin lote)`, pedido.id]
         );
       }
@@ -1111,6 +1159,32 @@ async function cargarDatosDoc(id: string): Promise<{ pedido: any; lineas: any[];
     lineas.push({
       producto_nombre_rel: null, producto_nombre: pedido.producto_nombre, producto_codigo: pedido.producto_codigo,
       cantidad: pedido.cantidad, unidad_medida: pedido.unidad_medida, precio_unitario: null, subtotal: null,
+    });
+  }
+
+  // Extras de embalaje: SIEMPRE aparecen en albarán/factura como líneas
+  // adicionales. Si precio_unitario = 0 sale con precio 0 € (cargo simbólico).
+  // El admin puede editar el precio por extra en el modal del pedido.
+  const { rows: extrasFacturables } = await pool.query(`
+    SELECT pe.cantidad, pe.precio_unitario,
+           p.nombre AS producto_nombre_rel, p.codigo AS producto_codigo, p.unidad_medida,
+           pe.created_at
+    FROM pedido_embalajes_extra pe
+    JOIN productos p ON p.id = pe.producto_id
+    WHERE pe.pedido_id = $1
+    ORDER BY pe.created_at ASC`, [id]);
+  for (const ex of extrasFacturables) {
+    const cant = parseFloat(ex.cantidad);
+    const precio = parseFloat(ex.precio_unitario);
+    lineas.push({
+      producto_nombre_rel: ex.producto_nombre_rel,
+      producto_nombre: ex.producto_nombre_rel,
+      producto_codigo: ex.producto_codigo,
+      cantidad: cant,
+      unidad_medida: ex.unidad_medida ?? 'ud',
+      precio_unitario: precio,
+      subtotal: cant * precio,
+      es_extra: true,
     });
   }
 
@@ -1194,7 +1268,9 @@ router.get('/:id/factura.pdf', async (req, res) => {
   }
 });
 
-// POST /api/pedidos/:id/enviar-albaran — envia albaran PDF + trazabilidad + fotos + docs por email
+// POST /api/pedidos/:id/enviar-albaran — envia SOLO el albarán PDF al cliente.
+// Antes adjuntaba trazabilidad + fotos de fabricación, pero el cliente no
+// necesita ver el proceso interno — solo el documento mercantil.
 router.post('/:id/enviar-albaran', adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1228,52 +1304,11 @@ router.post('/:id/enviar-albaran', adminOnly, async (req, res) => {
       req.on('error', reject);
     });
 
-    // Attachments: albaran PDF
+    // Attachments: SOLO el albarán PDF. Trazabilidad y fotos de fabricación
+    // no se envían al cliente — son datos internos de proceso.
     const attachments: { filename: string; content?: Buffer; path?: string; contentType?: string }[] = [
       { filename: `albaran-${pedido.numero_pedido}.pdf`, content: pdfBuffer, contentType: 'application/pdf' },
     ];
-
-    // Produccion: trazabilidad PDF + fotos + docs
-    if (pedido.orden_produccion_id) {
-      // Trazabilidad PDF
-      try {
-        const trazBuffer = await new Promise<Buffer>((resolve, reject) => {
-          const port = process.env.PORT || 3001;
-          const req = http.get(`http://localhost:${port}/api/produccion/${pedido.orden_produccion_id}/trazabilidad.pdf`, { timeout: 10_000 }, (r: any) => {
-            const ch: Buffer[] = [];
-            r.on('data', (c: Buffer) => ch.push(c));
-            r.on('end', () => resolve(Buffer.concat(ch)));
-            r.on('error', reject);
-          });
-          req.on('timeout', () => req.destroy(new Error('TRAZABILIDAD_TIMEOUT')));
-          req.on('error', reject);
-        });
-        attachments.push({ filename: `trazabilidad-${pedido.numero_pedido}.pdf`, content: trazBuffer, contentType: 'application/pdf' });
-      } catch (trazErr) { logger.error('[enviar-albaran] trazabilidad fail', { err: trazErr }); }
-
-      // Fotos + documentos. Validamos que el path resuelto está dentro de uploads/
-      // (anti path-traversal: si la URL tiene ../../ no escapará del sandbox).
-      const uploadsRoot = path.resolve(process.cwd(), 'uploads');
-      const safeJoin = (rel: string): string | null => {
-        const resolved = path.resolve(process.cwd(), rel.replace(/^\//, ''));
-        if (!resolved.startsWith(uploadsRoot + path.sep)) return null;
-        return resolved;
-      };
-      const { rows: [orden] } = await pool.query(`SELECT foto_urls, archivos, registro_limpieza FROM ordenes_produccion WHERE id = $1`, [pedido.orden_produccion_id]);
-      if (orden) {
-        const fotos: string[] = orden.foto_urls ?? [];
-        for (let i = 0; i < fotos.length; i++) {
-          const p = safeJoin(fotos[i]);
-          if (p && fs.existsSync(p)) attachments.push({ filename: `foto-lote-${i + 1}${path.extname(p)}`, path: p });
-        }
-        const archivos: { url: string; nombre: string }[] = orden.archivos ?? [];
-        for (const a of archivos) {
-          const p = safeJoin(a.url);
-          // filename en el adjunto: solo basename para evitar headers raros
-          if (p && fs.existsSync(p)) attachments.push({ filename: path.basename(a.nombre || path.basename(p)), path: p });
-        }
-      }
-    }
 
     // SMTP
     const { rows: [cfg] } = await pool.query(`SELECT * FROM configuracion_global WHERE id = 1`);
@@ -1281,7 +1316,7 @@ router.post('/:id/enviar-albaran', adminOnly, async (req, res) => {
       host: cfg.smtp_host || process.env.SMTP_HOST,
       port: cfg.smtp_port || Number(process.env.SMTP_PORT) || 587,
       secure: false,
-      auth: { user: cfg.smtp_user || process.env.SMTP_USER, pass: cfg.smtp_pass_enc || process.env.SMTP_PASS },
+      auth: { user: cfg.smtp_user || process.env.SMTP_USER, pass: cfg.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS },
     });
 
     const emailItems = lineas.length > 0 ? lineas : [{ producto_nombre_rel: pedido.producto_nombre, cantidad: pedido.cantidad, unidad_medida: pedido.unidad_medida }];
@@ -1377,8 +1412,9 @@ router.get('/:id/embalajes-extra', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `SELECT pe.id, pe.producto_id, pe.cantidad, pe.notas, pe.created_at,
+              pe.precio_unitario,
               p.codigo, p.nombre, p.material_embalaje, p.peso_material_vacio_kg, p.unidad_medida,
-              p.stock_actual
+              p.stock_actual, p.precio_venta
          FROM pedido_embalajes_extra pe
          JOIN productos p ON p.id = pe.producto_id
         WHERE pe.pedido_id = $1
@@ -1393,31 +1429,70 @@ router.get('/:id/embalajes-extra', async (req, res, next) => {
 
 router.post('/:id/embalajes-extra', async (req, res, next) => {
   try {
-    const { producto_id, cantidad, notas } = req.body ?? {};
+    const { producto_id, cantidad, notas, precio_unitario } = req.body ?? {};
     if (!producto_id || !Number.isFinite(Number(cantidad)) || Number(cantidad) <= 0) {
       return next(AppError.validacion('producto_id y cantidad>0 obligatorios', { campo: 'cantidad' }));
     }
-    // El producto debe ser tipo material_embalaje (no PE/PF: para esos hay líneas).
-    const { rows: [prod] } = await pool.query<{ tipo: string; activo: boolean }>(
-      `SELECT tipo::text AS tipo, activo FROM productos WHERE id = $1`,
+    // Producto debe ser material_embalaje. Cargamos precio_venta para default.
+    const { rows: [prod] } = await pool.query<{ tipo: string; activo: boolean; precio_venta: string | null }>(
+      `SELECT tipo::text AS tipo, activo, precio_venta FROM productos WHERE id = $1`,
       [producto_id]
     );
     if (!prod || !prod.activo) return next(AppError.notFound('Producto', producto_id));
     if (prod.tipo !== 'material_embalaje') {
       return next(AppError.validacion('Solo material_embalaje puede ir como extra de pedido', { tipo: prod.tipo }));
     }
-    // Verifica pedido existe (FK ya lo hace, pero error más limpio).
     const { rows: [ped] } = await pool.query(`SELECT id FROM pedidos WHERE id = $1`, [req.params.id]);
     if (!ped) return next(AppError.notFound('Pedido', req.params.id));
 
+    // Default precio = precio_venta del producto si el cliente no manda otro.
+    const precioFinal = (precio_unitario !== undefined && precio_unitario !== null && Number.isFinite(Number(precio_unitario)))
+      ? Number(precio_unitario)
+      : parseFloat(prod.precio_venta ?? '0') || 0;
+
     const userId = (req as any).user?.id ?? null;
     const { rows: [extra] } = await pool.query(
-      `INSERT INTO pedido_embalajes_extra (pedido_id, producto_id, cantidad, notas, creado_por)
-       VALUES ($1, $2, $3::NUMERIC, $4, $5)
-       RETURNING id, pedido_id, producto_id, cantidad, notas, created_at`,
-      [req.params.id, producto_id, Number(cantidad).toFixed(6), notas ?? null, userId]
+      `INSERT INTO pedido_embalajes_extra (pedido_id, producto_id, cantidad, notas, precio_unitario, creado_por)
+       VALUES ($1, $2, $3::NUMERIC, $4, $5::NUMERIC, $6)
+       RETURNING id, pedido_id, producto_id, cantidad, notas, precio_unitario, created_at`,
+      [req.params.id, producto_id, Number(cantidad).toFixed(6), notas ?? null, precioFinal.toFixed(6), userId]
     );
     return res.status(201).json(extra);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// PUT — actualiza precio o cantidad de un extra existente
+router.put('/:id/embalajes-extra/:extraId', async (req, res, next) => {
+  try {
+    const { precio_unitario, cantidad, notas } = req.body ?? {};
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (precio_unitario !== undefined) {
+      updates.push(`precio_unitario = $${idx++}::NUMERIC`);
+      params.push(Number(precio_unitario).toFixed(6));
+    }
+    if (cantidad !== undefined) {
+      if (!(Number(cantidad) > 0)) return next(AppError.validacion('cantidad > 0'));
+      updates.push(`cantidad = $${idx++}::NUMERIC`);
+      params.push(Number(cantidad).toFixed(6));
+    }
+    if (notas !== undefined) {
+      updates.push(`notas = $${idx++}`);
+      params.push(notas);
+    }
+    if (updates.length === 0) return res.json({ ok: true });
+    params.push(req.params.extraId, req.params.id);
+    const { rows: [up] } = await pool.query(
+      `UPDATE pedido_embalajes_extra SET ${updates.join(', ')}
+       WHERE id = $${idx++} AND pedido_id = $${idx}
+       RETURNING id, pedido_id, producto_id, cantidad, notas, precio_unitario`,
+      params
+    );
+    if (!up) return next(AppError.notFound('Extra', req.params.extraId));
+    return res.json(up);
   } catch (err) {
     return next(err);
   }
@@ -1433,6 +1508,213 @@ router.delete('/:id/embalajes-extra/:extraId', async (req, res, next) => {
     return res.json({ ok: true });
   } catch (err) {
     return next(err);
+  }
+});
+
+// ── Fotos del pedido empaquetado (respaldo ante incidencias) ────────────
+// Subir fotos del bulto antes de cerrar el pedido. Múltiples fotos por pedido.
+const uploadFotosPedido = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = path.join(process.cwd(), 'uploads');
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase().slice(0, 6);
+      // Prefijo "ped-{id}-" para que uploadsAuth pueda reconocer ownership.
+      const safe = `ped-${req.params.id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+      cb(null, safe);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024, files: 12 },
+  fileFilter: (_req, file, cb) => {
+    const ok = /^image\/(jpe?g|png|webp|heic)$/i.test(file.mimetype);
+    if (!ok) return cb(new Error('Solo imágenes (jpg, png, webp, heic)'));
+    cb(null, true);
+  },
+});
+
+// POST /api/pedidos/:id/fotos · subir N fotos del bulto empaquetado
+// Wrapper de multer que traduce errores (formato, tamaño) a AppError limpio.
+const multerHandler = (req: Request, res: Response, next: import('express').NextFunction) =>
+  uploadFotosPedido.array('fotos', 12)(req, res, (err: any) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return next(AppError.validacion('Archivo demasiado grande (máx 8 MB por foto)'));
+    }
+    if (err.code === 'LIMIT_FILE_COUNT') {
+      return next(AppError.validacion('Máximo 12 fotos por pedido'));
+    }
+    const msg = String(err?.message ?? '');
+    if (/imagen|image|format|mime/i.test(msg)) {
+      return next(AppError.validacion('Formato no válido — solo JPG, PNG, WEBP o HEIC'));
+    }
+    return next(AppError.validacion(msg || 'No se pudo procesar el archivo'));
+  });
+router.post('/:id/fotos', multerHandler, async (req, res, next) => {
+  try {
+    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+    if (files.length === 0) return next(AppError.validacion('No se han subido fotos'));
+    const { rows: [ped] } = await pool.query<{ foto_urls: string[] | null }>(
+      `SELECT foto_urls FROM pedidos WHERE id = $1`, [req.params.id]
+    );
+    if (!ped) return next(AppError.notFound('Pedido', req.params.id));
+    const existentes = Array.isArray(ped.foto_urls) ? ped.foto_urls : [];
+    // Guardamos como /uploads/<filename> (mismo formato que ordenes_produccion).
+    const nuevas = files.map(f => `/uploads/${f.filename}`);
+    const todas = [...existentes, ...nuevas];
+    await pool.query(
+      `UPDATE pedidos SET foto_urls = $1::JSONB WHERE id = $2`,
+      [JSON.stringify(todas), req.params.id]
+    );
+    return res.status(201).json({ ok: true, fotos: todas });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/pedidos/:id/fotos · lista filenames de fotos del pedido
+router.get('/:id/fotos', async (req, res, next) => {
+  try {
+    const { rows: [ped] } = await pool.query<{ foto_urls: string[] | null }>(
+      `SELECT foto_urls FROM pedidos WHERE id = $1`, [req.params.id]
+    );
+    if (!ped) return next(AppError.notFound('Pedido', req.params.id));
+    return res.json({ fotos: Array.isArray(ped.foto_urls) ? ped.foto_urls : [] });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DELETE /api/pedidos/:id/fotos/:filename · borrar una foto
+router.delete('/:id/fotos/:filename', async (req, res, next) => {
+  try {
+    const target = `/uploads/${req.params.filename}`;
+    const { rows: [ped] } = await pool.query<{ foto_urls: string[] | null }>(
+      `SELECT foto_urls FROM pedidos WHERE id = $1`, [req.params.id]
+    );
+    if (!ped) return next(AppError.notFound('Pedido', req.params.id));
+    const restantes = (ped.foto_urls ?? []).filter(f => f !== target);
+    await pool.query(`UPDATE pedidos SET foto_urls = $1::JSONB WHERE id = $2`,
+      [JSON.stringify(restantes), req.params.id]);
+    try { fs.unlinkSync(path.join(process.cwd(), 'uploads', req.params.filename)); } catch { /* ignore */ }
+    return res.json({ ok: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// GET /api/pedidos/:id/preparacion.pdf · hoja de preparación para el operario
+// Diferente del albarán: incluye checklist de materiales a coger del almacén
+// (botes, cajas, sueltos, extras) + lote sugerido FEFO + espacio para firma.
+router.get('/:id/preparacion.pdf', async (req, res) => {
+  try {
+    const { rows: [pedido] } = await pool.query(`
+      SELECT pd.*, c.nombre AS cliente_nombre_rel, c.direccion AS cliente_direccion,
+             c.codigo_postal AS cliente_cp, c.telefono AS cliente_telefono
+      FROM pedidos pd LEFT JOIN clientes c ON c.id = pd.cliente_id
+      WHERE pd.id = $1`, [req.params.id]);
+    if (!pedido) return res.status(404).json({ error: 'Pedido no encontrado' });
+
+    const { rows: lineas } = await pool.query(`
+      SELECT lp.*, p.nombre AS producto_nombre_rel, p.codigo AS producto_codigo,
+             pcaja.nombre AS caja_nombre, pcaja.codigo AS caja_codigo
+      FROM lineas_pedido lp
+      LEFT JOIN productos p ON p.id = lp.producto_id
+      LEFT JOIN productos pcaja ON pcaja.id = lp.caja_id
+      WHERE lp.pedido_id = $1 ORDER BY lp.created_at ASC`, [req.params.id]);
+
+    const { rows: extras } = await pool.query(`
+      SELECT pe.cantidad, pe.notas, pe.precio_unitario,
+             p.nombre AS producto_nombre, p.codigo AS producto_codigo, p.unidad_medida
+      FROM pedido_embalajes_extra pe
+      JOIN productos p ON p.id = pe.producto_id
+      WHERE pe.pedido_id = $1 ORDER BY pe.created_at ASC`, [req.params.id]);
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 40 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="preparacion-${pedido.numero_pedido}.pdf"`);
+    doc.pipe(res);
+
+    // Cabecera
+    doc.fontSize(18).font('Helvetica-Bold').text('HOJA DE PREPARACIÓN', { align: 'left' });
+    doc.fontSize(12).font('Helvetica').text(`Nº ${pedido.numero_pedido}`, { align: 'left' });
+    doc.moveDown(0.5);
+    doc.fontSize(9).fillColor('#666');
+    doc.text(`Fecha: ${new Date().toLocaleDateString('es-ES')}`);
+    if (pedido.fecha_entrega) doc.text(`Entrega prevista: ${new Date(pedido.fecha_entrega).toLocaleDateString('es-ES')}`);
+    doc.moveDown(0.5);
+
+    // Cliente
+    doc.fillColor('#000').fontSize(10).font('Helvetica-Bold').text('CLIENTE');
+    doc.font('Helvetica').fontSize(10).text(pedido.cliente_nombre_rel ?? pedido.cliente_nombre ?? '—');
+    if (pedido.cliente_direccion) doc.fontSize(9).fillColor('#666').text(pedido.cliente_direccion);
+    if (pedido.cliente_cp) doc.fontSize(9).text(`CP: ${pedido.cliente_cp}`);
+    if (pedido.cliente_telefono) doc.fontSize(9).text(`Tel: ${pedido.cliente_telefono}`);
+    doc.moveDown(1);
+
+    // Checklist materiales
+    doc.fillColor('#000').fontSize(11).font('Helvetica-Bold').text('MATERIALES A PREPARAR');
+    doc.moveDown(0.3);
+
+    const checkbox = (label: string, sub?: string) => {
+      const startY = doc.y;
+      doc.rect(40, startY + 2, 12, 12).stroke();
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#000').text(label, 60, startY);
+      if (sub) doc.font('Helvetica').fontSize(8).fillColor('#666').text(sub, 60, doc.y);
+      doc.moveDown(0.4);
+    };
+
+    for (const l of lineas as any[]) {
+      const cant = parseFloat(l.cantidad ?? '0');
+      const cajas = parseFloat(l.cantidad_cajas ?? '0');
+      const sueltos = parseFloat(l.cantidad_botes_sueltos ?? '0');
+      const ud = l.unidad_medida ?? 'ud';
+      const nombre = l.producto_nombre_rel ?? l.producto_nombre ?? '—';
+      if (cajas > 0 && l.caja_nombre) {
+        checkbox(`${cajas} caja${cajas !== 1 ? 's' : ''} · ${l.caja_nombre}`,
+          `${l.caja_codigo ?? ''} · contiene ${cant - sueltos} ${nombre}`);
+      }
+      if (sueltos > 0) {
+        checkbox(`${sueltos} bote${sueltos !== 1 ? 's' : ''} suelto${sueltos !== 1 ? 's' : ''} · ${nombre}`,
+          `${l.producto_codigo ?? ''} (sin caja)`);
+      }
+      if (cajas <= 0 && sueltos <= 0) {
+        checkbox(`${cant.toLocaleString('es-ES')} ${ud} · ${nombre}`, l.producto_codigo ?? '');
+      }
+    }
+
+    if (extras.length > 0) {
+      doc.moveDown(0.4);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#000').text('MATERIAL EXTRA');
+      doc.moveDown(0.2);
+      for (const e of extras) {
+        const cant = parseFloat(e.cantidad);
+        checkbox(`${cant.toLocaleString('es-ES')} ${e.unidad_medida ?? 'ud'} · ${e.producto_nombre}`,
+          `${e.producto_codigo ?? ''}${e.notas ? ` · ${e.notas}` : ''}`);
+      }
+    }
+
+    // Notas pedido
+    if (pedido.notas) {
+      doc.moveDown(0.8);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#000').text('NOTAS');
+      doc.font('Helvetica').fontSize(9).fillColor('#444').text(pedido.notas);
+    }
+
+    // Firma operario
+    doc.moveDown(2);
+    doc.font('Helvetica').fontSize(9).fillColor('#999');
+    doc.text('Operario preparador:', 40, doc.y);
+    doc.moveTo(150, doc.y + 12).lineTo(380, doc.y + 12).stroke('#999');
+    doc.text('Fecha y hora:', 40, doc.y + 30);
+    doc.moveTo(150, doc.y + 42).lineTo(380, doc.y + 42).stroke('#999');
+
+    doc.end();
+  } catch (err) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : 'Error' });
   }
 });
 

@@ -4,6 +4,7 @@ import path from 'path';
 import { pool } from '../db/pool';
 import { alertaService } from '../services/alerta.service';
 import { logger } from '../lib/logger';
+import { encryptSecret, decryptSecret } from '../lib/secretCrypto';
 
 const router = Router();
 
@@ -82,7 +83,7 @@ router.post('/test-smtp', async (_req, res) => {
       secure: Number(cfg.smtp_port) === 465,
       auth: {
         user: cfg.smtp_user,
-        pass: cfg.smtp_pass_enc,
+        pass: decryptSecret(cfg.smtp_pass_enc),
       },
     });
 
@@ -121,7 +122,7 @@ router.post('/enviar-email', async (req, res) => {
 
     const { rows: [cfg] } = await pool.query(`SELECT smtp_user, smtp_pass_enc FROM configuracion_global LIMIT 1`);
     const smtpUser = cfg?.smtp_user || process.env.SMTP_USER;
-    const smtpPass = cfg?.smtp_pass_enc || process.env.SMTP_PASS;
+    const smtpPass = cfg?.smtp_pass_enc ? decryptSecret(cfg.smtp_pass_enc) : process.env.SMTP_PASS;
 
     if (!smtpUser || !smtpPass) return res.status(500).json({ error: 'SMTP no configurado. Ve a Configuración.' });
 
@@ -252,7 +253,8 @@ router.post('/gdrive/disconnect', async (_req, res) => {
 router.get('/backup-password', async (_req, res) => {
   try {
     const { rows: [c] } = await pool.query(`SELECT backup_password FROM configuracion_global WHERE id = 1`);
-    const fromDb = c?.backup_password as string | null;
+    const fromDbRaw = c?.backup_password as string | null;
+    const fromDb = fromDbRaw ? decryptSecret(fromDbRaw) : null;
     const fromEnv = process.env.BACKUP_PASSWORD;
     res.json({
       configurada: !!(fromDb && fromDb.length >= 12) || !!(fromEnv && fromEnv.length >= 12),
@@ -273,7 +275,7 @@ router.put('/backup-password', async (req, res) => {
     }
     await pool.query(
       `UPDATE configuracion_global SET backup_password = $1 WHERE id = 1`,
-      [String(password)]
+      [encryptSecret(String(password))]
     );
     res.json({ ok: true });
   } catch (e) {
@@ -408,7 +410,7 @@ router.put('/', async (req, res) => {
         plantilla_email   ?? null,
         email_remitente   ?? null,
         smtp_user         ?? null,
-        smtp_pass_enc     ?? null,
+        smtp_pass_enc ? encryptSecret(String(smtp_pass_enc)) : null,
         empresa_nombre    ?? null,
         empresa_cif       ?? null,
         empresa_direccion ?? null,

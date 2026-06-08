@@ -107,10 +107,14 @@ router.post('/importar', adminOnly, async (req, res) => {
       const { rows: [maxV] } = await pool.query(`SELECT COALESCE(MAX(version), 0) AS v FROM recetas WHERE producto_id = $1`, [producto_id]);
       const version = Number(maxV.v) + 1;
 
+      const rendimientoImp = Number(r.rendimiento ?? 1);
+      if (!(rendimientoImp > 0)) {
+        return res.status(400).json({ error: `Receta "${r.nombre}": rendimiento debe ser mayor que 0` });
+      }
       const { rows: [receta] } = await pool.query(
         `INSERT INTO recetas (producto_id, nombre, version, rendimiento, notas)
          VALUES ($1, $2, $3, $4::NUMERIC, $5) RETURNING id`,
-        [producto_id, r.nombre, version, Number(r.rendimiento ?? 1).toFixed(6), r.notas ?? null]
+        [producto_id, r.nombre, version, rendimientoImp.toFixed(6), r.notas ?? null]
       );
 
       if (Array.isArray(r.ingredientes)) {
@@ -370,6 +374,12 @@ router.post('/:id/ingredientes', adminOnly, async (req, res) => {
     if (!materia_prima_id || !cantidad) {
       return res.status(400).json({ error: 'materia_prima_id y cantidad son obligatorios' });
     }
+    if (porcentaje_merma != null) {
+      const m = Number(porcentaje_merma);
+      if (!Number.isFinite(m) || m < 0 || m > 100) {
+        return res.status(400).json({ error: 'porcentaje_merma debe estar entre 0 y 100' });
+      }
+    }
     const errUnidad = await validarUnidadIngrediente(materia_prima_id, unidad_medida);
     if (errUnidad) return res.status(400).json({ error: errUnidad });
     const recetaId = req.params.id;
@@ -429,6 +439,12 @@ router.post('/:id/ingredientes', adminOnly, async (req, res) => {
 router.put('/:id/ingredientes/:ingId', adminOnly, async (req, res) => {
   try {
     const { cantidad, porcentaje_merma, unidad_medida, paso_index } = req.body;
+    if (porcentaje_merma != null) {
+      const m = Number(porcentaje_merma);
+      if (!Number.isFinite(m) || m < 0 || m > 100) {
+        return res.status(400).json({ error: 'porcentaje_merma debe estar entre 0 y 100' });
+      }
+    }
     if (unidad_medida) {
       const { rows: [ingActual] } = await pool.query<{ materia_prima_id: string }>(
         `SELECT materia_prima_id FROM ingredientes_receta WHERE id = $1 AND receta_id = $2`,
