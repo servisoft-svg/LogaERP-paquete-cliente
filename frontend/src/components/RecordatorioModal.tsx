@@ -2,12 +2,12 @@ import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Bell, Volume2, BellRing, Users, Calendar as CalIcon, Link2 } from 'lucide-react';
-import { recordatoriosApi, productosApi, lotesApi, produccionApi, pedidosApi } from '../api/client';
+import { recordatoriosApi, productosApi, lotesApi, produccionApi, pedidosApi, clientesApi, proveedoresApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { notify } from '../lib/notify';
 import clsx from 'clsx';
 
-type RefTipo = '' | 'producto' | 'lote' | 'orden' | 'pedido';
+type RefTipo = '' | 'producto' | 'lote' | 'orden' | 'pedido' | 'cliente' | 'proveedor';
 interface RefOption { id: string; label: string }
 
 interface Props {
@@ -29,7 +29,7 @@ const COLORES = [
 ];
 
 export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaInicial }: Props) {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [titulo, setTitulo]             = useState('');
   const [descripcion, setDescripcion]   = useState('');
   const [fecha, setFecha]               = useState(fechaInicial ?? new Date().toISOString().slice(0, 10));
@@ -89,6 +89,14 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
           const r = await pedidosApi.listar();
           setRefOptions((r.data as { id: string; numero_pedido: string; cliente_nombre_rel?: string; cliente_nombre?: string }[])
             .map(p => ({ id: p.id, label: `${p.numero_pedido}${p.cliente_nombre_rel || p.cliente_nombre ? ` · ${p.cliente_nombre_rel ?? p.cliente_nombre}` : ''}` })));
+        } else if (refTipo === 'cliente') {
+          const r = await clientesApi.listar({ archivado: 'false' });
+          setRefOptions((r.data as { id: string; nombre: string; telefono?: string | null }[])
+            .map(c => ({ id: c.id, label: c.telefono ? `${c.nombre} · ${c.telefono}` : c.nombre })));
+        } else if (refTipo === 'proveedor') {
+          const r = await proveedoresApi.listar();
+          setRefOptions((r.data as { id: string; nombre: string; telefono?: string | null }[])
+            .map(p => ({ id: p.id, label: p.telefono ? `${p.nombre} · ${p.telefono}` : p.nombre })));
         }
       } catch { setRefOptions([]); }
       finally { setRefLoading(false); }
@@ -255,13 +263,18 @@ export default function RecordatorioModal({ abierto, onCerrar, onCreado, fechaIn
             <div>
               <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide flex items-center gap-1"><Link2 size={11} /> Enlazar a (opcional)</span>
               <div className="mt-1 flex gap-1.5">
-                {([
-                  { v: '',         l: 'Nada' },
-                  { v: 'producto', l: 'Material/Producto' },
-                  { v: 'lote',     l: 'Lote' },
-                  { v: 'orden',    l: 'OF' },
-                  { v: 'pedido',   l: 'Pedido' },
-                ] as { v: RefTipo; l: string }[]).map((opt) => (
+                {(([
+                  { v: '',          l: 'Nada' },
+                  // Clientes y proveedores SOLO visible para admin (datos comerciales sensibles).
+                  ...(isAdmin ? [
+                    { v: 'cliente'   as RefTipo, l: 'Cliente' },
+                    { v: 'proveedor' as RefTipo, l: 'Proveedor' },
+                  ] : []),
+                  { v: 'producto',  l: 'Material/Producto' },
+                  { v: 'lote',      l: 'Lote' },
+                  { v: 'orden',     l: 'OF' },
+                  { v: 'pedido',    l: 'Pedido' },
+                ]) as { v: RefTipo; l: string }[]).map((opt) => (
                   <button key={opt.v} type="button"
                     onClick={() => { setRefTipo(opt.v); setRefId(''); setRefSearch(''); }}
                     className={clsx(

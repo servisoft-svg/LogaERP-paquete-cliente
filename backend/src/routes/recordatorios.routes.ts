@@ -19,8 +19,11 @@ router.get('/usuarios', async (_req, res) => {
 
 // Helper: resuelve `nombre + url` para un par (tipo, id) de referencia.
 // Devuelve null si el tipo no se reconoce o el recurso no existe.
-async function resolverReferencia(tipo: string | null, id: string | null): Promise<{ label: string; url: string } | null> {
+// Si userRol no es 'admin' y el tipo es cliente/proveedor, no se resuelve
+// (datos comerciales sensibles — solo admin ve el chip).
+async function resolverReferencia(tipo: string | null, id: string | null, userRol?: string): Promise<{ label: string; url: string } | null> {
   if (!tipo || !id) return null;
+  if ((tipo === 'cliente' || tipo === 'proveedor') && userRol !== 'admin') return null;
   switch (tipo) {
     case 'producto': {
       const { rows: [r] } = await pool.query('SELECT codigo, nombre FROM productos WHERE id = $1', [id]);
@@ -37,6 +40,14 @@ async function resolverReferencia(tipo: string | null, id: string | null): Promi
     case 'pedido': {
       const { rows: [r] } = await pool.query('SELECT numero_pedido FROM pedidos WHERE id = $1', [id]);
       return r ? { label: r.numero_pedido, url: '/pedidos' } : null;
+    }
+    case 'cliente': {
+      const { rows: [r] } = await pool.query('SELECT nombre, telefono FROM clientes WHERE id = $1', [id]);
+      return r ? { label: r.telefono ? `${r.nombre} · ${r.telefono}` : r.nombre, url: `/clientes?q=${encodeURIComponent(r.nombre)}` } : null;
+    }
+    case 'proveedor': {
+      const { rows: [r] } = await pool.query('SELECT nombre, telefono FROM proveedores WHERE id = $1', [id]);
+      return r ? { label: r.telefono ? `${r.nombre} · ${r.telefono}` : r.nombre, url: `/proveedores?q=${encodeURIComponent(r.nombre)}` } : null;
     }
     default:
       return null;
@@ -80,7 +91,7 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(sql, params);
     // Resolver labels de referencia (1 query por recordatorio con ref; OK por volumen)
     for (const r of rows) {
-      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id);
+      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id, user.rol);
     }
     res.json(rows);
   } catch (e) {
@@ -112,7 +123,7 @@ router.get('/pendientes', async (req, res) => {
       [user.id, user.rol ?? '']
     );
     for (const r of rows) {
-      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id);
+      r.referencia = await resolverReferencia(r.referencia_tipo, r.referencia_id, user.rol);
     }
     res.json(rows);
   } catch (e) {
@@ -134,6 +145,10 @@ router.post('/', async (req, res) => {
     }
     if (!fecha && !programado_para) {
       return res.status(400).json({ error: 'fecha o programado_para obligatorio' });
+    }
+    // Solo admin puede vincular a clientes / proveedores (datos comerciales).
+    if ((referencia_tipo === 'cliente' || referencia_tipo === 'proveedor') && user.rol !== 'admin') {
+      return res.status(403).json({ error: 'Solo administradores pueden vincular recordatorios a clientes o proveedores' });
     }
     // Si fecha no viene, deriva del timestamp
     const fechaFinal = fecha ?? String(programado_para).slice(0, 10);
