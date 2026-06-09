@@ -71,6 +71,8 @@ export default function ControlCalidad() {
   const [productoSpecs, setProductoSpecs] = useState<ProductoSpec[]>([]);
   const [specsValores, setSpecsValores] = useState<Record<number, string>>({});
   const [lotesProducto, setLotesProducto] = useState<{ id: string; lote_interno: string; fecha_entrada?: string; cantidad_actual: string }[]>([]);
+  // Lotes de productos fabricados/envasados recientes (para limpieza: registrar qué se fabricó)
+  const [lotesFabricados, setLotesFabricados] = useState<{ id: string; lote_interno: string; producto_id: string; producto_nombre: string; producto_codigo: string; fecha_entrada?: string }[]>([]);
   const [lotesEstado, setLotesEstado] = useState<{
     producto_id: string; producto_codigo: string; producto_nombre: string; stock_actual: string; unidad_medida: string;
     lotes: { lote_id: string; lote_interno: string; lote_proveedor?: string; fecha_entrada?: string; cantidad_actual: string; control_id?: string | null }[];
@@ -117,6 +119,24 @@ export default function ControlCalidad() {
       })) as unknown as Producto[]);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // Lotes fabricados/envasados recientes para autorrellenar registro de limpieza
+  useEffect(() => {
+    if (tab !== 'limpieza') return;
+    let cancelado = false;
+    lotesApi.listar({ estado: 'aprobado' })
+      .then(res => {
+        if (cancelado) return;
+        const lotes = (res.data as Array<{ id: string; lote_interno: string; producto_id: string; producto_nombre: string; producto_codigo: string; producto_tipo: string; fecha_entrada?: string }>)
+          .filter(l => l.producto_tipo === 'producto_fabricado' || l.producto_tipo === 'producto_envasado')
+          .sort((a, b) => new Date(b.fecha_entrada ?? 0).getTime() - new Date(a.fecha_entrada ?? 0).getTime())
+          .slice(0, 30)
+          .map(l => ({ id: l.id, lote_interno: l.lote_interno, producto_id: l.producto_id, producto_nombre: l.producto_nombre, producto_codigo: l.producto_codigo, fecha_entrada: l.fecha_entrada }));
+        setLotesFabricados(lotes);
+      })
+      .catch(() => { if (!cancelado) setLotesFabricados([]); });
+    return () => { cancelado = true; };
+  }, [tab]);
 
   const abrirNuevo = (preset?: { producto_id: string; producto_nombre: string; lote_codigo: string }) => {
     setForm({
@@ -479,7 +499,23 @@ export default function ControlCalidad() {
                         </>
                       ) : (
                         <>
-                          <td className="px-3 py-2 text-gray-800 font-semibold">{r.deposito_equipo ?? '—'}</td>
+                          <td className="px-3 py-2 text-gray-800 font-semibold">
+                            {r.deposito_equipo ?? '—'}
+                            {r.tipo === 'limpieza' && (r.producto_nombre || r.lote_codigo) && (
+                              <div className="mt-0.5 inline-flex flex-wrap gap-1">
+                                {r.producto_nombre && (
+                                  <span className="text-[10px] font-medium rounded bg-blue-50 text-blue-700 px-1.5 py-0.5 border border-blue-100">
+                                    {r.producto_codigo ? `${r.producto_codigo} · ` : ''}{r.producto_nombre}
+                                  </span>
+                                )}
+                                {r.lote_codigo && (
+                                  <span className="text-[10px] font-mono rounded bg-gray-100 text-gray-700 px-1.5 py-0.5 border border-gray-200">
+                                    Lote {r.lote_codigo}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </td>
                           <td className="px-3 py-2 text-gray-600">{r.accion ?? r.observaciones ?? '—'}</td>
                         </>
                       )}
@@ -652,6 +688,43 @@ export default function ControlCalidad() {
                 </>
               ) : (
                 <>
+                  {tab === 'limpieza' && (
+                    <label className="block">
+                      <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                        Producto fabricado · Lote <span className="font-normal text-gray-400">(opcional)</span>
+                      </span>
+                      <select
+                        value={form.lote_codigo ?? ''}
+                        onChange={e => {
+                          const sel = lotesFabricados.find(l => l.lote_interno === e.target.value);
+                          if (!sel) {
+                            setForm((f: any) => ({ ...f, lote_codigo: null, producto_id: null, producto_nombre: null, producto_codigo: null }));
+                          } else {
+                            setForm((f: any) => ({
+                              ...f,
+                              lote_codigo: sel.lote_interno,
+                              producto_id: sel.producto_id,
+                              producto_nombre: sel.producto_nombre,
+                              producto_codigo: sel.producto_codigo,
+                            }));
+                          }
+                        }}
+                        className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                      >
+                        <option value="">— Sin asociar —</option>
+                        {lotesFabricados.map(l => (
+                          <option key={l.id} value={l.lote_interno}>
+                            {l.producto_codigo} · {l.producto_nombre} — Lote {l.lote_interno}
+                          </option>
+                        ))}
+                      </select>
+                      {form.producto_nombre && (
+                        <p className="mt-1 text-[11px] text-blue-700">
+                          Se firmará: <b>{form.producto_codigo}</b> {form.producto_nombre} · Lote <b>{form.lote_codigo}</b>
+                        </p>
+                      )}
+                    </label>
+                  )}
                   <label className="block">
                     <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
                       {tab === 'limpieza' ? 'Depósito / Tanque' : 'Equipo'}

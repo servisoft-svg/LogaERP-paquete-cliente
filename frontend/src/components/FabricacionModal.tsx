@@ -20,7 +20,6 @@ const MOTIVOS_LIMPIEZA = [
   { value: 'otra_resina',   label: 'Otra resina'   },
   { value: 'color',         label: 'Color'         },
   { value: 'externo',       label: 'Externo'       },
-  { value: 'no_precisa',    label: 'No precisa'    },
 ] as const;
 import { useAuth } from '../contexts/AuthContext';
 import TanqueEnvasado from './TanqueEnvasado';

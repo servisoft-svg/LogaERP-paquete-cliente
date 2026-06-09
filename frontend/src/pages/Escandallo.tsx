@@ -9,7 +9,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Boxes, Droplet, Tag, Package, Plus, Save, Trash2, X, ChefHat, Search, Pencil,
+  Boxes, Droplet, Tag, Package, Plus, Save, Trash2, X, ChefHat, Search, Pencil, Copy,
   Check, Clock, FlaskConical, Beaker,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -146,6 +146,29 @@ export default function Escandallo() {
       extras: (r.extras ?? []).map(e => ({ producto_id: e.producto_id, cantidad_por_bote: String(e.cantidad_por_bote) })),
     });
     setModalOpen(true);
+  };
+  const duplicar = (r: RecetaEnvasado) => {
+    setSeleccionada(null); // null = crea nueva fórmula (no PUT a la original)
+    const numStr = (v: string | number | null | undefined, def = '') =>
+      v == null ? def : String(parseFloat(String(v)) || (def === '' ? '' : def));
+    setForm({
+      nombre: `${r.nombre} (copia)`,
+      // Producto envasado vacío: el user tiene que elegir uno nuevo (no se puede
+      // tener 2 fórmulas para el mismo PE — PK única).
+      producto_envasado_id: '',
+      liquido_id: r.liquido_id, liquido_cantidad: String(parseFloat(r.liquido_cantidad)),
+      envase_id: r.envase_id, envases_por_bote: r.envases_por_bote ?? 1,
+      etiqueta_id: r.etiqueta_id ?? '', etiquetas_por_bote: r.etiquetas_por_bote,
+      lleva_caja: r.lleva_caja, caja_id: r.caja_id ?? '',
+      peso_envase_vacio_kg: numStr(r.peso_envase_vacio_kg),
+      unidades_por_caja:    numStr(r.unidades_por_caja, '1') || '1',
+      peso_caja_vacia_kg:   numStr(r.peso_caja_vacia_kg),
+      cajas_por_pale:       numStr(r.cajas_por_pale),
+      peso_pale_vacio_kg:   numStr(r.peso_pale_vacio_kg),
+      extras: (r.extras ?? []).map(e => ({ producto_id: e.producto_id, cantidad_por_bote: String(e.cantidad_por_bote) })),
+    });
+    setModalOpen(true);
+    notify.info('Duplicado: elige el producto envasado destino y guarda');
   };
   const cerrarModal = () => setModalOpen(false);
 
@@ -343,6 +366,10 @@ export default function Escandallo() {
                       <button onClick={() => abrirEditar(r)}
                         className="rounded-lg p-2 text-gray-400 hover:bg-blue-50 hover:text-blue-600 transition-colors" title="Editar">
                         <Pencil size={14} />
+                      </button>
+                      <button onClick={() => duplicar(r)}
+                        className="rounded-lg p-2 text-gray-400 hover:bg-emerald-50 hover:text-emerald-600 transition-colors" title="Duplicar">
+                        <Copy size={14} />
                       </button>
                       <button onClick={() => eliminar(r)}
                         className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-loga-red transition-colors" title="Eliminar">
