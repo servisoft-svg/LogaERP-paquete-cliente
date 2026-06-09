@@ -90,7 +90,7 @@ router.get('/', async (req, res) => {
 // Adicionalmente valida totales calculados (no acepta Infinity/NaN).
 router.post('/', async (req, res) => {
   try {
-    const { cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, lineas, subtotal, portes, iva_porcentaje } = req.body;
+    const { cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, lineas, subtotal, portes, iva_porcentaje, porte_agencia, porte_peso_kg } = req.body;
     const userRol = (req as any).user?.rol;
     const esAdmin = userRol === 'admin';
 
@@ -182,12 +182,16 @@ router.post('/', async (req, res) => {
       }
 
       // 1) INSERT pedido
+      const agenciaSan = porte_agencia ? String(porte_agencia).toUpperCase().slice(0, 32) : null;
+      const pesoPorteSan = porte_peso_kg != null && Number.isFinite(Number(porte_peso_kg))
+        ? Number(porte_peso_kg) : null;
       const { rows: [p] } = await client.query(
-        `INSERT INTO pedidos (cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, origen, estado, subtotal, portes, iva_porcentaje, total)
-         VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, 'manual', 'confirmado', $7::NUMERIC, $8::NUMERIC, $9::NUMERIC, $10::NUMERIC)
+        `INSERT INTO pedidos (cliente_id, cliente_nombre, producto_id, cantidad, fecha_entrega, notas, origen, estado, subtotal, portes, iva_porcentaje, total, porte_agencia, porte_peso_kg)
+         VALUES ($1, $2, $3, $4::NUMERIC, $5, $6, 'manual', 'confirmado', $7::NUMERIC, $8::NUMERIC, $9::NUMERIC, $10::NUMERIC, $11, $12::NUMERIC)
          RETURNING *`,
         [cliente_id ?? null, cliente_nombre ?? null, producto_id ?? null, cantidad ?? null, fecha_entrega ?? null, notas ?? null,
-         subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2)]
+         subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2),
+         agenciaSan, pesoPorteSan]
       );
 
       // 2) INSERT líneas (batch). Incluye desglose cajas+sueltos+caja_id si la
@@ -328,7 +332,8 @@ const TRANSICIONES_VALIDAS: Record<string, string[]> = {
 router.put('/:id', adminOnly, async (req, res) => {
   try {
     const { estado, producto_id, cantidad, unidad_medida, fecha_entrega, notas, orden_produccion_id,
-            cliente_id, cliente_nombre, subtotal, portes, iva_porcentaje, total, lineas } = req.body;
+            cliente_id, cliente_nombre, subtotal, portes, iva_porcentaje, total, lineas,
+            porte_agencia, porte_peso_kg } = req.body;
 
     // Validar transición de estado
     if (estado) {
@@ -465,6 +470,12 @@ router.put('/:id', adminOnly, async (req, res) => {
     const ivaCalc = (subtotalCalc + portesNum) * ivaPctNum / 100;
     const totalCalc = subtotalCalc + portesNum + ivaCalc;
 
+    const agenciaSan = porte_agencia !== undefined
+      ? (porte_agencia ? String(porte_agencia).toUpperCase().slice(0, 32) : null)
+      : undefined;
+    const pesoPorteSan = porte_peso_kg !== undefined
+      ? (porte_peso_kg != null && Number.isFinite(Number(porte_peso_kg)) ? Number(porte_peso_kg) : null)
+      : undefined;
     const { rows: [pedido] } = await pool.query(
       `UPDATE pedidos SET
         estado = COALESCE($1::estado_pedido, estado),
@@ -479,13 +490,17 @@ router.put('/:id', adminOnly, async (req, res) => {
         subtotal = $10::NUMERIC,
         portes = $11::NUMERIC,
         iva_porcentaje = $12::NUMERIC,
-        total = $13::NUMERIC
+        total = $13::NUMERIC,
+        porte_agencia = CASE WHEN $15::BOOLEAN THEN $16 ELSE porte_agencia END,
+        porte_peso_kg = CASE WHEN $17::BOOLEAN THEN $18::NUMERIC ELSE porte_peso_kg END
        WHERE id = $14 RETURNING *`,
       [estado ?? null, producto_id ?? null, cantidad ?? null, unidad_medida ?? null,
        fecha_entrega ?? null, notas ?? null, orden_produccion_id ?? null,
        cliente_id ?? null, cliente_nombre ?? null,
        subtotalCalc.toFixed(2), portesNum.toFixed(2), ivaPctNum, totalCalc.toFixed(2),
-       req.params.id]
+       req.params.id,
+       agenciaSan !== undefined, agenciaSan ?? null,
+       pesoPorteSan !== undefined, pesoPorteSan ?? null]
     );
     if (!pedido) return res.status(404).json({ error: 'Pedido no encontrado' });
 

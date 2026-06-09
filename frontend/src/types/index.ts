@@ -292,6 +292,8 @@ export interface Pedido {
   orden_produccion_id?: string;
   subtotal?: string;
   portes?: string;
+  porte_agencia?: string | null;
+  porte_peso_kg?: string | null;
   iva_porcentaje?: string;
   total?: string;
   // Coste real: SUM(cantidad consumida × precio_compra del lote concreto).

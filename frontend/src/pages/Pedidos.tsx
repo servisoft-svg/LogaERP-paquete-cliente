@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -24,6 +24,8 @@ interface RecetaEnvasadoPorte {
 }
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import SearchSelect from '../components/SearchSelect';
+import PortesSelector from '../components/PortesSelector';
+import AgenciaBadge from '../components/AgenciaBadge';
 import TanqueBadge from '../components/TanqueBadge';
 import Modal from '../components/Modal';
 import ConfirmModal from '../components/ConfirmModal';
@@ -233,13 +235,19 @@ export default function Pedidos() {
     const totalUds = cant * mult;
 
     if (prod.tipo !== 'producto_envasado') {
+      // Granel: estimación palets según capacidad típica (1 palet cada 1000 kg).
+      // Peso palet vacío ~25 kg. TODO: configurable por producto.
+      const PESO_PALET_KG     = 25;
+      const KG_POR_PALET      = 1000;
       const pesoKg = (linea.unidad_medida === 'kg' || linea.unidad_medida === 'L') ? totalUds : 0;
+      const nPales = pesoKg > 0 ? Math.ceil(pesoKg / KG_POR_PALET) : 0;
+      const pesoPales = nPales * PESO_PALET_KG;
       return {
         tipo: 'granel' as const,
         uds: totalUds, unidad: linea.unidad_medida,
-        pesoTotal: pesoKg,
-        desglose: { liquido: pesoKg, envase: 0, caja: 0, pale: 0 },
-        cajas: 0, pales: 0, udC: 1, cPal: 0, sinReceta: false,
+        pesoTotal: pesoKg + pesoPales,
+        desglose: { liquido: pesoKg, envase: 0, caja: 0, pale: pesoPales },
+        cajas: 0, pales: nPales, udC: 1, cPal: 0, sinReceta: false,
       };
     }
 
@@ -307,6 +315,39 @@ export default function Pedidos() {
   const [lineas, setLineas] = useState<LineaForm[]>([emptyLinea()]);
   const [portes, setPortes] = useState('0');
   const [ivaPct, setIvaPct] = useState('21');
+  const [porteAgencia, setPorteAgencia] = useState<string | null>(null);
+  const [portePesoKg, setPortePesoKg] = useState<number | null>(null);
+
+  // Auto-scroll progresivo: al completar un paso scrollea al siguiente
+  const productosRef = useRef<HTMLDivElement>(null);
+  const fechasRef    = useRef<HTMLDivElement>(null);
+  const prevCliOK    = useRef(false);
+  const prevProdOK   = useRef(false);
+
+  // Snapshot del estado al abrir el modal (para no scrollear en edición de un pedido ya completo)
+  useEffect(() => {
+    if (!modalOpen) return;
+    const cliOK = !!form.cliente_id || !!form.cliente_nombre.trim();
+    const prodOK = lineas.some(l => l.producto_id && parseFloat(l.cantidad || '0') > 0);
+    prevCliOK.current = cliOK;
+    prevProdOK.current = prodOK;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalOpen]);
+
+  // Detecta transición false→true y scrollea al siguiente bloque
+  useEffect(() => {
+    if (!modalOpen) return;
+    const cliOK = !!form.cliente_id || !!form.cliente_nombre.trim();
+    const prodOK = lineas.some(l => l.producto_id && parseFloat(l.cantidad || '0') > 0);
+
+    if (cliOK && !prevCliOK.current && !prodOK) {
+      productosRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (prodOK && !prevProdOK.current) {
+      fechasRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+    prevCliOK.current = cliOK;
+    prevProdOK.current = prodOK;
+  }, [modalOpen, form.cliente_id, form.cliente_nombre, lineas]);
 
   // Cargar cajas compatibles cuando una línea cambia su producto_id.
   // Si hay exactamente 1 caja → autoseleccionar caja_id en la línea.
@@ -477,6 +518,8 @@ export default function Pedidos() {
     setLineas([emptyLinea()]);
     setPortes('0');
     setIvaPct('21');
+    setPorteAgencia(null);
+    setPortePesoKg(null);
     setModalOpen(true);
   };
 
@@ -501,6 +544,8 @@ export default function Pedidos() {
     );
     setPortes(p.portes ?? '0');
     setIvaPct(p.iva_porcentaje ?? '21');
+    setPorteAgencia((p as any).porte_agencia ?? null);
+    setPortePesoKg((p as any).porte_peso_kg != null ? parseFloat(String((p as any).porte_peso_kg)) : null);
     setModalOpen(true);
   };
 
@@ -537,6 +582,8 @@ export default function Pedidos() {
         portes: portesNum,
         iva_porcentaje: ivaPctNum,
         total: totalCalc,
+        porte_agencia: porteAgencia,
+        porte_peso_kg: portePesoKg,
         lineas: lineasValidas.map(l => {
           const mult = getMultiplicador(l);
           const totalUds = parseFloat(l.cantidad || '0') * mult;
@@ -679,21 +726,25 @@ export default function Pedidos() {
   const fabricar = (p: Pedido) => {
     const prodId = p.producto_id ?? p.lineas?.[0]?.producto_id;
     const prod = productos.find(pr => pr.id === prodId);
-    const cantidad = p.cantidad ?? p.lineas?.[0]?.cantidad ?? '';
+    const cantidadPedida = parseFloat(String(p.cantidad ?? p.lineas?.[0]?.cantidad ?? '0')) || 0;
     const cliente = encodeURIComponent(p.cliente_nombre_rel ?? p.cliente_nombre ?? '');
 
     if (!prod) { navigate('/produccion'); return; }
 
-    const accion = getAccionPedido(p);
+    // Cantidad recomendada = lo que FALTA (cantidad pedida − stock actual).
+    // Si stock cubre todo, mantén la cantidad pedida (sería raro caer aquí).
+    const stockActual = parseFloat(prod.stock_actual ?? '0') || 0;
+    const falta = Math.max(0, cantidadPedida - stockActual);
+    const cantidadParam = falta > 0 ? String(falta) : String(cantidadPedida);
 
-    if ((accion === 'envasar' || p.estado === 'fabricado') && prod.tipo === 'producto_envasado') {
-      // Navegar a produccion envasado con producto pre-seleccionado
-      navigate(`/produccion?tipo=envasado&producto=${encodeURIComponent(prod.nombre)}&cantidad=${cantidad}&cliente=${cliente}&pedido_id=${p.id}`);
-    } else if (accion === 'fabricar') {
-      cambiarEstado(p, 'en_produccion');
-      navigate(`/produccion?producto=${encodeURIComponent(prod.nombre)}&cantidad=${cantidad}&cliente=${cliente}&pedido_id=${p.id}`);
+    // Decisión por TIPO de producto:
+    //  - producto_envasado (PE) → siempre envasado. Envasado decide si necesita granel.
+    //  - producto_fabricado (granel) → fabricar.
+    if (prod.tipo === 'producto_envasado') {
+      navigate(`/produccion?tipo=envasado&producto=${encodeURIComponent(prod.nombre)}&cantidad=${cantidadParam}&cliente=${cliente}&pedido_id=${p.id}`);
     } else {
-      navigate(`/produccion?producto=${encodeURIComponent(prod.nombre)}&cantidad=${cantidad}&cliente=${cliente}&pedido_id=${p.id}`);
+      cambiarEstado(p, 'en_produccion');
+      navigate(`/produccion?producto=${encodeURIComponent(prod.nombre)}&cantidad=${cantidadParam}&cliente=${cliente}&pedido_id=${p.id}`);
     }
   };
 
@@ -907,7 +958,10 @@ export default function Pedidos() {
                 <p className="text-[11px] font-mono text-gray-400">{p.numero_pedido}</p>
                 <p className="text-sm font-semibold text-gray-900">{p.cliente_nombre_rel ?? p.cliente_nombre ?? p.cliente_email ?? '—'}</p>
               </div>
-              <EstadoBadge estado={p.estado} />
+              <div className="flex flex-col items-end gap-1">
+                <EstadoBadge estado={p.estado} />
+                {p.porte_agencia && <AgenciaBadge agencia={p.porte_agencia} pesoKg={p.porte_peso_kg} />}
+              </div>
             </div>
             <p className="text-xs text-gray-600">
               {p.producto_nombre_rel ?? p.producto_nombre ?? 'Sin producto'}
@@ -979,15 +1033,18 @@ export default function Pedidos() {
             <div className="flex items-center gap-2 pt-1 flex-wrap">
               {isAdmin && p.estado === 'confirmado' && (() => {
                 const accion = getAccionPedido(p);
+                const prodId = p.producto_id ?? p.lineas?.[0]?.producto_id;
+                const prod = productos.find(pr => pr.id === prodId);
+                const esEnvasado = prod?.tipo === 'producto_envasado';
                 return (
                   <>
                     {accion === 'consumir' && (
                       <button onClick={() => abrirConsumir(p)} className="flex-1 rounded-lg bg-emerald-600 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Check size={12} /> Consumir</button>
                     )}
-                    {accion === 'envasar' && (
+                    {accion !== 'consumir' && esEnvasado && (
                       <button onClick={() => fabricar(p)} className="flex-1 rounded-lg bg-amber-500 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><ClipboardList size={12} /> Envasar</button>
                     )}
-                    {accion === 'fabricar' && (
+                    {accion !== 'consumir' && !esEnvasado && (
                       <button onClick={() => fabricar(p)} className="flex-1 rounded-lg bg-loga-red py-2 text-xs font-semibold text-white flex items-center justify-center gap-1"><Factory size={12} /> Fabricar</button>
                     )}
                   </>
@@ -1134,11 +1191,19 @@ export default function Pedidos() {
                     return <span className="inline-flex items-center gap-1 text-[10px] bg-red-100 text-loga-red rounded-md px-2 py-1 font-bold whitespace-nowrap"><Factory size={10} /> Fabricar</span>;
                   })()}
                 </td>
-                <td className="px-4 py-3"><EstadoBadge estado={p.estado} /></td>
+                <td className="px-4 py-3">
+                  <div className="flex flex-col items-start gap-1">
+                    <EstadoBadge estado={p.estado} />
+                    {p.porte_agencia && <AgenciaBadge agencia={p.porte_agencia} pesoKg={p.porte_peso_kg} />}
+                  </div>
+                </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-1">
                     {isAdmin && p.estado === 'confirmado' && (() => {
                       const accion = getAccionPedido(p);
+                      const prodId = p.producto_id ?? p.lineas?.[0]?.producto_id;
+                      const prod = productos.find(pr => pr.id === prodId);
+                      const esEnvasado = prod?.tipo === 'producto_envasado';
                       return (
                         <>
                           {accion === 'consumir' && (
@@ -1146,12 +1211,12 @@ export default function Pedidos() {
                               <Check size={11} /> Consumir
                             </button>
                           )}
-                          {accion === 'envasar' && (
+                          {accion !== 'consumir' && esEnvasado && (
                             <button onClick={() => fabricar(p)} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-colors flex items-center gap-1">
                               <ClipboardList size={11} /> Envasar
                             </button>
                           )}
-                          {accion === 'fabricar' && (
+                          {accion !== 'consumir' && !esEnvasado && (
                             <button onClick={() => fabricar(p)} className="rounded-lg px-2 py-1 text-[11px] font-semibold bg-loga-red text-white hover:bg-loga-red-dark transition-colors flex items-center gap-1">
                               <Factory size={11} /> Fabricar
                             </button>
@@ -1229,10 +1294,62 @@ export default function Pedidos() {
       <Paginacion pagina={paginaPed} totalPaginas={totalPaginasPed} onChange={setPaginaPed} totalItems={filtrados.length} porPagina={POR_PAGINA_PED} />
 
       {/* Modal crear pedido */}
-      <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditando(null); }} title={editando ? `Editar ${editando.numero_pedido}` : 'Nuevo Pedido'} subtitle="Configura el pedido del cliente">
-        <div className="space-y-5">
-          {/* Cliente */}
-          <div className="rounded-xl border border-gray-100 bg-gray-50/50 p-4 space-y-3">
+      <Modal
+        open={modalOpen}
+        onClose={() => {
+          const hayCambios = !!form.cliente_id || !!form.cliente_nombre.trim() ||
+            lineas.some(l => l.producto_id || l.cantidad) || portes !== '0';
+          if (hayCambios && !editando && !window.confirm('Tienes cambios sin guardar. ¿Cerrar de todas formas?')) return;
+          setModalOpen(false); setEditando(null);
+        }}
+        maxWidth="max-w-5xl"
+        title={editando ? `Editar ${editando.numero_pedido}` : 'Nuevo pedido'}
+        subtitle={editando ? 'Modifica los datos del pedido' : 'Cliente → productos → envío'}>
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+          {/* Stepper visual — full width */}
+          <div className="xl:col-span-3">
+          {(() => {
+            const cliOK = !!form.cliente_id || !!form.cliente_nombre.trim();
+            const prodOK = lineas.some(l => l.producto_id && parseFloat(l.cantidad || '0') > 0);
+            const cli = form.cliente_id ? clientes.find(c => c.id === form.cliente_id) : null;
+            const envioOK = !!cli?.codigo_postal;
+            const pasos = [
+              { num: 1, label: 'Cliente', ok: cliOK },
+              { num: 2, label: 'Productos', ok: prodOK },
+              { num: 3, label: 'Envío', ok: envioOK, opcional: true },
+            ];
+            return (
+              <div className="flex items-center gap-1.5 sm:gap-3 -mt-1">
+                {pasos.map((p, i) => (
+                  <div key={p.num} className="flex items-center gap-1.5 sm:gap-3 flex-1">
+                    <div className={clsx(
+                      'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg flex-1 transition-colors',
+                      p.ok ? 'bg-emerald-50 text-emerald-800' :
+                      p.opcional ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'
+                    )}>
+                      <span className={clsx(
+                        'flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold shrink-0',
+                        p.ok ? 'bg-emerald-600 text-white' :
+                        p.opcional ? 'bg-amber-500 text-white' : 'bg-gray-300 text-white'
+                      )}>
+                        {p.ok ? '✓' : p.num}
+                      </span>
+                      <span className="text-xs font-semibold truncate">
+                        {p.label}{p.opcional && !p.ok && ' (recomendado)'}
+                      </span>
+                    </div>
+                    {i < pasos.length - 1 && (
+                      <div className={clsx('h-0.5 w-3 sm:w-6 shrink-0', p.ok ? 'bg-emerald-300' : 'bg-gray-200')} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          </div>
+
+          {/* Cliente — sidebar derecha en xl */}
+          <div className="rounded-xl border border-gray-100 bg-gray-50/50 p-4 space-y-3 xl:col-start-3 xl:row-start-2 xl:self-start">
             <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Cliente</p>
             <SearchSelect
               options={clientes.map(c => ({
@@ -1312,8 +1429,8 @@ export default function Pedidos() {
             })()}
           </div>
 
-          {/* Lineas del pedido */}
-          <div className="rounded-xl border border-loga-red/20 bg-red-50/20 p-4 space-y-3">
+          {/* Lineas del pedido — columna izquierda ancha, alto completo */}
+          <div ref={productosRef} className="rounded-xl border border-loga-red/20 bg-red-50/20 p-4 space-y-3 xl:col-span-2 xl:col-start-1 xl:row-start-2 xl:row-span-2 scroll-mt-2">
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-bold text-loga-red uppercase tracking-wider">Productos del pedido</p>
               <button type="button" onClick={() => setLineas(l => [...l, emptyLinea()])}
@@ -1321,6 +1438,53 @@ export default function Pedidos() {
                 <Plus size={11} /> Añadir producto
               </button>
             </div>
+
+            {/* Atajos: productos frecuentes del cliente */}
+            {form.cliente_id && Object.keys(preciosCliente).length > 0 && (() => {
+              const idsUsados = new Set(lineas.map(l => l.producto_id).filter(Boolean));
+              const top = Object.entries(preciosCliente)
+                .sort((a, b) => (b[1].num_usos ?? 0) - (a[1].num_usos ?? 0))
+                .filter(([pid]) => !idsUsados.has(pid))
+                .slice(0, 6);
+              if (top.length === 0) return null;
+              return (
+                <div className="rounded-lg bg-white/80 border border-loga-red/10 p-2 space-y-1.5">
+                  <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Productos frecuentes del cliente</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {top.map(([pid, hist]) => {
+                      const prod = productos.find(p => p.id === pid);
+                      if (!prod) return null;
+                      return (
+                        <button
+                          key={pid}
+                          type="button"
+                          onClick={() => {
+                            const vacia = lineas.findIndex(l => !l.producto_id && !l.cantidad);
+                            const nueva: LineaForm = {
+                              ...emptyLinea(),
+                              producto_id: pid,
+                              precio_unitario: hist.precio_unitario,
+                              unidad_medida: prod.unidad_medida ?? 'kg',
+                            };
+                            if (vacia >= 0) {
+                              const nl = [...lineas]; nl[vacia] = nueva; setLineas(nl);
+                            } else {
+                              setLineas(l => [...l, nueva]);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full bg-loga-red/10 hover:bg-loga-red/20 px-2.5 py-1 text-[11px] font-medium text-loga-red transition-colors"
+                          title={`${hist.num_usos ?? 0} usos · último: ${hist.ultimo_uso_at ? new Date(hist.ultimo_uso_at).toLocaleDateString('es-ES') : '—'}`}
+                        >
+                          <Plus size={10} />
+                          {prod.nombre.length > 35 ? prod.nombre.slice(0, 33) + '…' : prod.nombre}
+                          <span className="text-[9px] text-loga-red/70 font-mono">×{hist.num_usos ?? 0}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             <AnimatePresence initial={false}>
             {lineas.map((linea, idx) => {
@@ -1450,16 +1614,6 @@ export default function Pedidos() {
                             },
                           ];
 
-                          if (filtered.length === 0) {
-                            return (
-                              <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-2xl p-4 text-center">
-                                <p className="text-xs text-gray-400">
-                                  {q ? `Sin resultados para "${q}"` : 'No hay productos vendibles activos'}
-                                </p>
-                              </div>
-                            );
-                          }
-
                           const selectProd = (p: Producto) => {
                             const nl = [...lineas];
                             const { precio } = getPrecioSugerido(p.id);
@@ -1468,8 +1622,62 @@ export default function Pedidos() {
                             setLineas(nl);
                           };
 
+                          // Crear producto envasado al vuelo desde el buscador.
+                          // Útil cuando el cliente pide un producto nuevo que aún no está dado de alta.
+                          const crearEnvasadoYSeleccionar = async () => {
+                            const nombre = q.trim();
+                            if (!nombre) return;
+                            try {
+                              const r = await productosApi.crear({
+                                nombre,
+                                tipo: 'producto_envasado',
+                                unidad_medida: 'ud',
+                              });
+                              const nuevo = r.data as Producto;
+                              setProductos(prev => [...prev, nuevo]);
+                              selectProd(nuevo);
+                              setDropdownOpen(null);
+                              notify.success(`Producto "${nombre}" creado como envasado`);
+                            } catch (e) {
+                              const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error;
+                              notify.error(msg ?? 'No se pudo crear el producto');
+                            }
+                          };
+
+                          if (filtered.length === 0) {
+                            return (
+                              <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-2xl p-3 space-y-2">
+                                <p className="text-xs text-gray-400 text-center">
+                                  {q ? `Sin resultados para "${q}"` : 'No hay productos vendibles activos'}
+                                </p>
+                                {q && (
+                                  <button
+                                    type="button"
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={crearEnvasadoYSeleccionar}
+                                    className="w-full flex items-center justify-center gap-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-3 py-2 text-xs font-semibold text-emerald-700 transition-colors"
+                                  >
+                                    <Plus size={13} />
+                                    Crear "{q}" como producto envasado
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          }
+
                           return (
                             <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-2xl max-h-80 overflow-y-auto">
+                              {q && (
+                                <button
+                                  type="button"
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={crearEnvasadoYSeleccionar}
+                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 border-b border-gray-100 transition-colors"
+                                >
+                                  <Plus size={13} />
+                                  Crear "{q}" como producto envasado
+                                </button>
+                              )}
                               {grupos.filter(g => g.items.length > 0).map(g => (
                                 <div key={g.key}>
                                   <div className={clsx('sticky top-0 px-3 py-1.5 border-b z-10', g.color)}>
@@ -1851,6 +2059,19 @@ export default function Pedidos() {
                   {!cli?.codigo_postal && form.cliente_id && (
                     <p className="text-[10px] text-amber-700 italic">Añade el CP al cliente para identificar la provincia.</p>
                   )}
+                  {isAdmin && prov && (
+                    <PortesSelector
+                      pesoSugeridoKg={totals.peso}
+                      provincia={prov}
+                      agenciaActual={porteAgencia}
+                      pesoActual={portePesoKg}
+                      onElegir={({ agencia, importe, pesoUsado }) => {
+                        setPorteAgencia(agencia);
+                        setPortePesoKg(pesoUsado);
+                        setPortes(importe != null ? importe.toFixed(2) : '0');
+                      }}
+                    />
+                  )}
                 </div>
               );
             })()}
@@ -1886,7 +2107,7 @@ export default function Pedidos() {
             })()}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div ref={fechasRef} className="rounded-xl border border-gray-100 bg-white p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 xl:col-span-3 xl:row-start-4 scroll-mt-2">
             <FormField label="Fecha entrega">
               <Input type="date" value={form.fecha_entrega} onChange={e => setForm(f => ({ ...f, fecha_entrega: e.target.value }))} />
             </FormField>
@@ -1894,31 +2115,9 @@ export default function Pedidos() {
               <Input value={form.notas} onChange={e => setForm(f => ({ ...f, notas: e.target.value }))} placeholder="Observaciones..." />
             </FormField>
           </div>
-          {/* Validación inline · lista de campos que faltan */}
-          {(() => {
-            const faltas: string[] = [];
-            if (!form.cliente_id && !form.cliente_nombre.trim()) faltas.push('Cliente');
-            const lineasValidas = lineas.filter(l => l.producto_id && l.cantidad);
-            if (lineasValidas.length === 0) faltas.push('Al menos 1 producto con cantidad');
-            else {
-              lineas.forEach((l, i) => {
-                if (l.producto_id && !l.cantidad) faltas.push(`Cantidad en producto ${i + 1}`);
-                if (!l.producto_id && l.cantidad) faltas.push(`Producto en línea ${i + 1}`);
-              });
-            }
-            if (faltas.length === 0) return null;
-            return (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs space-y-0.5">
-                <p className="font-bold text-amber-800 flex items-center gap-1"><span>⚠</span> Faltan datos para crear el pedido:</p>
-                <ul className="text-amber-700 list-disc list-inside">
-                  {faltas.map((f, i) => <li key={i}>{f}</li>)}
-                </ul>
-              </div>
-            );
-          })()}
           {/* Material embalaje EXTRA — no albarán ni factura, suma a coste interno */}
           {(
-            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2">
+            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-2 xl:col-span-3">
               <div className="flex items-baseline justify-between">
                 <p className="text-xs font-bold text-amber-900">Material de embalaje extra para el pedido</p>
                 <span className="text-[10px] text-amber-700">Con precio &gt; 0 sale en albarán/factura · siempre cuenta en informe materiales</span>
@@ -2008,15 +2207,59 @@ export default function Pedidos() {
               )}
             </div>
           )}
-          <div className="flex gap-3 pt-2 sticky bottom-0 bg-white pb-1 -mx-1 px-1">
-            <button onClick={() => { setModalOpen(false); setEditando(null); }} className="flex-1 rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50">
-              Cancelar <kbd className="ml-1 text-[9px] text-gray-400 font-mono">Esc</kbd>
-            </button>
-            <button onClick={handleGuardar} disabled={saving || (!form.cliente_id && !form.cliente_nombre) || lineas.every(l => !l.producto_id || !l.cantidad)} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-gray-300 shadow-lg shadow-blue-200">
-              {saving ? 'Guardando…' : editando ? 'Guardar cambios' : 'Crear pedido'}
-              <kbd className="ml-1.5 text-[9px] text-blue-100 font-mono">⌘↵</kbd>
-            </button>
-          </div>
+          {/* Footer sticky: total grande + estado + acciones */}
+          {(() => {
+            const subtotalCalc = lineas.reduce((s, l) => {
+              const cant = parseFloat(l.cantidad || '0') * getMultiplicador(l);
+              return s + (cant * parseFloat(l.precio_unitario || '0'));
+            }, 0);
+            const portesNum = parseFloat(portes || '0');
+            const ivaNum = (subtotalCalc + portesNum) * parseFloat(ivaPct || '0') / 100;
+            const totalCalc = subtotalCalc + portesNum + ivaNum;
+
+            const faltas: string[] = [];
+            if (!form.cliente_id && !form.cliente_nombre.trim()) faltas.push('Cliente');
+            const lineasValidas = lineas.filter(l => l.producto_id && l.cantidad);
+            if (lineasValidas.length === 0) faltas.push('1 producto con cantidad');
+            else lineas.forEach((l, i) => {
+              if (l.producto_id && !l.cantidad) faltas.push(`Cantidad línea ${i + 1}`);
+              if (!l.producto_id && l.cantidad) faltas.push(`Producto línea ${i + 1}`);
+            });
+            const puedeGuardar = faltas.length === 0 && !saving;
+
+            return (
+              <div className="sticky bottom-0 -mx-4 sm:-mx-6 -mb-4 sm:-mb-5 mt-3 border-t border-gray-200 bg-white shadow-[0_-4px_10px_-6px_rgba(0,0,0,0.08)] xl:col-span-3">
+                <div className="px-4 sm:px-6 py-3 flex items-center gap-3 flex-wrap">
+                  <div className="flex-1 min-w-0">
+                    {faltas.length > 0 ? (
+                      <div className="flex items-center gap-1.5 text-amber-700 text-xs">
+                        <span className="font-bold">Falta:</span>
+                        <span className="truncate">{faltas.join(' · ')}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold">Total</span>
+                        <span className="text-xl font-bold text-gray-900 tabular-nums">{totalCalc.toFixed(2)} €</span>
+                        <span className="text-[10px] text-gray-400">IVA incl.</span>
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => { setModalOpen(false); setEditando(null); }}
+                    className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+                    Cancelar
+                  </button>
+                  <button onClick={handleGuardar} disabled={!puedeGuardar}
+                    className={clsx(
+                      'rounded-lg px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors',
+                      puedeGuardar ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-200' : 'bg-gray-300 cursor-not-allowed'
+                    )}>
+                    {saving ? 'Guardando…' : editando ? 'Guardar cambios' : 'Crear pedido'}
+                    <kbd className="ml-1.5 text-[9px] text-blue-100 font-mono">⌘↵</kbd>
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </Modal>
 
@@ -2106,7 +2349,13 @@ export default function Pedidos() {
                 <p className="text-[11px] font-semibold text-green-700 uppercase mb-2">Totales</p>
                 <div className="flex justify-between"><span className="text-gray-600">Subtotal</span><span className="font-medium tabular-nums">{parseFloat(detalle.subtotal ?? '0').toFixed(2)} EUR</span></div>
                 {detalle.portes && parseFloat(detalle.portes) > 0 && (
-                  <div className="flex justify-between"><span className="text-gray-600">Portes</span><span className="font-medium tabular-nums">{parseFloat(detalle.portes).toFixed(2)} EUR</span></div>
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-gray-600 flex items-center gap-1.5">
+                      Portes
+                      <AgenciaBadge agencia={detalle.porte_agencia} pesoKg={detalle.porte_peso_kg} />
+                    </span>
+                    <span className="font-medium tabular-nums">{parseFloat(detalle.portes).toFixed(2)} EUR</span>
+                  </div>
                 )}
                 <div className="flex justify-between"><span className="text-gray-600">IVA ({detalle.iva_porcentaje ?? '21'}%)</span><span className="font-medium tabular-nums">{((parseFloat(detalle.subtotal ?? '0') + parseFloat(detalle.portes ?? '0')) * parseFloat(detalle.iva_porcentaje ?? '21') / 100).toFixed(2)} EUR</span></div>
                 <div className="flex justify-between pt-1 border-t border-green-200 text-sm font-bold text-gray-900"><span>TOTAL</span><span>{parseFloat(detalle.total).toFixed(2)} EUR</span></div>

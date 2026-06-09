@@ -11,6 +11,7 @@ import CatalogoSpecs from '../components/CatalogoSpecs';
 import CatalogoSubcategorias from '../components/CatalogoSubcategorias';
 import IntegracionAlilo from '../components/IntegracionAlilo';
 import HistorialActividad from '../components/HistorialActividad';
+import PortesConfigSection from '../components/PortesConfigSection';
 import { FormField, Input, Textarea } from '../components/FormField';
 import { notify } from '../lib/notify';
 import { ToastBlock, ToastField } from '../components/ToastFields';
@@ -73,6 +74,7 @@ const TOC_GROUPS: TocGroup[] = [
     titulo: 'Comercial',
     items: [
       { id: 'niveles', label: 'Niveles de clientes', icon: Award, desc: 'Umbrales Oro, Plata, Bronce' },
+      { id: 'portes',  label: 'Portes',              icon: Package, desc: 'Multiplicadores Schenker + tarifas' },
     ],
   },
   {
@@ -761,6 +763,9 @@ export default function Configuracion() {
               </p>
             </div>
           </section>
+
+          {/* Sección: portes */}
+          <PortesConfigSection />
 
           {/* Sección: catálogo de specs */}
           <section id="specs" className="scroll-mt-6 rounded-2xl border border-gray-100 bg-white shadow-sm overflow-hidden">

@@ -289,6 +289,24 @@ export const cambioApi = {
   obtener:  (divisa: string) => api.get(`/cambio/${divisa}`),
 };
 
+export const portesApi = {
+  provincias: () => api.get<string[]>('/portes/provincias'),
+  calcular: (data: { peso: number; provincia: string; numPallets?: number; servicio?: 'ECONOMY' | 'PREMIUM' }) =>
+    api.post('/portes/calcular', data),
+  getConfig: () => api.get<{ subida: number; seguro: number; combustible: number; actualizado_at?: string }>('/portes/config'),
+  setConfig: (data: { subida: number; seguro: number; combustible: number }) => api.put('/portes/config', data),
+  plantillaPaletrapid: () => api.get('/portes/tarifas/paletrapid/plantilla', { responseType: 'blob' }),
+  plantillaPalletways: () => api.get('/portes/tarifas/palletways/plantilla', { responseType: 'blob' }),
+  importarPaletrapid: (file: File) => {
+    const fd = new FormData(); fd.append('archivo', file);
+    return api.post('/portes/tarifas/paletrapid/importar', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+  importarPalletways: (file: File) => {
+    const fd = new FormData(); fd.append('archivo', file);
+    return api.post('/portes/tarifas/palletways/importar', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
+};
+
 export const recordatoriosApi = {
   listar:           (mes?: string) => api.get('/recordatorios', { params: mes ? { mes } : {} }),
   pendientes:       () => api.get('/recordatorios/pendientes'),

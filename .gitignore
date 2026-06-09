@@ -19,5 +19,8 @@ backend/facturas-test/
 # Paquetes para distribución a clientes
 LogaERP-paquete-cliente.zip
 
+# Tarifas originales (PDFs/Excel de las agencias). Los datos ya están en BD.
+tarifasagenciatransportes/
+
 # Ya no se versiona .env (logaerp.bat / install.ps1 lo crean automaticamente
 # en Windows con puerto 5433; en Mac dev usar puerto 5432 manualmente)

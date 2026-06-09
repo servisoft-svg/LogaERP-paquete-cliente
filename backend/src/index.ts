@@ -24,6 +24,7 @@ import recordatoriosRoutes     from './routes/recordatorios.routes';
 import pedidosProgramadosRoutes from './routes/pedidos-programados.routes';
 import cambioRoutes              from './routes/cambio.routes';
 import facturasRoutes            from './routes/facturas.routes';
+import portesRoutes              from './routes/portes.routes';
 import { emailService } from './services/email.service';
 import finanzasRoutes         from './routes/finanzas.routes';
 import authRoutes             from './routes/auth.routes';
@@ -331,6 +332,7 @@ app.use('/api/specs',         authMiddleware, specsRoutes);
 app.use('/api/recordatorios', authMiddleware, recordatoriosRoutes);
 app.use('/api/pedidos-programados', authMiddleware, pedidosProgramadosRoutes);
 app.use('/api/cambio',        authMiddleware, cambioRoutes);
+app.use('/api/portes',        authMiddleware, portesRoutes);
 // /api/facturas — auth per-handler: /parse usa Bearer normal,
 // /file usa token via query param (iframe no envía Authorization).
 app.use('/api/facturas',      facturasRoutes);

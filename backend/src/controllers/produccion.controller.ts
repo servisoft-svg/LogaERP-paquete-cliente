@@ -819,151 +819,162 @@ export const produccionController = {
 
       const fmtNum = (n: number, d = 2) => n.toLocaleString('es-ES', { maximumFractionDigits: d, minimumFractionDigits: 0 });
 
-      // Cabecera: título a la izquierda (ancho limitado para no chocar con la
-      // meta) + meta de la orden alineada a la derecha en la misma línea.
+      // Cabecera compacta: título + meta en 1 línea
       let y = 40;
-      const metaTxt = `Orden ${orden.numero_orden ?? '—'}  ·  ${fmtNum(parseFloat(orden.cantidad_planificada))} ${orden.unidad_medida}  ·  ${new Date().toLocaleDateString('es-ES')}${orden.fecha_planificada ? `  ·  planificada ${new Date(orden.fecha_planificada).toLocaleDateString('es-ES')}` : ''}`;
-      // Meta a la derecha primero, alineada al baseline del título
-      doc.font('Helvetica').fontSize(11).fillColor(GRAY)
-        .text(metaTxt, 320, y + 8, { width: 235, align: 'right' });
-      // Título a la izquierda con ancho acotado para no pisar la meta
-      doc.fillColor(TXT).font('Helvetica-Bold').fontSize(20)
+      const metaTxt = `Orden ${orden.numero_orden ?? '—'}  ·  ${fmtNum(parseFloat(orden.cantidad_planificada))} ${orden.unidad_medida}  ·  ${new Date().toLocaleDateString('es-ES')}${orden.fecha_planificada ? `  ·  planif. ${new Date(orden.fecha_planificada).toLocaleDateString('es-ES')}` : ''}`;
+      doc.font('Helvetica').fontSize(8).fillColor(GRAY)
+        .text(metaTxt, 320, y + 4, { width: 235, align: 'right' });
+      doc.fillColor(TXT).font('Helvetica-Bold').fontSize(14)
         .text(`Receta · ${orden.producto_codigo} — ${orden.producto_nombre}`, 40, y, { width: 270 });
-      y = Math.max(y + 30, doc.y + 8);
-      doc.moveTo(40, y).lineTo(555, y).strokeColor(RED).lineWidth(1).stroke();
-      y += 14;
+      y = Math.max(y + 18, doc.y + 4);
+      doc.moveTo(40, y).lineTo(555, y).strokeColor(RED).lineWidth(0.8).stroke();
+      y += 6;
 
-      // Rangos QC objetivo en una línea
+      // Rangos QC en 1 línea
       const rangosQc: string[] = [];
       if (orden.ph_min != null || orden.ph_max != null) rangosQc.push(`pH ${orden.ph_min ?? '?'}–${orden.ph_max ?? '?'}`);
       if (orden.solidos_min != null || orden.solidos_max != null) rangosQc.push(`Sól ${orden.solidos_min ?? '?'}–${orden.solidos_max ?? '?'}%`);
       if (orden.viscosidad_min != null || orden.viscosidad_max != null) rangosQc.push(`Visc ${orden.viscosidad_min ?? '?'}–${orden.viscosidad_max ?? '?'} cP`);
       if (rangosQc.length > 0) {
-        doc.fontSize(12).fillColor(GRAY).text(`Rangos QC: ${rangosQc.join('  ·  ')}`, 40, y);
-        y += 22;
+        doc.fontSize(8).fillColor(GRAY).text(`Rangos QC: ${rangosQc.join('  ·  ')}`, 40, y);
+        y += 12;
       }
 
       // Últimas fabricaciones QC (tabla compacta, sin fondo)
       if (ultimosQC.length > 0) {
         if (y > 720) { doc.addPage(); y = 40; }
-        doc.font('Helvetica-Bold').fontSize(12).fillColor(TXT)
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(TXT)
           .text('Últimas fabricaciones', 40, y);
-        y += 16;
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(GRAY)
+        y += 11;
+        doc.font('Helvetica-Bold').fontSize(7).fillColor(GRAY)
           .text('Lote',    40, y, { width: 110 })
           .text('Fecha',   155, y, { width: 75 })
           .text('pH',      235, y, { width: 55, align: 'right' })
           .text('Sól. %', 300, y, { width: 60, align: 'right' })
           .text('Visc.',   365, y, { width: 60, align: 'right' });
-        y += 14;
-        doc.moveTo(40, y - 2).lineTo(430, y - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+        y += 9;
+        doc.moveTo(40, y - 2).lineTo(430, y - 2).strokeColor('#E5E7EB').lineWidth(0.4).stroke();
         for (const l of ultimosQC) {
-          doc.font('Helvetica').fontSize(10).fillColor(TXT)
+          doc.font('Helvetica').fontSize(7).fillColor(TXT)
             .text(l.lote_interno ?? '—', 40, y, { width: 110 })
             .text(l.created_at ? new Date(l.created_at).toLocaleDateString('es-ES') : '—', 155, y, { width: 75 })
             .text(l.ph != null ? fmtNum(parseFloat(l.ph)) : '—', 235, y, { width: 55, align: 'right' })
             .text(l.solidos != null ? fmtNum(parseFloat(l.solidos)) : '—', 300, y, { width: 60, align: 'right' })
             .text(l.viscosidad != null ? fmtNum(parseFloat(l.viscosidad)) : '—', 365, y, { width: 60, align: 'right' });
-          y += 13;
+          y += 9;
         }
-        y += 8;
+        y += 4;
       }
 
       // PASOS
       let acumulado = 0;
-      if (y > 740) { doc.addPage(); y = 40; }
-      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(TXT)
         .text('Pasos', 40, y);
-      y += 22;
+      y += 14;
+
+      // Encabezado columnas
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(GRAY)
+        .text('✓', 40, y, { width: 14, align: 'center' })
+        .text('MATERIA PRIMA', 58, y, { width: 200 })
+        .text('AÑADIR', 260, y, { width: 80, align: 'center' })
+        .text('TANQUE', 345, y, { width: 85, align: 'center' })
+        .text('OPERARIO', 435, y, { width: 120, align: 'center' });
+      y += 15;
+      doc.moveTo(40, y).lineTo(555, y).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+      y += 6;
 
       pasosFiltrados.forEach((paso, idx) => {
-        if (y > 740) { doc.addPage(); y = 40; }
+        if (y > 760) { doc.addPage(); y = 40; }
 
         const ingsPaso = (paso.ingredientes_ids ?? []).map(mpId => ingMap.get(mpId)).filter(Boolean) as Ing[];
 
-        // Línea de cabecera del paso: una sola string sin continued (evita wrap bug)
+        // Cabecera del paso compacta
         const faseLabel = (paso.fase ?? '').toUpperCase();
         const titulo = paso.titulo ? ` — ${paso.titulo}` : '';
-        doc.font('Helvetica-Bold').fontSize(14).fillColor(TXT)
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(TXT)
           .text(`${idx + 1}. `, 40, y, { width: 515, continued: true })
           .fillColor(RED).text(faseLabel, { continued: !!paso.titulo })
           .fillColor(TXT).font('Helvetica-Bold')
           .text(titulo);
-        y = doc.y + 4;
+        y = doc.y + 2;
 
         if (paso.descripcion) {
-          doc.font('Helvetica').fontSize(12).fillColor(GRAY)
+          doc.font('Helvetica').fontSize(8).fillColor(GRAY)
             .text(paso.descripcion, 58, y, { width: 497 });
-          y = doc.y + 4;
+          y = doc.y + 2;
         }
 
-        // Ingredientes del paso — cada uno con acumulado parcial + lote FEFO sugerido
+        // Ingredientes del paso — cada uno con acumulado + lote FEFO sugerido inline
         if (ingsPaso.length > 0) {
           for (const ing of ingsPaso) {
-            if (y > 750) { doc.addPage(); y = 40; }
+            if (y > 770) { doc.addPage(); y = 40; }
             acumulado += ing.cantidad;
-            // Línea ingrediente: código + nombre · cantidad → tanque
-            const izq = `   ${ing.mp_codigo}  ${ing.mp_nombre}`;
-            const der = `${fmtNum(ing.cantidad, 3)} ${ing.unidad}   /   ${fmtNum(acumulado)} ${orden.unidad_medida}`;
+            const rowH = 26; // alto fila + gap entre productos
+            // [✓] checkbox
+            doc.rect(40, y, 14, 14).strokeColor('#94A3B8').lineWidth(0.7).stroke();
+            // Nombre materia prima
             doc.font('Helvetica').fontSize(13).fillColor(TXT)
-              .text(izq, 58, y, { width: 310 });
-            doc.font('Helvetica-Bold').fontSize(13).fillColor(TXT)
-              .text(der, 368, y, { width: 187, align: 'right' });
-            y += 18;
-            // Lote FEFO sugerido (primer lote no agotado)
+              .text(`${ing.mp_codigo}  ${ing.mp_nombre}`, 58, y + 1, { width: 200, ellipsis: true });
+            // Lote FEFO sugerido — pequeño debajo del nombre
             const lotes = lotesFefo.get(ing.mp_id) ?? [];
             if (lotes.length > 0) {
-              // Recomendar suficientes lotes para cubrir la cantidad
               let pend = ing.cantidad;
               const sug: string[] = [];
               for (const l of lotes) {
                 if (pend <= 0) break;
                 const usar = Math.min(pend, parseFloat(l.cantidad_actual));
-                sug.push(`${l.lote_interno} (${fmtNum(usar, 2)})`);
+                sug.push(`${l.lote_interno}`);
                 pend -= usar;
               }
               if (sug.length > 0) {
-                doc.font('Helvetica-Oblique').fontSize(11).fillColor(GRAY)
-                  .text(`   lotes: ${sug.join('  +  ')}`, 70, y, { width: 485 });
-                y = doc.y + 4;
+                doc.font('Helvetica-Oblique').fontSize(9).fillColor(GRAY)
+                  .text(`lote: ${sug.join(' + ')}`, 58, y + 15, { width: 200, ellipsis: true });
               }
             }
+            // [AÑADIR] en cuadro
+            doc.roundedRect(260, y - 1, 80, 20, 2.5).strokeColor('#94A3B8').lineWidth(0.7).stroke();
+            doc.font('Helvetica-Bold').fontSize(13).fillColor(TXT)
+              .text(`${fmtNum(ing.cantidad, 3)} ${ing.unidad}`, 262, y + 3, { width: 76, align: 'center' });
+            // [TANQUE] cuadro destacado rojo
+            doc.roundedRect(345, y - 1, 85, 20, 2.5).fillAndStroke('#FEE2E2', RED);
+            doc.font('Helvetica-Bold').fontSize(13).fillColor(RED)
+              .text(`${fmtNum(acumulado)} ${orden.unidad_medida}`, 347, y + 3, { width: 81, align: 'center' });
+            // Línea para nombre operario
+            doc.moveTo(440, y + 15).lineTo(550, y + 15).strokeColor('#94A3B8').lineWidth(0.5).stroke();
+            y += rowH;
           }
         }
 
-        y += 6;
+        y += 5;
       });
 
-      // Total final
-      if (y > 740) { doc.addPage(); y = 40; }
-      doc.moveTo(40, y).lineTo(555, y).strokeColor(TXT).lineWidth(0.8).stroke();
-      y += 8;
-      doc.font('Helvetica-Bold').fontSize(16).fillColor(TXT)
+      // Total final compacto
+      doc.moveTo(40, y).lineTo(555, y).strokeColor(TXT).lineWidth(0.6).stroke();
+      y += 4;
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(TXT)
         .text(`TOTAL`, 40, y, { width: 380 })
         .text(`${fmtNum(acumulado)} ${orden.unidad_medida}`, 420, y, { width: 135, align: 'right' });
-      y += 36;
+      y += 16;
 
-      // ── OBSERVACIONES (notas de la orden) — caja grande al final ──
+      // Observaciones compacto
       {
         const obs = (orden.notas ?? '').toString().trim();
         const obsLineas = obs ? obs : '— (sin observaciones) —';
-        doc.font('Helvetica').fontSize(13);
+        doc.font('Helvetica').fontSize(8);
         const altoTexto = doc.heightOfString(obsLineas, { width: 495 });
-        const boxH = Math.max(80, altoTexto + 36);
-        if (y + boxH > 780) { doc.addPage(); y = 40; }
-        doc.roundedRect(40, y, 515, boxH, 6).strokeColor('#F59E0B').lineWidth(1.5).stroke();
-        doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(13).text('OBSERVACIONES', 50, y + 8);
-        doc.fillColor(obs ? TXT : GRAY).font(obs ? 'Helvetica' : 'Helvetica-Oblique').fontSize(13)
-          .text(obsLineas, 50, y + 28, { width: 495 });
-        y += boxH + 14;
+        const boxH = Math.max(28, altoTexto + 14);
+        doc.roundedRect(40, y, 515, boxH, 3).strokeColor('#F59E0B').lineWidth(0.8).stroke();
+        doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(8).text('OBSERVACIONES', 46, y + 3);
+        doc.fillColor(obs ? TXT : GRAY).font(obs ? 'Helvetica' : 'Helvetica-Oblique').fontSize(8)
+          .text(obsLineas, 46, y + 14, { width: 495 });
+        y += boxH + 6;
       }
 
-      // Firmas
-      if (y > 770) { doc.addPage(); y = 40; }
-      doc.font('Helvetica').fontSize(12).fillColor(GRAY)
+      // Firmas compactas
+      doc.font('Helvetica').fontSize(8).fillColor(GRAY)
         .text('Operario: _____________________________', 40, y)
         .text('QC: _____________________________', 320, y);
-      y += 20;
+      y += 12;
       doc.text(`Fecha: ____/____/______`, 40, y)
         .text(`Fecha: ____/____/______`, 320, y);
 

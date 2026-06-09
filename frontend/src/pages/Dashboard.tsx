@@ -11,6 +11,7 @@ import { stockApi, produccionApi, pedidosApi, configuracionApi, finanzasApi } fr
 import type { Producto, OrdenProduccion, Notificacion, Pedido } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
+import AgenciaBadge from '../components/AgenciaBadge';
 import RecordatorioModal from '../components/RecordatorioModal';
 import { notify } from '../lib/notify';
 import clsx from 'clsx';
@@ -69,7 +70,7 @@ export default function Dashboard() {
   const [nuevoRec, setNuevoRec] = useState<{ fecha: string; titulo: string; color: string } | null>(null);
   const [diaSeleccionado, setDiaSeleccionado] = useState<string | null>(null);
   const [calFiltros, setCalFiltros] = useState<Set<string>>(() => {
-    try { const saved = localStorage.getItem('loga_cal_filtros'); return saved ? new Set(JSON.parse(saved)) : new Set(['pendientes', 'completadas', 'recordatorios']); } catch { return new Set(['pendientes', 'completadas', 'recordatorios']); }
+    try { const saved = localStorage.getItem('loga_cal_filtros'); return saved ? new Set(JSON.parse(saved)) : new Set(['pendientes', 'completadas', 'recordatorios', 'entregas']); } catch { return new Set(['pendientes', 'completadas', 'recordatorios', 'entregas']); }
   });
   const [dragItem, setDragItem] = useState<{ id: string; tipo: 'orden' | 'recordatorio' } | null>(null);
 
@@ -82,7 +83,7 @@ export default function Dashboard() {
     const next = new Set(calFiltros);
     if (f === 'todo') {
       // Todo = activar todos
-      ['pendientes', 'completadas', 'recordatorios', 'predicciones'].forEach(x => next.add(x));
+      ['pendientes', 'completadas', 'recordatorios', 'entregas', 'predicciones'].forEach(x => next.add(x));
     } else if (next.has(f)) {
       next.delete(f);
     } else {
@@ -98,7 +99,7 @@ export default function Dashboard() {
         stockApi.listarProductos(),
         produccionApi.dashboard(mesActual),
         stockApi.notificaciones(false),
-        pedidosApi.listar({ limit: '30' }).catch(() => ({ data: [] })),
+        pedidosApi.listar({ limit: '200' }).catch(() => ({ data: [] })),
       ]);
       setProductos(prodRes.data as Producto[]);
       setOrdenes(ordRes.data as OrdenProduccion[]);
@@ -401,6 +402,7 @@ export default function Dashboard() {
             { v: 'pendientes', l: 'Pendientes' },
             { v: 'completadas', l: 'Completadas' },
             { v: 'recordatorios', l: 'Recordatorios' },
+            { v: 'entregas', l: 'Entregas' },
             { v: 'predicciones', l: 'Predicciones' },
           ]).map(f => (
             <button key={f.v} onClick={() => toggleFiltro(f.v)}
@@ -421,7 +423,12 @@ export default function Dashboard() {
               if (o.estado === 'completada') return calFiltros.has('completadas');
               return calFiltros.has('pendientes');
             });
-            const totalItems = dayRecs.length + dayOrds.length;
+            // Entregas: pedidos no cancelados con fecha_entrega en este día
+            const dayEntregas = calFiltros.has('entregas')
+              ? pedidos.filter(p => p.fecha_entrega && p.estado !== 'cancelado'
+                  && p.fecha_entrega.slice(0, 10) === cell.dateStr)
+              : [];
+            const totalItems = dayRecs.length + dayOrds.length + dayEntregas.length;
 
             return (
               <div key={i}
@@ -499,7 +506,17 @@ export default function Dashboard() {
                         {o.tipo_orden === 'envasado' ? 'ENV' : 'FAB'} {parseFloat(o.cantidad_planificada).toFixed(0)}{o.tipo_orden === 'envasado' ? 'ud' : 'kg'} {o.receta_nombre?.split(' ')[0]}
                       </div>
                     ))}
-                    {(dayOrds.length + dayRecs.length) > 3 && <p className="text-[8px] text-gray-400 text-center">+{dayOrds.length + dayRecs.length - 3}</p>}
+                    {/* Entregas pedido */}
+                    {dayEntregas.slice(0, 2).map(p => (
+                      <div key={`ent-${p.id}`}
+                        onClick={(e) => { e.stopPropagation(); navigate('/pedidos'); }}
+                        title={`Entrega ${p.numero_pedido} · ${p.cliente_nombre_rel ?? p.cliente_nombre ?? ''}`}
+                        className="rounded px-1 py-0.5 mb-0.5 text-[9px] font-medium truncate cursor-pointer leading-tight bg-orange-100 text-orange-700 border border-orange-200 hover:bg-orange-200 transition-colors"
+                      >
+                        📦 {p.cliente_nombre_rel ?? p.cliente_nombre ?? p.numero_pedido}
+                      </div>
+                    ))}
+                    {totalItems > 3 && <p className="text-[8px] text-gray-400 text-center">+{totalItems - 3}</p>}
                   </>
                 )}
               </div>
@@ -516,6 +533,9 @@ export default function Dashboard() {
           return raw && new Date(raw).toLocaleDateString('en-CA') === diaSeleccionado;
         });
         const dayPreds = predicciones.filter(p => p.estado === 'activo' && p.dias_restantes > 0 && p.fecha_estimada === diaSeleccionado);
+        const dayEntregasDet = pedidos.filter(p =>
+          p.fecha_entrega && p.estado !== 'cancelado' && p.fecha_entrega.slice(0, 10) === diaSeleccionado
+        );
         const fechaLabel = new Date(diaSeleccionado + 'T12:00').toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
         return (
           <motion.section initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
@@ -529,9 +549,20 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {dayRecs.length === 0 && dayOrds.length === 0 && dayPreds.length === 0 && (
+            {dayRecs.length === 0 && dayOrds.length === 0 && dayPreds.length === 0 && dayEntregasDet.length === 0 && (
               <p className="text-xs text-gray-400 text-center py-3">Sin actividad este día</p>
             )}
+
+            {dayEntregasDet.map(p => (
+              <button key={`ent-det-${p.id}`} onClick={() => navigate('/pedidos')}
+                className="w-full text-left rounded-lg border border-orange-200 bg-orange-50/60 hover:bg-orange-100 p-3 flex items-center gap-3 transition-colors">
+                <span className="text-base">📦</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold text-orange-900 truncate">Entrega · {p.cliente_nombre_rel ?? p.cliente_nombre ?? 'Sin cliente'}</p>
+                  <p className="text-[10px] text-orange-700 font-mono">{p.numero_pedido} · {p.estado}</p>
+                </div>
+              </button>
+            ))}
 
             {dayRecs.map(r => {
               const yoLeido = !!(user && r.entregados_por && r.entregados_por.includes(user.id));
@@ -974,7 +1005,10 @@ export default function Dashboard() {
                       <p className="text-[11px] font-mono text-gray-400">{p.numero_pedido}</p>
                       <p className="text-sm font-semibold text-gray-900 truncate">{p.cliente_nombre_rel ?? p.cliente_nombre ?? p.cliente_email ?? 'Sin cliente'}</p>
                     </div>
-                    <PedidoBadge estado={p.estado} />
+                    <div className="flex flex-col items-end gap-1">
+                      <PedidoBadge estado={p.estado} />
+                      {p.porte_agencia && <AgenciaBadge agencia={p.porte_agencia} pesoKg={p.porte_peso_kg} />}
+                    </div>
                   </div>
                   <p className="text-xs text-gray-600 truncate">
                     {p.producto_nombre_rel ?? p.producto_nombre ?? 'Producto por asignar'}

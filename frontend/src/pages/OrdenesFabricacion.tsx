@@ -3,10 +3,10 @@ import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, ChevronRight, ChevronLeft, Factory,
-  Check, AlertCircle, ClipboardList, Trash2, Eye, X, Send, Search, Paperclip, Pencil, Sparkles, Package, Tag,
+  Check, AlertCircle, ClipboardList, Trash2, Eye, X, Send, Search, Paperclip, Pencil, Sparkles, Package, Tag, Bell,
 } from 'lucide-react';
-import { produccionApi, recetasApi, clientesApi, productosApi } from '../api/client';
-import type { OrdenProduccion, Receta, Cliente, Producto } from '../types';
+import { produccionApi, recetasApi, clientesApi, productosApi, pedidosApi } from '../api/client';
+import type { OrdenProduccion, Receta, Cliente, Producto, Pedido } from '../types';
 import SpinnerColaBlanca from '../components/SpinnerColaBlanca';
 import FabricacionModal from '../components/FabricacionModal';
 import EtiquetaPreviewModal from '../components/EtiquetaPreviewModal';
@@ -70,6 +70,7 @@ export default function OrdenesFabricacion() {
   const [ordenes, setOrdenes]         = useState<OrdenProduccion[]>([]);
   const [recetas, setRecetas]         = useState<Receta[]>([]);
   const [clientesList, setClientesList] = useState<Cliente[]>([]);
+  const [pedidosRecientes, setPedidosRecientes] = useState<Pedido[]>([]);
   const [loading, setLoading]         = useState(true);
   const [busqueda, setBusqueda]       = useState('');
   const [tabProd, setTabProd]         = useState<'fabricacion' | 'envasado'>(
@@ -147,14 +148,16 @@ export default function OrdenesFabricacion() {
 
   const cargar = useCallback(async () => {
     try {
-      const [ordRes, recRes, cliRes] = await Promise.all([
+      const [ordRes, recRes, cliRes, pedRes] = await Promise.all([
         produccionApi.listar(),
         recetasApi.listar({ activa: true }),
         clientesApi.listar().catch(() => ({ data: [] })),
+        pedidosApi.listar().catch(() => ({ data: [] })),
       ]);
       setOrdenes(ordRes.data as OrdenProduccion[]);
       setRecetas(recRes.data as Receta[]);
       setClientesList(cliRes.data as Cliente[]);
+      setPedidosRecientes(pedRes.data as Pedido[]);
     } catch {
       try {
         const ordRes = await produccionApi.listar();
@@ -173,6 +176,13 @@ export default function OrdenesFabricacion() {
       productosApi.listar({ activo: 'true' }).then(res => setProductos(res.data as Producto[]));
     }
   }, [showEnvasadoForm]);
+
+  // Load productos when nueva orden form opens (para detectar falta de stock)
+  useEffect(() => {
+    if (showForm && productos.length === 0) {
+      productosApi.listar({ activo: 'true' }).then(res => setProductos(res.data as Producto[]));
+    }
+  }, [showForm]);
 
   // Auto-fill from envasado recipe when selecting producto final
   const autoFillFromRecipe = async (productoId: string) => {
@@ -581,7 +591,7 @@ export default function OrdenesFabricacion() {
       {/* Modal formulario paso a paso */}
       <AnimatePresence>
         {showForm && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[100] flex items-start justify-center p-4 pt-6">
             <motion.div
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               className="fixed inset-0 bg-black/30 backdrop-blur-sm"
@@ -592,231 +602,274 @@ export default function OrdenesFabricacion() {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95 }}
               transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-              className="relative z-10 w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden"
+              className="relative z-10 w-full max-w-2xl rounded-2xl bg-white shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
             >
-              {/* Progress bar */}
-              <div className="h-1 bg-gray-100">
-                <motion.div
-                  className="h-full bg-loga-red"
-                  animate={{ width: `${(step / 3) * 100}%` }}
-                  transition={{ duration: 0.3 }}
-                />
-              </div>
-
-              <div className="px-6 py-5">
-                <div className="flex items-center justify-between mb-6">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-50">
-                      <Factory size={18} className="text-loga-red" />
-                    </div>
-                    <div>
-                      <h2 className="text-sm font-semibold text-gray-900">Nueva Orden</h2>
-                      <p className="text-xs text-gray-400">Paso {step} de 3</p>
-                    </div>
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-50">
+                    <Factory size={18} className="text-loga-red" />
                   </div>
-                  {/* Steps indicator */}
-                  <div className="flex gap-1.5">
-                    {[1, 2, 3].map((s) => (
-                      <div
-                        key={s}
-                        className={clsx(
-                          'h-2 w-2 rounded-full transition-colors',
-                          s <= step ? 'bg-loga-red' : 'bg-gray-200'
-                        )}
-                      />
-                    ))}
+                  <div>
+                    <h2 className="text-sm font-semibold text-gray-900">Nueva orden de fabricación</h2>
+                    <p className="text-[11px] text-gray-400">Receta + cantidad. Lo demás es opcional.</p>
                   </div>
                 </div>
+                <button onClick={() => setShowForm(false)} className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100"><X size={16} /></button>
+              </div>
 
-                {/* Paso 1: Selección de receta */}
-                {step === 1 && (
-                  <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Seleccionar Receta *
-                      </label>
-                      {recetas.length > 0 ? (
-                        (() => {
-                          const recetasTab = recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === tabProd);
-                          const sel = recetasTab.find(r => r.id === form.receta_id);
-                          return (
-                            <SearchSelect
-                              options={recetasTab.map(r => ({
-                                id: r.id,
-                                label: r.nombre,
-                                sub: r.producto_nombre,
-                              }))}
-                              value={form.receta_id}
-                              onChange={(id) => setForm((f) => ({ ...f, receta_id: id }))}
-                              placeholder={`Buscar ${tabProd === 'envasado' ? 'envasado' : 'receta'}...`}
-                              selectedLabel={sel?.nombre}
-                              selectedSub={sel?.producto_nombre}
-                            />
-                          );
-                        })()
-                      ) : (
-                        <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs text-gray-400 text-center">
-                          <p>No hay recetas activas. Crea una receta antes de fabricar.</p>
-                          <p className="mt-1 font-mono text-gray-300">POST /api/recetas</p>
+              <div className="px-6 py-5 overflow-y-auto flex-1 space-y-4">
+                {/* Atajos: recetas más usadas + con pedidos pendientes */}
+                {(() => {
+                  const recetasTab = recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === tabProd);
+                  // Recetas más usadas (count en ordenes recientes, sin completadas)
+                  const usoMap = new Map<string, number>();
+                  for (const o of ordenes) {
+                    if ((o as any).receta_id) {
+                      usoMap.set((o as any).receta_id, (usoMap.get((o as any).receta_id) ?? 0) + 1);
+                    }
+                  }
+                  const masUsadas = recetasTab
+                    .map(r => ({ r, usos: usoMap.get(r.id) ?? 0 }))
+                    .filter(x => x.usos > 0)
+                    .sort((a, b) => b.usos - a.usos)
+                    .slice(0, 5);
+
+                  // Pedidos pendientes últimos 2 días que NO se pueden completar por falta de stock
+                  const haceDosDias = Date.now() - 2 * 86400_000;
+                  const stockPorProducto = new Map<string, number>();
+                  for (const prod of productos) {
+                    stockPorProducto.set(prod.id, parseFloat(prod.stock_actual ?? '0') || 0);
+                  }
+                  const pendientes = pedidosRecientes.filter(p => {
+                    if (!['confirmado', 'fabricado', 'envasado'].includes(p.estado)) return false;
+                    const t = new Date(p.created_at).getTime();
+                    if (t < haceDosDias) return false;
+                    // Solo si el stock no cubre la cantidad pedida
+                    if (!p.producto_id) return false;
+                    const stock = stockPorProducto.get(p.producto_id);
+                    if (stock === undefined) return false; // productos aún no cargados
+                    const necesario = parseFloat(p.cantidad ?? '0') || 0;
+                    return stock < necesario;
+                  });
+                  // Mapea producto_id → receta_id (primera receta que produce ese producto)
+                  const recetasPendientes = new Map<string, { receta: Receta; pedidos: Pedido[]; faltaKg: number }>();
+                  for (const p of pendientes) {
+                    if (!p.producto_id) continue;
+                    const recetaProd = recetasTab.find(r => (r as any).producto_id === p.producto_id);
+                    if (!recetaProd) continue;
+                    const necesario = parseFloat(p.cantidad ?? '0') || 0;
+                    const stock = stockPorProducto.get(p.producto_id) ?? 0;
+                    const falta = Math.max(0, necesario - stock);
+                    const prev = recetasPendientes.get(recetaProd.id);
+                    if (prev) { prev.pedidos.push(p); prev.faltaKg += falta; }
+                    else recetasPendientes.set(recetaProd.id, { receta: recetaProd, pedidos: [p], faltaKg: falta });
+                  }
+
+                  if (masUsadas.length === 0 && recetasPendientes.size === 0) return null;
+
+                  return (
+                    <div className="space-y-3">
+                      {recetasPendientes.size > 0 && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 space-y-1.5">
+                          <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wide flex items-center gap-1">
+                            <Bell size={11} /> Pedidos sin stock (últimos 2 días) — click para autorrellenar cantidad
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Array.from(recetasPendientes.values()).map(({ receta, pedidos, faltaKg }) => (
+                              <button
+                                key={receta.id}
+                                type="button"
+                                onClick={() => setForm(f => ({
+                                  ...f,
+                                  receta_id: receta.id,
+                                  cantidad_planificada: faltaKg > 0 ? String(Math.ceil(faltaKg)) : f.cantidad_planificada,
+                                }))}
+                                className={clsx(
+                                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors',
+                                  form.receta_id === receta.id
+                                    ? 'bg-amber-600 text-white border-amber-700'
+                                    : 'bg-white text-amber-800 border-amber-300 hover:bg-amber-100'
+                                )}
+                                title={`${pedidos.length} pedido(s) sin stock. Falta ${faltaKg.toFixed(0)} ${receta.unidad_medida ?? 'kg'}`}
+                              >
+                                {receta.nombre.length > 28 ? receta.nombre.slice(0, 26) + '…' : receta.nombre}
+                                <span className="font-mono opacity-80">×{pedidos.length}</span>
+                                {faltaKg > 0 && <span className="font-mono opacity-70 text-[10px]">· falta {faltaKg.toFixed(0)}{receta.unidad_medida ?? 'kg'}</span>}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {masUsadas.length > 0 && (
+                        <div className="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 space-y-1.5">
+                          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Recetas más usadas</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {masUsadas.map(({ r, usos }) => (
+                              <button
+                                key={r.id}
+                                type="button"
+                                onClick={() => setForm(f => ({ ...f, receta_id: r.id }))}
+                                className={clsx(
+                                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border transition-colors',
+                                  form.receta_id === r.id
+                                    ? 'bg-loga-red text-white border-loga-red'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-loga-red/10 hover:border-loga-red/40'
+                                )}
+                              >
+                                {r.nombre.length > 28 ? r.nombre.slice(0, 26) + '…' : r.nombre}
+                                <span className="font-mono opacity-60">×{usos}</span>
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
+                  );
+                })()}
 
-                    <div className="flex justify-end">
-                      <button
-                        disabled={!form.receta_id}
-                        onClick={() => setStep(2)}
-                        className="flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                      >
-                        Siguiente <ChevronRight size={16} />
-                      </button>
+                {/* Buscador de receta */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    Receta <span className="text-loga-red">*</span>
+                  </label>
+                  {recetas.length > 0 ? (() => {
+                    const recetasTab = recetas.filter(r => (r.tipo_receta ?? 'fabricacion') === tabProd);
+                    const sel = recetasTab.find(r => r.id === form.receta_id);
+                    return (
+                      <SearchSelect
+                        options={recetasTab.map(r => ({ id: r.id, label: r.nombre, sub: r.producto_nombre }))}
+                        value={form.receta_id}
+                        onChange={(id) => setForm((f) => ({ ...f, receta_id: id }))}
+                        placeholder={`Buscar ${tabProd === 'envasado' ? 'envasado' : 'receta'}...`}
+                        selectedLabel={sel?.nombre}
+                        selectedSub={sel?.producto_nombre}
+                      />
+                    );
+                  })() : (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-400 text-center">
+                      No hay recetas activas. Crea una receta antes de fabricar.
                     </div>
-                  </motion.div>
-                )}
+                  )}
+                </div>
 
-                {/* Paso 2: Cantidad y fecha */}
-                {step === 2 && (
-                  <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-4">
-                    {(() => {
-                      const recetaSel = recetas.find((r) => r.id === form.receta_id);
-                      const unidad = recetaSel?.unidad_medida ?? 'kg';
-                      return (
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Cantidad a producir * <span className="font-normal text-gray-400">({unidad})</span>
-                          </label>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              min="0.001"
-                              step="0.001"
-                              value={form.cantidad_planificada}
-                              onChange={(e) => setForm((f) => ({ ...f, cantidad_planificada: e.target.value }))}
-                              placeholder="Ej: 500"
-                              className="flex-1 rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
-                            />
-                            <span className="text-sm font-medium text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">{unidad}</span>
-                          </div>
-                          {recetaSel && (
-                            <p className="mt-1 text-[11px] text-gray-400">
-                              Rendimiento receta: {parseFloat(recetaSel.rendimiento).toLocaleString('es-ES')} {unidad}/batch
-                            </p>
-                          )}
-                        </div>
-                      );
-                    })()}
-
+                {/* Cantidad */}
+                {form.receta_id && (() => {
+                  const recetaSel = recetas.find((r) => r.id === form.receta_id);
+                  const unidad = recetaSel?.unidad_medida ?? 'kg';
+                  return (
                     <div>
                       <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Fecha planificada (opcional)
+                        Cantidad a producir <span className="text-loga-red">*</span> <span className="font-normal text-gray-400">({unidad})</span>
                       </label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="0.001" step="0.001"
+                          value={form.cantidad_planificada}
+                          onChange={(e) => setForm((f) => ({ ...f, cantidad_planificada: e.target.value }))}
+                          placeholder="Ej: 500"
+                          className="flex-1 rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
+                          autoFocus
+                        />
+                        <span className="text-sm font-medium text-gray-500 bg-gray-100 rounded-lg px-3 py-2.5 whitespace-nowrap">{unidad}</span>
+                      </div>
+                      {recetaSel && (
+                        <p className="mt-1 text-[11px] text-gray-400">
+                          Rendimiento receta: {parseFloat(recetaSel.rendimiento).toLocaleString('es-ES')} {unidad}/batch
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Fila opcionales: fecha + cliente */}
+                {form.receta_id && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Fecha planificada <span className="font-normal text-gray-400">(opcional)</span></label>
                       <input
-                        type="date"
-                        value={form.fecha_planificada}
+                        type="date" value={form.fecha_planificada}
                         onChange={(e) => setForm((f) => ({ ...f, fecha_planificada: e.target.value }))}
-                        className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Cliente (opcional)
-                      </label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Cliente <span className="font-normal text-gray-400">(opcional)</span></label>
                       <select
                         value={clienteMode === 'select' ? (form.cliente_id || '') : '__otro__'}
                         onChange={(e) => {
                           const val = e.target.value;
-                          if (val === '__otro__') {
-                            setClienteMode('otro');
-                            setForm((f) => ({ ...f, cliente_id: '', cliente: '' }));
-                          } else if (val === '') {
-                            setClienteMode('select');
-                            setForm((f) => ({ ...f, cliente_id: '', cliente: '' }));
-                          } else {
+                          if (val === '__otro__') { setClienteMode('otro'); setForm((f) => ({ ...f, cliente_id: '', cliente: '' })); }
+                          else if (val === '') { setClienteMode('select'); setForm((f) => ({ ...f, cliente_id: '', cliente: '' })); }
+                          else {
                             setClienteMode('select');
                             const cli = clientesList.find((c) => c.id === val);
                             setForm((f) => ({ ...f, cliente_id: val, cliente: cli?.nombre ?? '' }));
                           }
                         }}
-                        className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
                       >
-                        <option value="">-- Sin cliente --</option>
+                        <option value="">— Sin cliente —</option>
                         {clientesList.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.nombre}{c.nif ? ` (${c.nif})` : ''}
-                          </option>
+                          <option key={c.id} value={c.id}>{c.nombre}{c.nif ? ` (${c.nif})` : ''}</option>
                         ))}
                         <option value="__otro__">Otro...</option>
                       </select>
                       {clienteMode === 'otro' && (
-                        <input
-                          type="text"
-                          value={form.cliente}
+                        <input type="text" value={form.cliente}
                           onChange={(e) => setForm((f) => ({ ...f, cliente: e.target.value }))}
                           placeholder="Nombre del cliente..."
-                          className="mt-2 w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
-                          autoFocus
+                          className="mt-2 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none"
                         />
                       )}
                     </div>
-                    <div className="flex justify-between">
-                      <button
-                        onClick={() => setStep(1)}
-                        className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 transition-colors"
-                      >
-                        <ChevronLeft size={16} /> Atrás
-                      </button>
-                      <button
-                        disabled={!form.cantidad_planificada || Number(form.cantidad_planificada) <= 0}
-                        onClick={() => setStep(3)}
-                        className="flex items-center gap-2 rounded-lg bg-gray-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                      >
-                        Siguiente <ChevronRight size={16} />
-                      </button>
-                    </div>
-                  </motion.div>
+                  </div>
                 )}
 
-                {/* Paso 3: Notas + confirmar */}
-                {step === 3 && (
-                  <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-4">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Notas (opcional)
-                      </label>
-                      <textarea
-                        rows={3}
-                        value={form.notas}
-                        onChange={(e) => setForm((f) => ({ ...f, notas: e.target.value }))}
-                        className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none resize-none"
-                        placeholder="Instrucciones especiales…"
-                      />
-                    </div>
-
-                    {/* Resumen */}
-                    <div className="rounded-xl bg-gray-50 border border-gray-100 p-4 text-xs space-y-1 text-gray-600">
-                      <p><span className="font-medium">Receta:</span> {recetas.find(r => r.id === form.receta_id)?.nombre}</p>
-                      <p><span className="font-medium">Cantidad:</span> {form.cantidad_planificada} {recetas.find((r) => r.id === form.receta_id)?.unidad_medida ?? 'kg'}</p>
-                      {form.fecha_planificada && <p><span className="font-medium">Fecha:</span> {form.fecha_planificada}</p>}
-                      {form.cliente && <p><span className="font-medium">Cliente:</span> {form.cliente}</p>}
-                    </div>
-
-                    <div className="flex justify-between">
-                      <button
-                        onClick={() => setStep(2)}
-                        className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 transition-colors"
-                      >
-                        <ChevronLeft size={16} /> Atrás
-                      </button>
-                      <button
-                        onClick={handleCrearOrden}
-                        className="flex items-center gap-2 rounded-lg bg-loga-red px-5 py-2.5 text-sm font-semibold text-white hover:bg-loga-red-dark transition-colors"
-                      >
-                        <Check size={16} /> Crear Orden
-                      </button>
-                    </div>
-                  </motion.div>
+                {/* Notas (opcional, abajo del todo) */}
+                {form.receta_id && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Notas <span className="font-normal text-gray-400">(opcional)</span></label>
+                    <textarea
+                      rows={2} value={form.notas}
+                      onChange={(e) => setForm((f) => ({ ...f, notas: e.target.value }))}
+                      placeholder="Instrucciones especiales..."
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-loga-red focus:ring-2 focus:ring-red-100 outline-none resize-none"
+                    />
+                  </div>
                 )}
               </div>
+
+              {/* Footer sticky */}
+              <div className="border-t border-gray-200 px-6 py-3 bg-white shrink-0 flex items-center gap-3">
+                <button onClick={() => setShowForm(false)}
+                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">
+                  Cancelar
+                </button>
+                {(() => {
+                  const puede = !!form.receta_id && !!form.cantidad_planificada && Number(form.cantidad_planificada) > 0;
+                  const recetaSel = recetas.find((r) => r.id === form.receta_id);
+                  return (
+                    <>
+                      <div className="flex-1 min-w-0 text-xs text-gray-500 truncate">
+                        {puede && recetaSel ? (
+                          <>Crear orden: <b className="text-gray-800">{recetaSel.nombre}</b> · {form.cantidad_planificada} {recetaSel.unidad_medida ?? 'kg'}</>
+                        ) : (
+                          <span className="text-amber-700">Falta: {!form.receta_id ? 'receta' : 'cantidad'}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={handleCrearOrden} disabled={!puede}
+                        className={clsx(
+                          'flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-semibold text-white transition-colors',
+                          puede ? 'bg-loga-red hover:bg-loga-red-dark' : 'bg-gray-300 cursor-not-allowed'
+                        )}>
+                        <Check size={15} /> Crear orden
+                      </button>
+                    </>
+                  );
+                })()}
+              </div>
+
             </motion.div>
           </div>
         )}
